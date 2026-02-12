@@ -2,7 +2,9 @@ use std::borrow::Cow;
 use std::env;
 use std::path::Path;
 
-use reedline::{Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
+use reedline::{Color, Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
+
+use crate::color::{cyan, red, white, yellow};
 
 /// ホームディレクトリのパスを `~` に短縮する。
 ///
@@ -62,11 +64,25 @@ impl Prompt for JarvisPrompt {
             .unwrap_or_else(|_| "?".to_string());
 
         let git_part = match current_git_branch() {
-            Some(branch) => format!(" on \u{e0a0} {branch}"),
+            Some(branch) => format!(
+                " {} {}",
+                white("on"),
+                cyan(&format!("\u{e0a0} {branch}"))
+            ),
             None => String::new(),
         };
 
-        Cow::Owned(format!("⚡jarvish in {cwd}{git_part}\n"))
+        Cow::Owned(format!(
+            "{} {} {}{git_part}\n",
+            // "{} {}{git_part}\n",
+            red("⚡jarvish"),
+            white("in"),
+            yellow(&cwd),
+        ))
+    }
+
+    fn get_prompt_color(&self) -> Color {
+        Color::White
     }
 
     fn render_prompt_right(&self) -> Cow<str> {

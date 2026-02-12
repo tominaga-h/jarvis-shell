@@ -484,6 +484,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "git2",
+ "nu-ansi-term",
  "os_pipe",
  "rand",
  "reedline",

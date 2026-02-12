@@ -17,6 +17,7 @@ anyhow = "1"
 git2 = "0.19"
 chrono = "0.4"
 rand = "0.9"
+nu-ansi-term = "0.50.3"
 
 [dev-dependencies]
 tempfile = "3"

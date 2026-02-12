@@ -1,12 +1,8 @@
 use chrono::Local;
 use rand::Rng;
 
-// ANSI カラーコード
-const RED: &str = "\x1b[91m";
-const GOLD: &str = "\x1b[33m";
-const CYAN: &str = "\x1b[36m";
-const BOLD: &str = "\x1b[1m";
-const RESET: &str = "\x1b[0m";
+use crate::color::{bold_red, cyan, yellow};
+use crate::jarvis::jarvis_talk;
 
 /// 時間帯に応じた挨拶を返す。
 ///  - 5〜11時:  "Good morning"
@@ -28,15 +24,13 @@ pub fn print_welcome() {
 
     println!();
     println!(
-        "  {BOLD}{RED}J.A.R.V.I.S.H.{RESET}  {GOLD}v{version}{RESET}"
+        "{}  {}",
+        bold_red("J.A.R.V.I.S.H."),
+        yellow(&format!("v{version}"))
     );
-    println!(
-        "  {CYAN}═══════════════════════════════════{RESET}"
-    );
+    println!("{}", cyan("═══════════════════════════════════"));
     println!();
-    println!(
-        "  {CYAN}{greeting}, sir. All systems are operational.{RESET}"
-    );
+    jarvis_talk(&format!("{greeting}, sir. All systems are operational."));
     println!();
 }
 
@@ -55,7 +49,7 @@ pub fn print_goodbye() {
     let idx = rand::rng().random_range(0..messages.len());
 
     println!();
-    println!("  {CYAN}[J.A.R.V.I.S.] {}{RESET}", messages[idx]);
+    jarvis_talk(messages[idx]);
     println!();
 }
 
