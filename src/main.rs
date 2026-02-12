@@ -3,11 +3,13 @@ mod color;
 mod engine;
 mod jarvis;
 mod prompt;
+mod storage;
 
 use engine::{execute, LoopAction};
 use prompt::JarvisPrompt;
 use reedline::{Highlighter, Reedline, Signal, StyledText};
 use nu_ansi_term::{Color, Style};
+use storage::BlackBox;
 
 /// ユーザー入力を白色でハイライトするシンプルなハイライター
 struct WhiteHighlighter;
@@ -26,6 +28,15 @@ async fn main() {
     let mut editor = Reedline::create().with_highlighter(Box::new(WhiteHighlighter));
     let prompt = JarvisPrompt::new();
 
+    // Black Box（履歴永続化）の初期化
+    let black_box = match BlackBox::open() {
+        Ok(bb) => Some(bb),
+        Err(e) => {
+            eprintln!("jarvish: warning: failed to initialize black box: {e}");
+            None
+        }
+    };
+
     banner::print_welcome();
 
     loop {
@@ -41,7 +52,11 @@ async fn main() {
 
                 match result.action {
                     LoopAction::Continue => {
-                        // Phase 2: ここで result を Black Box に永続化する
+                        if let Some(ref bb) = black_box {
+                            if let Err(e) = bb.record(&line, &result) {
+                                eprintln!("jarvish: warning: failed to record history: {e}");
+                            }
+                        }
                     }
                     LoopAction::Exit => break,
                 }
