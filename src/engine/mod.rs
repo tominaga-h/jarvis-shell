@@ -1,5 +1,6 @@
 pub mod builtin;
 pub mod exec;
+pub mod expand;
 
 /// REPL ループの制御アクション
 #[derive(Debug, Clone, PartialEq)]
@@ -76,8 +77,11 @@ pub fn execute(input: &str) -> CommandResult {
         return CommandResult::success(String::new());
     }
 
-    let cmd = &tokens[0];
-    let args: Vec<&str> = tokens[1..].iter().map(|s| s.as_str()).collect();
+    // 各トークンにシェル展開を適用
+    let expanded: Vec<String> = tokens.into_iter().map(|t| expand::expand_token(&t)).collect();
+
+    let cmd = &expanded[0];
+    let args: Vec<&str> = expanded[1..].iter().map(|s| s.as_str()).collect();
 
     // ビルトインコマンドを試行
     if let Some(result) = builtin::dispatch_builtin(cmd, &args) {
