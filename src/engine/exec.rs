@@ -3,6 +3,7 @@ use std::process::Command;
 use std::thread;
 
 use super::CommandResult;
+use crate::jarvis::jarvis_talk;
 
 /// 外部コマンドを実行し、stdout/stderr をリアルタイムで画面に表示しつつバッファにキャプチャする。
 ///
@@ -38,8 +39,13 @@ pub fn run_external(cmd: &str, args: &[&str]) -> CommandResult {
     {
         Ok(child) => child,
         Err(e) => {
-            let msg = format!("jarvish: {cmd}: {e}\n");
-            eprint!("{msg}");
+            let reason = match e.kind() {
+                io::ErrorKind::NotFound => "command not found".to_string(),
+                io::ErrorKind::PermissionDenied => "permission denied".to_string(),
+                _ => format!("{e}"),
+            };
+            let msg = format!("{cmd}: {reason}. Something wrong, sir?");
+            jarvis_talk(&msg);
             return CommandResult::error(msg, 127);
         }
     };

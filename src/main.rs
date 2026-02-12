@@ -37,6 +37,7 @@ async fn main() {
                 }
 
                 let result = execute(&line);
+                println!(); // 実行結果の後に空行を追加
 
                 match result.action {
                     LoopAction::Continue => {
