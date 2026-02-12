@@ -1,7 +1,7 @@
 use chrono::Local;
 use rand::Rng;
 
-use crate::color::{bold_red, cyan, yellow};
+use crate::color::{bold_red, cyan, white, yellow};
 use crate::jarvis::jarvis_talk;
 
 /// 時間帯に応じた挨拶を返す。
@@ -22,13 +22,30 @@ pub fn print_welcome() {
     let version = env!("CARGO_PKG_VERSION");
     let greeting = time_greeting();
 
-    println!();
-    println!(
-        "{}  {}",
+    let art_lines: &[&str] = &[
+        r#"   ___   ___   ______  _   _ _____  _____  _   _"#,
+        r#"  |_  | / _ \  | ___ \| | | |_   _|/  ___|| | | |"#,
+        r#"    | |/ /_\ \ | |_/ /| | | | | |  \ `--. | |_| |"#,
+        r#"    | ||  _  | |    / | | | | | |   `--. \|  _  |"#,
+        r#"/\__/ /| | | |_| |\ \ \ \_/ /_| |__/\__/ /| | | |_"#,
+        r#"\____(_)_| |_(_)_| \_(_)___(_)___(_)____(_)_| |_(_)"#,
+    ];
+
+    let separator = "===================================================";
+    let version_line = format!(
+        "     {}  ::  {} {}",
         bold_red("J.A.R.V.I.S.H."),
+        white("AI Native Shell"),
         yellow(&format!("v{version}"))
     );
-    println!("{}", cyan("═══════════════════════════════════"));
+
+    println!();
+    for line in art_lines {
+        println!("{}", white(line));
+    }
+    println!("{}", cyan(separator));
+    println!("{}", yellow(&version_line));
+    println!("{}", cyan(separator));
     println!();
     jarvis_talk(&format!("{greeting}, sir. All systems are operational."));
     println!();
