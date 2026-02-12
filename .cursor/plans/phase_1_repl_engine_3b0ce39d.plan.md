@@ -10,22 +10,22 @@ todos:
     status: completed
   - id: prompt
     content: Jarvis 風カスタムプロンプト実装（src/prompt.rs）
-    status: in_progress
+    status: completed
   - id: builtin
     content: ビルトインコマンド実装（cd, cwd, exit） - src/engine/builtin.rs
-    status: pending
+    status: completed
   - id: exec-tee
     content: 外部コマンド実行 + I/O Tee キャプチャ - src/engine/exec.rs
-    status: pending
+    status: completed
   - id: main-repl
     content: REPL メインループ統合 - src/main.rs
-    status: pending
+    status: completed
   - id: unit-tests
     content: 各モジュールにユニットテスト追加（builtin.rs, exec.rs, prompt.rs）
-    status: pending
+    status: completed
   - id: build-test
     content: ビルド確認と cargo test 実行
-    status: pending
+    status: completed
 isProject: false
 ---
 

@@ -1,0 +1,21 @@
+[package]
+name = "jarvish"
+version = "0.1.0"
+edition = "2021"
+description = "Next Generation AI Integrated Shell"
+
+[[bin]]
+name = "jarvish"
+path = "src/main.rs"
+
+[dependencies]
+reedline = "0.44"
+os_pipe = "1.2"
+tokio = { version = "1", features = ["full"] }
+shell-words = "1"
+anyhow = "1"
+git2 = "0.19"
+
+[dev-dependencies]
+tempfile = "3"
+serial_test = "3"

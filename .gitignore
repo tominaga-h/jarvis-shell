@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target/
+
+# Cargo.lock (uncomment if this is a library crate)
+# Cargo.lock
+
+# Debug symbols
+**/*.rs.bk
+*.pdb
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Backup files
+*.bak
+*.tmp
