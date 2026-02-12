@@ -66,7 +66,7 @@ impl Prompt for JarvisPrompt {
             None => String::new(),
         };
 
-        Cow::Owned(format!("⚡jarvish in {cwd}{git_part}"))
+        Cow::Owned(format!("⚡jarvish in {cwd}{git_part}\n"))
     }
 
     fn render_prompt_right(&self) -> Cow<str> {
@@ -74,7 +74,7 @@ impl Prompt for JarvisPrompt {
     }
 
     fn render_prompt_indicator(&self, _edit_mode: PromptEditMode) -> Cow<str> {
-        Cow::Borrowed("\n ❯ ")
+        Cow::Borrowed("❯ ")
     }
 
     fn render_prompt_multiline_indicator(&self) -> Cow<str> {

@@ -1,3 +1,4 @@
+mod banner;
 mod engine;
 mod prompt;
 
@@ -9,6 +10,8 @@ use reedline::{Reedline, Signal};
 async fn main() {
     let mut editor = Reedline::create();
     let prompt = JarvisPrompt::new();
+
+    banner::print_welcome();
 
     loop {
         match editor.read_line(&prompt) {
@@ -40,4 +43,6 @@ async fn main() {
             }
         }
     }
+
+    banner::print_goodbye();
 }

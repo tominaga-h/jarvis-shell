@@ -1,6 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 
+#[allow(unused_imports)]
 use super::{CommandResult, LoopAction};
 
 /// ビルトインコマンドを振り分ける。

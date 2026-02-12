@@ -14,6 +14,7 @@ pub enum LoopAction {
 /// コマンド実行の結果を格納する構造体。
 /// Phase 2 以降で stdout/stderr を Black Box に永続化する際に使用する。
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CommandResult {
     /// キャプチャされた標準出力
     pub stdout: String,
