@@ -1,3 +1,4 @@
+mod ai;
 mod banner;
 mod color;
 mod engine;
@@ -5,7 +6,8 @@ mod jarvis;
 mod prompt;
 mod storage;
 
-use engine::{execute, LoopAction};
+use ai::client::{AiResponse, JarvisAI};
+use engine::{execute, try_builtin, CommandResult, LoopAction};
 use prompt::JarvisPrompt;
 use reedline::{Highlighter, Reedline, Signal, StyledText};
 use nu_ansi_term::{Color, Style};
@@ -25,6 +27,9 @@ impl Highlighter for WhiteHighlighter {
 
 #[tokio::main]
 async fn main() {
+    // .env ファイルから環境変数を読み込む
+    dotenvy::dotenv().ok();
+
     let mut editor = Reedline::create().with_highlighter(Box::new(WhiteHighlighter));
     let prompt = JarvisPrompt::new();
 
@@ -34,6 +39,15 @@ async fn main() {
         Err(e) => {
             eprintln!("jarvish: warning: failed to initialize black box: {e}");
             None
+        }
+    };
+
+    // AI クライアントの初期化
+    let ai_client = match JarvisAI::new() {
+        Ok(ai) => Some(ai),
+        Err(e) => {
+            eprintln!("jarvish: warning: AI disabled: {e}");
+            None // API キー未設定時は AI 機能を無効化
         }
     };
 
@@ -47,18 +61,61 @@ async fn main() {
                     continue;
                 }
 
-                let result = execute(&line);
-                println!(); // 実行結果の後に空行を追加
+                // 1. ビルトインコマンドをチェック（cd, cwd, exit は AI を介さず直接実行）
+                if let Some(result) = try_builtin(&line) {
+                    println!(); // 実行結果の後に空行を追加
 
-                match result.action {
-                    LoopAction::Continue => {
-                        if let Some(ref bb) = black_box {
-                            if let Err(e) = bb.record(&line, &result) {
-                                eprintln!("jarvish: warning: failed to record history: {e}");
+                    match result.action {
+                        LoopAction::Continue => {
+                            if let Some(ref bb) = black_box {
+                                if let Err(e) = bb.record(&line, &result) {
+                                    eprintln!(
+                                        "jarvish: warning: failed to record history: {e}"
+                                    );
+                                }
                             }
                         }
+                        LoopAction::Exit => break,
                     }
-                    LoopAction::Exit => break,
+                    continue;
+                }
+
+                // 2. AI 処理（AI 無効時は従来の execute にフォールバック）
+                let result = if let Some(ref ai) = ai_client {
+                    // BlackBox から直近 5 件のコマンド履歴をコンテキストとして取得
+                    let context = black_box
+                        .as_ref()
+                        .and_then(|bb| bb.get_recent_context(5).ok())
+                        .unwrap_or_default();
+
+                    match ai.process_input(&line, &context).await {
+                        Ok(AiResponse::Command(cmd)) => {
+                            // AI がコマンドと判定 → 実行
+                            execute(&cmd)
+                        }
+                        Ok(AiResponse::NaturalLanguage(text)) => {
+                            // AI が自然言語と判定 → ストリーミング表示済み、結果を記録
+                            CommandResult::success(text)
+                        }
+                        Err(_e) => {
+                            // AI エラー時はコマンドとして直接実行にフォールバック
+                            execute(&line)
+                        }
+                    }
+                } else {
+                    // AI 無効時は従来通り実行
+                    execute(&line)
+                };
+
+                println!(); // 実行結果の後に空行を追加
+
+                // 履歴を記録
+                if result.action == LoopAction::Continue {
+                    if let Some(ref bb) = black_box {
+                        if let Err(e) = bb.record(&line, &result) {
+                            eprintln!("jarvish: warning: failed to record history: {e}");
+                        }
+                    }
                 }
             }
             Ok(Signal::CtrlC) => {

@@ -5,3 +5,18 @@ use crate::color::white;
 pub fn jarvis_talk(message: &str) {
     println!("🤵 {}", white(message));
 }
+
+/// ストリーミング開始時のプレフィックスを表示する（改行なし）。
+pub fn jarvis_print_prefix() {
+    print!("🤵 ");
+}
+
+/// ストリーミング中のテキスト片を表示する（改行なし）。
+pub fn jarvis_print_chunk(chunk: &str) {
+    print!("{}", white(chunk));
+}
+
+/// ストリーミング終了時の改行を出力する。
+pub fn jarvis_print_end() {
+    println!();
+}

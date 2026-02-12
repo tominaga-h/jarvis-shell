@@ -9,6 +9,19 @@ use std::path::PathBuf;
 use crate::engine::CommandResult;
 use blob::BlobStore;
 
+/// コマンド履歴エントリ。AI コンテキストとして使用する。
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct HistoryEntry {
+    pub id: i64,
+    pub command: String,
+    pub cwd: String,
+    pub exit_code: i32,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    pub created_at: String,
+}
+
 /// コマンド実行履歴とその出力を永続化する Black Box。
 /// SQLite でメタデータを管理し、BlobStore で stdout/stderr を保存する。
 pub struct BlackBox {
@@ -70,6 +83,101 @@ impl BlackBox {
             .context("failed to insert command history")?;
 
         Ok(())
+    }
+
+    /// 直近 N 件のコマンド履歴を取得し、AI に渡すコンテキスト文字列を生成する。
+    /// stdout/stderr は末尾 50 行に切り詰める。
+    pub fn get_recent_context(&self, limit: usize) -> Result<String> {
+        let entries = self.get_recent_entries(limit)?;
+        if entries.is_empty() {
+            return Ok(String::new());
+        }
+
+        let mut context = String::from("=== Recent Command History ===\n");
+        for entry in &entries {
+            context.push_str(&format!(
+                "\n[#{}] {} (exit: {}, cwd: {})\n",
+                entry.id, entry.command, entry.exit_code, entry.cwd
+            ));
+            if let Some(ref stdout) = entry.stdout {
+                let truncated = Self::truncate_lines(stdout, 50);
+                if !truncated.is_empty() {
+                    context.push_str(&format!("stdout:\n{}\n", truncated));
+                }
+            }
+            if let Some(ref stderr) = entry.stderr {
+                let truncated = Self::truncate_lines(stderr, 50);
+                if !truncated.is_empty() {
+                    context.push_str(&format!("stderr:\n{}\n", truncated));
+                }
+            }
+        }
+        Ok(context)
+    }
+
+    /// 直近 N 件のコマンド履歴エントリを取得する（新しい順）。
+    fn get_recent_entries(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, command, cwd, exit_code, stdout_hash, stderr_hash, created_at
+             FROM command_history
+             ORDER BY id DESC
+             LIMIT ?1",
+        )?;
+
+        let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i32>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            let (id, command, cwd, exit_code, stdout_hash, stderr_hash, created_at) = row?;
+
+            let stdout = stdout_hash
+                .as_deref()
+                .map(|h| self.blob_store.load(h))
+                .transpose()
+                .unwrap_or(None);
+            let stderr = stderr_hash
+                .as_deref()
+                .map(|h| self.blob_store.load(h))
+                .transpose()
+                .unwrap_or(None);
+
+            entries.push(HistoryEntry {
+                id,
+                command,
+                cwd,
+                exit_code,
+                stdout,
+                stderr,
+                created_at,
+            });
+        }
+
+        Ok(entries)
+    }
+
+    /// テキストを末尾 N 行に切り詰める。
+    fn truncate_lines(text: &str, max_lines: usize) -> String {
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.len() <= max_lines {
+            text.to_string()
+        } else {
+            let skip = lines.len() - max_lines;
+            format!(
+                "... ({} lines omitted) ...\n{}",
+                skip,
+                lines[skip..].join("\n")
+            )
+        }
     }
 
     /// データディレクトリのパスを返す。
@@ -198,6 +306,33 @@ mod tests {
 
         assert!(stdout_hash.is_none());
         assert!(stderr_hash.is_none());
+    }
+
+    #[test]
+    fn get_recent_context_returns_formatted_history() {
+        let tmp = TempDir::new().unwrap();
+        let bb = BlackBox::open_at(tmp.path().to_path_buf()).unwrap();
+
+        bb.record("echo hello", &make_result("hello\n", "", 0))
+            .unwrap();
+        bb.record("bad-cmd", &make_result("", "error: not found\n", 1))
+            .unwrap();
+
+        let ctx = bb.get_recent_context(5).unwrap();
+        // 直近の履歴が含まれていることを確認
+        assert!(ctx.contains("echo hello"));
+        assert!(ctx.contains("bad-cmd"));
+        assert!(ctx.contains("error: not found"));
+        assert!(ctx.contains("hello"));
+    }
+
+    #[test]
+    fn get_recent_context_empty_when_no_history() {
+        let tmp = TempDir::new().unwrap();
+        let bb = BlackBox::open_at(tmp.path().to_path_buf()).unwrap();
+
+        let ctx = bb.get_recent_context(5).unwrap();
+        assert!(ctx.is_empty());
     }
 
     #[test]
