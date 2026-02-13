@@ -6,6 +6,7 @@ mod storage;
 
 use ai::client::{AiResponse, JarvisAI};
 use cli::jarvis::jarvis_talk;
+use engine::classifier::{InputClassifier, InputType};
 use engine::{execute, try_builtin, CommandResult, LoopAction};
 use cli::prompt::JarvisPrompt;
 use reedline::{Highlighter, Reedline, Signal, StyledText};
@@ -63,6 +64,9 @@ async fn main() {
         }
     };
 
+    // 入力分類器の初期化（PATH キャッシュを構築）
+    let classifier = InputClassifier::new();
+
     cli::banner::print_welcome();
 
     loop {
@@ -104,52 +108,67 @@ async fn main() {
                     continue;
                 }
 
-                // 2. AI 処理（AI 無効時は従来の execute にフォールバック）
-                let result = if let Some(ref ai) = ai_client {
-                    debug!(ai_enabled = true, "Routing input through AI");
+                // 2. アルゴリズムで入力を分類（AI を呼ばず瞬時に判定）
+                let input_type = classifier.classify(&line);
+                debug!(input = %line, classification = ?input_type, "Input classified");
 
-                    // BlackBox から直近 5 件のコマンド履歴をコンテキストとして取得
-                    let context = black_box
-                        .as_ref()
-                        .and_then(|bb| bb.get_recent_context(5).ok())
-                        .unwrap_or_default();
+                let result = match input_type {
+                    InputType::Command => {
+                        // コマンド → AI を介さず直接実行
+                        debug!(input = %line, "Executing as command (no AI)");
+                        execute(&line)
+                    }
+                    InputType::NaturalLanguage => {
+                        // 自然言語 → AI に送信
+                        if let Some(ref ai) = ai_client {
+                            debug!(ai_enabled = true, "Routing natural language to AI");
 
-                    debug!(context_length = context.len(), "Context retrieved for AI");
+                            // BlackBox から直近 5 件のコマンド履歴をコンテキストとして取得
+                            let context = black_box
+                                .as_ref()
+                                .and_then(|bb| bb.get_recent_context(5).ok())
+                                .unwrap_or_default();
 
-                    match ai.process_input(&line, &context).await {
-                        Ok(AiResponse::Command(ref cmd)) => {
-                            debug!(
-                                ai_response = "Command",
-                                command = %cmd,
-                                "AI determined input is a command"
-                            );
-                            // AI がコマンドと判定 → 実行前にアナウンス
-                            jarvis_talk(&format!("Understood, sir. Proceeding to execute: {cmd}"));
-                            execute(cmd)
-                        }
-                        Ok(AiResponse::NaturalLanguage(ref text)) => {
-                            debug!(
-                                ai_response = "NaturalLanguage",
-                                response_length = text.len(),
-                                "AI responded with natural language"
-                            );
-                            // AI が自然言語と判定 → ストリーミング表示済み、結果を記録
-                            CommandResult::success(text.clone())
-                        }
-                        Err(e) => {
-                            warn!(
-                                error = %e,
-                                input = %line,
-                                "AI processing failed, falling back to direct execution"
-                            );
-                            // AI エラー時はコマンドとして直接実行にフォールバック
+                            debug!(context_length = context.len(), "Context retrieved for AI");
+
+                            match ai.process_input(&line, &context).await {
+                                Ok(AiResponse::Command(ref cmd)) => {
+                                    debug!(
+                                        ai_response = "Command",
+                                        command = %cmd,
+                                        "AI interpreted natural language as a command"
+                                    );
+                                    // AI が自然言語からコマンドを解釈 → 実行前にアナウンス
+                                    jarvis_talk(&format!(
+                                        "Understood, sir. Proceeding to execute: {cmd}"
+                                    ));
+                                    execute(cmd)
+                                }
+                                Ok(AiResponse::NaturalLanguage(ref text)) => {
+                                    debug!(
+                                        ai_response = "NaturalLanguage",
+                                        response_length = text.len(),
+                                        "AI responded with natural language"
+                                    );
+                                    // AI が自然言語で応答 → ストリーミング表示済み
+                                    CommandResult::success(text.clone())
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        error = %e,
+                                        input = %line,
+                                        "AI processing failed, falling back to direct execution"
+                                    );
+                                    // AI エラー時はコマンドとして直接実行にフォールバック
+                                    execute(&line)
+                                }
+                            }
+                        } else {
+                            debug!(ai_enabled = false, "AI disabled, executing directly");
+                            // AI 無効時は従来通り実行
                             execute(&line)
                         }
                     }
-                } else {
-                    debug!(ai_enabled = false, "AI disabled, executing directly");
-                    // AI 無効時は従来通り実行
-                    execute(&line)
                 };
 
                 println!(); // 実行結果の後に空行を追加

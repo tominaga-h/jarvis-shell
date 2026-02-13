@@ -1,4 +1,5 @@
 pub mod builtin;
+pub mod classifier;
 pub mod exec;
 pub mod expand;
 pub mod parser;
