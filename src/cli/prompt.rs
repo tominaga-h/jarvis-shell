@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::env;
 use std::path::Path;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 
 use reedline::{Color, Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
@@ -40,30 +40,52 @@ fn dirs_home() -> Option<std::path::PathBuf> {
 
 /// Jarvis Shell のカスタムプロンプト。
 ///
-/// 表示形式（成功時）:
+/// 表示形式（通常モード・成功時）:
 /// ```text
-/// ⚡jarvish in ~/dev/project on  main
-///  ❯
+/// ✔︎ jarvish in ~/dev/project on  main
+/// ❯
 /// ```
 ///
-/// 表示形式（異常終了時）:
+/// 表示形式（通常モード・異常終了時）:
 /// ```text
-/// ⚡jarvish in ~/dev/project on  main
-///  ✗ 1 ❯
+/// ✗ jarvish in ~/dev/project on  main
+/// ❯
+/// ```
+///
+/// 表示形式（Talking モード）:
+/// ```text
+/// jarvish is talking
+/// ❯
 /// ```
 pub struct JarvisPrompt {
     /// 直前コマンドの終了コード。メインループから共有される。
     last_exit_code: Arc<AtomicI32>,
+    /// Talking モード中かどうか。メインループから共有される。
+    is_talking: Arc<AtomicBool>,
 }
 
 impl JarvisPrompt {
-    pub fn new(last_exit_code: Arc<AtomicI32>) -> Self {
-        Self { last_exit_code }
+    pub fn new(last_exit_code: Arc<AtomicI32>, is_talking: Arc<AtomicBool>) -> Self {
+        Self {
+            last_exit_code,
+            is_talking,
+        }
     }
 }
 
 impl Prompt for JarvisPrompt {
     fn render_prompt_left(&self) -> Cow<str> {
+        // Talking モード: 2行プロンプト（1行目: jarvish is talking、2行目: ❯）
+        if self.is_talking.load(Ordering::Relaxed) {
+            return Cow::Owned(format!(
+                "💬 {} {} {} (cancel: ⌨️  Ctrl-C)\n",
+                cyan("jarvish"),
+                white("is"),
+                yellow("talking mode")
+            ));
+        }
+
+        // 通常モード: 2行のプロンプト
         let cwd = env::current_dir()
             .map(|p| shorten_path(&p))
             .unwrap_or_else(|_| "?".to_string());

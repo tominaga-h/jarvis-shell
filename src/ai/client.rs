@@ -35,6 +35,19 @@ pub enum AiResponse {
     NaturalLanguage(String),
 }
 
+/// 会話の状態を保持する構造体。Talking モードでの会話継続に使用。
+pub struct ConversationState {
+    messages: Vec<ChatCompletionRequestMessage>,
+}
+
+/// AI との会話結果。応答と会話コンテキスト（継続用）を含む。
+pub struct ConversationResult {
+    /// AI の応答
+    pub response: AiResponse,
+    /// 会話の状態（Talking モードでの会話継続に使用）
+    pub conversation: ConversationState,
+}
+
 const MODEL: &str = "gpt-4o";
 
 /// エージェントループの最大ラウンド数（無限ループ防止）
@@ -124,7 +137,8 @@ impl JarvisAI {
     /// ユーザー入力を AI に送信し、コマンドか自然言語かを判定する。
     /// エージェントループにより、複数ステップのツール呼び出し（read_file → write_file 等）を処理する。
     /// 自然言語の場合はストリーミングでターミナルに表示しつつ、全文を返す。
-    pub async fn process_input(&self, input: &str, context: &str) -> Result<AiResponse> {
+    /// 会話履歴も返却し、Talking モードでの会話継続に使用できる。
+    pub async fn process_input(&self, input: &str, context: &str) -> Result<ConversationResult> {
         debug!(
             user_input = %input,
             context_length = context.len(),
@@ -144,8 +158,6 @@ impl JarvisAI {
         );
         debug!(system_prompt = %system_content, "Full system prompt content");
 
-        let tools = Self::build_tools();
-
         // 会話履歴を構築（エージェントループで蓄積される）
         let mut messages: Vec<ChatCompletionRequestMessage> = vec![
             ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
@@ -158,7 +170,109 @@ impl JarvisAI {
             }),
         ];
 
-        // --- エージェントループ ---
+        let response = self.run_agent_loop(&mut messages).await?;
+        Ok(ConversationResult {
+            response,
+            conversation: ConversationState { messages },
+        })
+    }
+
+    /// コマンド異常終了時にエラーを調査する。
+    ///
+    /// 失敗したコマンドの情報（コマンド文字列、exit code、stdout、stderr）を
+    /// AI に送信し、原因の分析と修正案の提示を行う。
+    /// AI がコマンドを提案した場合は `AiResponse::Command` を返す。
+    /// 会話履歴も返却し、Talking モードでの会話継続に使用できる。
+    pub async fn investigate_error(
+        &self,
+        command: &str,
+        result: &CommandResult,
+        context: &str,
+    ) -> Result<ConversationResult> {
+        debug!(
+            command = %command,
+            exit_code = result.exit_code,
+            stdout_len = result.stdout.len(),
+            stderr_len = result.stderr.len(),
+            "investigate_error() called"
+        );
+
+        // エラー情報をユーザーメッセージとして構築
+        let mut error_details = format!(
+            "The following command failed:\n\
+             Command: {command}\n\
+             Exit code: {}\n",
+            result.exit_code
+        );
+        if !result.stdout.is_empty() {
+            error_details.push_str(&format!("\nstdout:\n{}\n", result.stdout));
+        }
+        if !result.stderr.is_empty() {
+            error_details.push_str(&format!("\nstderr:\n{}\n", result.stderr));
+        }
+        error_details.push_str("\nPlease investigate the error and suggest a fix.");
+
+        // システムプロンプトにコンテキスト（直近の履歴）を付加
+        let system_content = if context.is_empty() {
+            ERROR_INVESTIGATION_PROMPT.to_string()
+        } else {
+            format!("{ERROR_INVESTIGATION_PROMPT}\n\n{context}")
+        };
+
+        let mut messages: Vec<ChatCompletionRequestMessage> = vec![
+            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                content: ChatCompletionRequestSystemMessageContent::Text(system_content),
+                name: None,
+            }),
+            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text(error_details),
+                name: None,
+            }),
+        ];
+
+        let response = self.run_agent_loop(&mut messages).await?;
+        Ok(ConversationResult {
+            response,
+            conversation: ConversationState { messages },
+        })
+    }
+
+    /// Talking モードで会話を継続する。
+    ///
+    /// 既存の会話状態にユーザーの新しい入力を追加し、エージェントループを実行する。
+    /// 会話コンテキストが保持されるため、AI は前の会話を踏まえた応答を返す。
+    pub async fn continue_conversation(
+        &self,
+        state: &mut ConversationState,
+        input: &str,
+    ) -> Result<AiResponse> {
+        debug!(
+            user_input = %input,
+            messages_count = state.messages.len(),
+            "continue_conversation() called"
+        );
+
+        state.messages.push(ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text(input.to_string()),
+                name: None,
+            },
+        ));
+
+        self.run_agent_loop(&mut state.messages).await
+    }
+
+    /// エージェントループを実行する共通メソッド。
+    ///
+    /// 会話履歴（messages）に対して API リクエスト → ストリーム処理 → ツール実行を繰り返す。
+    /// 最終応答の NaturalLanguage テキストもアシスタントメッセージとして messages に追加する
+    /// （会話継続のため）。
+    async fn run_agent_loop(
+        &self,
+        messages: &mut Vec<ChatCompletionRequestMessage>,
+    ) -> Result<AiResponse> {
+        let tools = Self::build_tools();
+
         for round in 0..MAX_AGENT_ROUNDS {
             debug!(round = round, messages_count = messages.len(), "Agent loop round");
 
@@ -186,7 +300,6 @@ impl JarvisAI {
             if stream_result.tool_calls.is_empty() {
                 if stream_result.full_text.is_empty() {
                     warn!(
-                        user_input = %input,
                         round = round,
                         "AI returned empty response (no text, no tool calls)"
                     );
@@ -198,6 +311,26 @@ impl JarvisAI {
                         "AI response: natural language"
                     );
                 }
+
+                // 会話履歴にアシスタントの最終応答を追加（会話継続のため）
+                if !stream_result.full_text.is_empty() {
+                    messages.push(ChatCompletionRequestMessage::Assistant(
+                        ChatCompletionRequestAssistantMessage {
+                            content: Some(
+                                ChatCompletionRequestAssistantMessageContent::Text(
+                                    stream_result.full_text.clone(),
+                                ),
+                            ),
+                            refusal: None,
+                            name: None,
+                            audio: None,
+                            tool_calls: None,
+                            #[allow(deprecated)]
+                            function_call: None,
+                        },
+                    ));
+                }
+
                 return Ok(AiResponse::NaturalLanguage(stream_result.full_text));
             }
 
@@ -260,127 +393,6 @@ impl JarvisAI {
         warn!("Agent loop reached maximum rounds ({MAX_AGENT_ROUNDS})");
         Ok(AiResponse::NaturalLanguage(
             "I apologize, sir. I've reached the maximum number of processing steps.".to_string(),
-        ))
-    }
-
-    /// コマンド異常終了時にエラーを調査する。
-    ///
-    /// 失敗したコマンドの情報（コマンド文字列、exit code、stdout、stderr）を
-    /// AI に送信し、原因の分析と修正案の提示を行う。
-    /// AI がコマンドを提案した場合は `AiResponse::Command` を返す。
-    pub async fn investigate_error(
-        &self,
-        command: &str,
-        result: &CommandResult,
-        context: &str,
-    ) -> Result<AiResponse> {
-        debug!(
-            command = %command,
-            exit_code = result.exit_code,
-            stdout_len = result.stdout.len(),
-            stderr_len = result.stderr.len(),
-            "investigate_error() called"
-        );
-
-        // エラー情報をユーザーメッセージとして構築
-        let mut error_details = format!(
-            "The following command failed:\n\
-             Command: {command}\n\
-             Exit code: {}\n",
-            result.exit_code
-        );
-        if !result.stdout.is_empty() {
-            error_details.push_str(&format!("\nstdout:\n{}\n", result.stdout));
-        }
-        if !result.stderr.is_empty() {
-            error_details.push_str(&format!("\nstderr:\n{}\n", result.stderr));
-        }
-        error_details.push_str("\nPlease investigate the error and suggest a fix.");
-
-        // システムプロンプトにコンテキスト（直近の履歴）を付加
-        let system_content = if context.is_empty() {
-            ERROR_INVESTIGATION_PROMPT.to_string()
-        } else {
-            format!("{ERROR_INVESTIGATION_PROMPT}\n\n{context}")
-        };
-
-        let tools = Self::build_tools();
-
-        let mut messages: Vec<ChatCompletionRequestMessage> = vec![
-            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                content: ChatCompletionRequestSystemMessageContent::Text(system_content),
-                name: None,
-            }),
-            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(error_details),
-                name: None,
-            }),
-        ];
-
-        // --- エージェントループ（process_input と同構造） ---
-        for round in 0..MAX_AGENT_ROUNDS {
-            debug!(round = round, messages_count = messages.len(), "Error investigation agent loop round");
-
-            let request = CreateChatCompletionRequest {
-                model: MODEL.to_string(),
-                messages: messages.clone(),
-                tools: Some(tools.clone()),
-                stream: Some(true),
-                ..Default::default()
-            };
-
-            let stream_result = self.process_stream(request, round == 0).await?;
-
-            // Tool Call がなければ最終応答として返す
-            if stream_result.tool_calls.is_empty() {
-                return Ok(AiResponse::NaturalLanguage(stream_result.full_text));
-            }
-
-            // execute_shell_command があればコマンドとして返す
-            if let Some(cmd) = Self::extract_shell_command(&stream_result.tool_calls) {
-                info!(
-                    response_type = "Command",
-                    command = %cmd,
-                    round = round,
-                    "Error investigation: AI suggests fix command"
-                );
-                return Ok(AiResponse::Command(cmd));
-            }
-
-            // ファイル操作ツールを処理
-            let assistant_tool_calls = Self::build_assistant_tool_calls(&stream_result.tool_calls);
-            messages.push(ChatCompletionRequestMessage::Assistant(
-                ChatCompletionRequestAssistantMessage {
-                    content: if stream_result.full_text.is_empty() {
-                        None
-                    } else {
-                        Some(ChatCompletionRequestAssistantMessageContent::Text(
-                            stream_result.full_text,
-                        ))
-                    },
-                    refusal: None,
-                    name: None,
-                    audio: None,
-                    tool_calls: Some(assistant_tool_calls),
-                    #[allow(deprecated)]
-                    function_call: None,
-                },
-            ));
-
-            for tc in &stream_result.tool_calls {
-                let tool_result = self.execute_tool(&tc.function_name, &tc.arguments).await;
-                messages.push(ChatCompletionRequestMessage::Tool(
-                    ChatCompletionRequestToolMessage {
-                        content: ChatCompletionRequestToolMessageContent::Text(tool_result),
-                        tool_call_id: tc.id.clone(),
-                    },
-                ));
-            }
-        }
-
-        warn!("Error investigation agent loop reached maximum rounds ({MAX_AGENT_ROUNDS})");
-        Ok(AiResponse::NaturalLanguage(
-            "I apologize, sir. I've reached the maximum number of processing steps for the investigation.".to_string(),
         ))
     }
 

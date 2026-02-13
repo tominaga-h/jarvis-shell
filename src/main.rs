@@ -4,10 +4,10 @@ mod engine;
 mod logging;
 mod storage;
 
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 
-use ai::client::{AiResponse, JarvisAI};
+use ai::client::{AiResponse, ConversationState, JarvisAI};
 use cli::completer::JarvishCompleter;
 use cli::highlighter::JarvisHighlighter;
 use cli::jarvis::{jarvis_ask_investigate, jarvis_command_notice};
@@ -52,7 +52,12 @@ async fn main() {
 
     // 直前コマンドの終了コードを共有するアトミック変数
     let last_exit_code = Arc::new(AtomicI32::new(0));
-    let prompt = JarvisPrompt::new(Arc::clone(&last_exit_code));
+
+    // Talking モード（AI との会話継続中）のフラグ
+    let is_talking = Arc::new(AtomicBool::new(false));
+    let mut conversation_state: Option<ConversationState> = None;
+
+    let prompt = JarvisPrompt::new(Arc::clone(&last_exit_code), Arc::clone(&is_talking));
 
     // Black Box（履歴永続化）の初期化
     let black_box = match BlackBox::open() {
@@ -92,6 +97,69 @@ async fn main() {
                 info!("\n\n==== USER INPUT RECEIVED, START PROCESS ====");
 
                 let line = line.trim().to_string();
+
+                // === Talking モード ===
+                // AI との会話継続中は、入力を直接 AI に送信する（分類器は通さない）。
+                // 空行で Talking モードを終了する。
+                if is_talking.load(Ordering::Relaxed) {
+                    if line.is_empty() {
+                        // 空行 → Talking モード終了
+                        is_talking.store(false, Ordering::Relaxed);
+                        conversation_state = None;
+                        info!("Talking mode ended (empty input)");
+                        continue;
+                    }
+
+                    debug!(input = %line, "Talking mode: continuing conversation");
+
+                    if let (Some(ref ai), Some(ref mut conv)) =
+                        (&ai_client, &mut conversation_state)
+                    {
+                        match ai.continue_conversation(conv, &line).await {
+                            Ok(AiResponse::Command(ref cmd)) => {
+                                // AI がコマンドを提案 → 実行して Talking モード終了
+                                jarvis_command_notice(cmd);
+                                let cmd_result = execute(cmd);
+                                last_exit_code
+                                    .store(cmd_result.exit_code, Ordering::Relaxed);
+                                println!();
+
+                                // 履歴記録
+                                if cmd_result.action == LoopAction::Continue {
+                                    if let Some(ref bb) = black_box {
+                                        if let Err(e) = bb.record(cmd, &cmd_result) {
+                                            warn!(
+                                                "Failed to record talking command history: {e}"
+                                            );
+                                        }
+                                    }
+                                }
+
+                                // Talking モード終了
+                                is_talking.store(false, Ordering::Relaxed);
+                                conversation_state = None;
+                            }
+                            Ok(AiResponse::NaturalLanguage(_)) => {
+                                // AI が自然言語で応答 → Talking モード継続
+                                println!();
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Conversation continuation failed");
+                                is_talking.store(false, Ordering::Relaxed);
+                                conversation_state = None;
+                            }
+                        }
+                    } else {
+                        // AI が無効 or conversation_state が不正 → Talking モード終了
+                        is_talking.store(false, Ordering::Relaxed);
+                        conversation_state = None;
+                    }
+
+                    info!("\n==== FINISHED PROCESS ====\n\n");
+                    continue;
+                }
+
+                // === 通常モード ===
                 if line.is_empty() {
                     continue;
                 }
@@ -156,36 +224,44 @@ async fn main() {
                             debug!(context_length = context.len(), "Context retrieved for AI");
 
                             match ai.process_input(&line, &context).await {
-                                Ok(AiResponse::Command(ref cmd)) => {
-                                    debug!(
-                                        ai_response = "Command",
-                                        command = %cmd,
-                                        "AI interpreted natural language as a command"
-                                    );
-                                    from_tool_call = true;
-                                    // AI が自然言語からコマンドを解釈 → 実行前にアナウンス
-                                    jarvis_command_notice(cmd);
-                                    let mut result = execute(cmd);
-                                    // AI が実行したコマンドをコンテキストとして stdout に記録
-                                    // 次回の AI 呼び出しで何が実行されたか把握できるようにする
-                                    if result.stdout.is_empty() {
-                                        result.stdout =
-                                            format!("[Jarvis executed: {cmd}]");
-                                    } else {
-                                        result.stdout =
-                                            format!("[Jarvis executed: {cmd}]\n{}", result.stdout);
+                                Ok(conv_result) => match conv_result.response {
+                                    AiResponse::Command(ref cmd) => {
+                                        debug!(
+                                            ai_response = "Command",
+                                            command = %cmd,
+                                            "AI interpreted natural language as a command"
+                                        );
+                                        from_tool_call = true;
+                                        // AI が自然言語からコマンドを解釈 → 実行前にアナウンス
+                                        jarvis_command_notice(cmd);
+                                        let mut result = execute(cmd);
+                                        // AI が実行したコマンドをコンテキストとして stdout に記録
+                                        // 次回の AI 呼び出しで何が実行されたか把握できるようにする
+                                        if result.stdout.is_empty() {
+                                            result.stdout =
+                                                format!("[Jarvis executed: {cmd}]");
+                                        } else {
+                                            result.stdout = format!(
+                                                "[Jarvis executed: {cmd}]\n{}",
+                                                result.stdout
+                                            );
+                                        }
+                                        result
                                     }
-                                    result
-                                }
-                                Ok(AiResponse::NaturalLanguage(ref text)) => {
-                                    debug!(
-                                        ai_response = "NaturalLanguage",
-                                        response_length = text.len(),
-                                        "AI responded with natural language"
-                                    );
-                                    // AI が自然言語で応答 → ストリーミング表示済み
-                                    CommandResult::success(text.clone())
-                                }
+                                    AiResponse::NaturalLanguage(ref text) => {
+                                        debug!(
+                                            ai_response = "NaturalLanguage",
+                                            response_length = text.len(),
+                                            "AI responded with natural language"
+                                        );
+                                        // Talking モードに入る
+                                        is_talking.store(true, Ordering::Relaxed);
+                                        conversation_state =
+                                            Some(conv_result.conversation);
+                                        // AI が自然言語で応答 → ストリーミング表示済み
+                                        CommandResult::success(text.clone())
+                                    }
+                                },
                                 Err(e) => {
                                     warn!(
                                         error = %e,
@@ -240,26 +316,37 @@ async fn main() {
                                 .unwrap_or_default();
 
                             match ai.investigate_error(&line, &result, &context).await {
-                                Ok(AiResponse::Command(ref fix_cmd)) => {
-                                    // AI が修正コマンドを提案 → 実行
-                                    jarvis_command_notice(fix_cmd);
-                                    let fix_result = execute(fix_cmd);
-                                    last_exit_code.store(fix_result.exit_code, Ordering::Relaxed);
-                                    println!();
+                                Ok(conv_result) => match conv_result.response {
+                                    AiResponse::Command(ref fix_cmd) => {
+                                        // AI が修正コマンドを提案 → 実行
+                                        jarvis_command_notice(fix_cmd);
+                                        let fix_result = execute(fix_cmd);
+                                        last_exit_code
+                                            .store(fix_result.exit_code, Ordering::Relaxed);
+                                        println!();
 
-                                    // 修正コマンドの結果も履歴に記録
-                                    if fix_result.action == LoopAction::Continue {
-                                        if let Some(ref bb) = black_box {
-                                            if let Err(e) = bb.record(fix_cmd, &fix_result) {
-                                                warn!("Failed to record fix command history: {e}");
+                                        // 修正コマンドの結果も履歴に記録
+                                        if fix_result.action == LoopAction::Continue {
+                                            if let Some(ref bb) = black_box {
+                                                if let Err(e) =
+                                                    bb.record(fix_cmd, &fix_result)
+                                                {
+                                                    warn!(
+                                                        "Failed to record fix command history: {e}"
+                                                    );
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                Ok(AiResponse::NaturalLanguage(_)) => {
-                                    // AI が自然言語で説明 → ストリーミング表示済み
-                                    println!();
-                                }
+                                    AiResponse::NaturalLanguage(_) => {
+                                        // Talking モードに入る
+                                        is_talking.store(true, Ordering::Relaxed);
+                                        conversation_state =
+                                            Some(conv_result.conversation);
+                                        // AI が自然言語で説明 → ストリーミング表示済み
+                                        println!();
+                                    }
+                                },
                                 Err(e) => {
                                     warn!(error = %e, "Error investigation failed");
                                 }
@@ -271,6 +358,12 @@ async fn main() {
                 info!("\n==== FINISHED PROCESS ====\n\n");
             }
             Ok(Signal::CtrlC) => {
+                // Talking モード中なら終了
+                if is_talking.load(Ordering::Relaxed) {
+                    is_talking.store(false, Ordering::Relaxed);
+                    conversation_state = None;
+                    info!("Talking mode ended (Ctrl-C)");
+                }
                 // 現在の行をクリアして続行
             }
             Ok(Signal::CtrlD) => {
