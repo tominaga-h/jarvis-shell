@@ -6,6 +6,7 @@
 use std::io::{self, Write};
 
 use anyhow::{Context, Result};
+use tracing::{debug, info, warn};
 use async_openai::{
     config::OpenAIConfig,
     types::{
@@ -70,11 +71,24 @@ impl JarvisAI {
     /// ユーザー入力を AI に送信し、コマンドか自然言語かを判定する。
     /// 自然言語の場合はストリーミングでターミナルに表示しつつ、全文を返す。
     pub async fn process_input(&self, input: &str, context: &str) -> Result<AiResponse> {
+        debug!(
+            user_input = %input,
+            context_length = context.len(),
+            context_empty = context.is_empty(),
+            "process_input() called"
+        );
+
         let system_content = if context.is_empty() {
             SYSTEM_PROMPT.to_string()
         } else {
             format!("{SYSTEM_PROMPT}\n\n{context}")
         };
+
+        debug!(
+            system_prompt_length = system_content.len(),
+            "System prompt assembled"
+        );
+        debug!(system_prompt = %system_content, "Full system prompt content");
 
         let messages = vec![
             ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
@@ -97,6 +111,14 @@ impl JarvisAI {
             ..Default::default()
         };
 
+        debug!(
+            model = MODEL,
+            message_count = 2,
+            tools_count = 1,
+            stream = true,
+            "Sending API request to OpenAI"
+        );
+
         let mut stream = self
             .client
             .chat()
@@ -104,16 +126,26 @@ impl JarvisAI {
             .await
             .context("Failed to create chat stream")?;
 
+        debug!("Stream created successfully, starting to process chunks");
+
         // ストリーミング処理: テキスト応答と Tool Call を分離して処理
         let mut full_text = String::new();
         let mut tool_calls: Vec<ToolCallAccumulator> = Vec::new();
         let mut started_text = false;
+        let mut chunk_count: u32 = 0;
 
         while let Some(result) = stream.next().await {
+            chunk_count += 1;
             let response = match result {
                 Ok(r) => r,
                 Err(e) => {
                     // ストリームエラーは警告を出して中断
+                    warn!(
+                        error = %e,
+                        chunks_received = chunk_count,
+                        text_so_far_len = full_text.len(),
+                        "Stream error occurred"
+                    );
                     if started_text {
                         jarvis_print_end();
                     }
@@ -126,6 +158,12 @@ impl JarvisAI {
 
                 // テキスト応答の処理
                 if let Some(ref content) = delta.content {
+                    debug!(
+                        chunk = chunk_count,
+                        content_length = content.len(),
+                        has_content = true,
+                        "Received text chunk"
+                    );
                     if !started_text {
                         jarvis_print_prefix();
                         started_text = true;
@@ -137,9 +175,23 @@ impl JarvisAI {
 
                 // Tool Call の処理
                 if let Some(ref tc_chunks) = delta.tool_calls {
+                    debug!(
+                        chunk = chunk_count,
+                        tool_call_chunks = tc_chunks.len(),
+                        "Received tool call chunk"
+                    );
                     for chunk in tc_chunks {
                         Self::accumulate_tool_call(&mut tool_calls, chunk);
                     }
+                }
+
+                // content も tool_calls もない場合のログ
+                if delta.content.is_none() && delta.tool_calls.is_none() {
+                    debug!(
+                        chunk = chunk_count,
+                        role = ?delta.role,
+                        "Received chunk with no content and no tool_calls"
+                    );
                 }
             }
         }
@@ -148,12 +200,40 @@ impl JarvisAI {
             jarvis_print_end();
         }
 
+        debug!(
+            total_chunks = chunk_count,
+            full_text_length = full_text.len(),
+            tool_calls_count = tool_calls.len(),
+            started_text = started_text,
+            "Stream processing completed"
+        );
+
         // Tool Call があればコマンドとして返す
         if let Some(cmd) = Self::extract_command(&tool_calls) {
+            info!(
+                response_type = "Command",
+                command = %cmd,
+                "AI response: execute command"
+            );
             return Ok(AiResponse::Command(cmd));
         }
 
         // テキスト応答を返す
+        if full_text.is_empty() {
+            warn!(
+                user_input = %input,
+                total_chunks = chunk_count,
+                tool_calls_count = tool_calls.len(),
+                "AI returned empty response (no text, no tool calls) — this may be the cause of TODO #5"
+            );
+        } else {
+            info!(
+                response_type = "NaturalLanguage",
+                response_length = full_text.len(),
+                "AI response: natural language"
+            );
+        }
+
         Ok(AiResponse::NaturalLanguage(full_text))
     }
 
@@ -212,11 +292,28 @@ impl JarvisAI {
     /// 蓄積した Tool Call からコマンド文字列を抽出する
     fn extract_command(tool_calls: &[ToolCallAccumulator]) -> Option<String> {
         for tc in tool_calls {
+            debug!(
+                function_name = %tc.function_name,
+                arguments = %tc.arguments,
+                id = %tc.id,
+                "Processing tool call"
+            );
             if tc.function_name == "execute_shell_command" {
                 // arguments は JSON 文字列: {"command": "ls -la"}
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&tc.arguments) {
-                    if let Some(cmd) = parsed.get("command").and_then(|v| v.as_str()) {
-                        return Some(cmd.to_string());
+                match serde_json::from_str::<serde_json::Value>(&tc.arguments) {
+                    Ok(parsed) => {
+                        if let Some(cmd) = parsed.get("command").and_then(|v| v.as_str()) {
+                            debug!(extracted_command = %cmd, "Successfully extracted command from tool call");
+                            return Some(cmd.to_string());
+                        }
+                        warn!(parsed = %parsed, "Tool call JSON parsed but 'command' field not found");
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            raw_arguments = %tc.arguments,
+                            "Failed to parse tool call arguments as JSON"
+                        );
                     }
                 }
             }

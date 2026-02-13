@@ -2,6 +2,8 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::process::Command;
 use std::thread;
 
+use tracing::debug;
+
 use super::CommandResult;
 use crate::cli::jarvis::jarvis_talk;
 
@@ -10,6 +12,8 @@ use crate::cli::jarvis::jarvis_talk;
 /// os_pipe を使用して子プロセスの出力をパイプ経由で取得し、
 /// 別スレッドで「ターミナルに表示」+「バッファに蓄積」を同時に行う（tee パターン）。
 pub fn run_external(cmd: &str, args: &[&str]) -> CommandResult {
+    debug!(command = %cmd, args = ?args, "Spawning external command");
+
     // stdout 用パイプ
     let (stdout_read, stdout_write) = match os_pipe::pipe() {
         Ok(pair) => pair,
@@ -111,6 +115,14 @@ pub fn run_external(cmd: &str, args: &[&str]) -> CommandResult {
     // tee スレッドの完了を待ち、バッファを回収
     let stdout_bytes = stdout_handle.join().unwrap_or_default();
     let stderr_bytes = stderr_handle.join().unwrap_or_default();
+
+    debug!(
+        command = %cmd,
+        exit_code = exit_code,
+        stdout_size = stdout_bytes.len(),
+        stderr_size = stderr_bytes.len(),
+        "External command completed"
+    );
 
     CommandResult {
         stdout: String::from_utf8_lossy(&stdout_bytes).to_string(),

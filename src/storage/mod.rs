@@ -5,6 +5,7 @@ use chrono::Utc;
 use directories::ProjectDirs;
 use rusqlite::Connection;
 use std::path::PathBuf;
+use tracing::debug;
 
 use crate::engine::CommandResult;
 use blob::BlobStore;
@@ -59,6 +60,14 @@ impl BlackBox {
     /// コマンド実行結果を記録する。
     /// stdout/stderr が空でなければ Blob として保存し、メタデータを DB に INSERT する。
     pub fn record(&self, command: &str, result: &CommandResult) -> Result<()> {
+        debug!(
+            command = %command,
+            exit_code = result.exit_code,
+            stdout_len = result.stdout.len(),
+            stderr_len = result.stderr.len(),
+            "Recording command result to BlackBox"
+        );
+
         let stdout_hash = self.blob_store.store(&result.stdout)?;
         let stderr_hash = self.blob_store.store(&result.stderr)?;
 
@@ -89,6 +98,11 @@ impl BlackBox {
     /// stdout/stderr は末尾 50 行に切り詰める。
     pub fn get_recent_context(&self, limit: usize) -> Result<String> {
         let entries = self.get_recent_entries(limit)?;
+        debug!(
+            requested = limit,
+            retrieved = entries.len(),
+            "get_recent_context()"
+        );
         if entries.is_empty() {
             return Ok(String::new());
         }

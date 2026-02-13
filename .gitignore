@@ -21,3 +21,7 @@
 *.tmp
 
 .env
+
+# Log files
+var/logs/*
+!var/logs/.gitkeep

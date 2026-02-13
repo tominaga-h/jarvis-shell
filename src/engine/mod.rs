@@ -2,6 +2,8 @@ pub mod builtin;
 pub mod exec;
 pub mod expand;
 
+use tracing::debug;
+
 /// REPL ループの制御アクション
 #[derive(Debug, Clone, PartialEq)]
 pub enum LoopAction {
@@ -83,7 +85,13 @@ pub fn try_builtin(input: &str) -> Option<CommandResult> {
     let cmd = &expanded[0];
     let args: Vec<&str> = expanded[1..].iter().map(|s| s.as_str()).collect();
 
-    builtin::dispatch_builtin(cmd, &args)
+    let result = builtin::dispatch_builtin(cmd, &args);
+    debug!(
+        command = %cmd,
+        is_builtin = result.is_some(),
+        "try_builtin check"
+    );
+    result
 }
 
 /// ユーザー入力をパースし、ビルトインまたは外部コマンドとして実行する。
@@ -112,11 +120,15 @@ pub fn execute(input: &str) -> CommandResult {
     let cmd = &expanded[0];
     let args: Vec<&str> = expanded[1..].iter().map(|s| s.as_str()).collect();
 
+    debug!(command = %cmd, args = ?args, "execute() called with expanded tokens");
+
     // ビルトインコマンドを試行
     if let Some(result) = builtin::dispatch_builtin(cmd, &args) {
+        debug!(command = %cmd, "Dispatched as builtin command");
         return result;
     }
 
     // 外部コマンドを実行
+    debug!(command = %cmd, args = ?args, "Dispatching as external command");
     exec::run_external(cmd, &args)
 }
