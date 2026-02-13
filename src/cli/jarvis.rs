@@ -1,9 +1,26 @@
+use std::time::Duration;
+
+use indicatif::{ProgressBar, ProgressStyle};
+
 use super::color::white;
 
 /// Jarvis が発話するときに使う共通関数。
 /// 先頭に 🤵 絵文字を付与し、白色テキストで表示する。
 pub fn jarvis_talk(message: &str) {
     println!("🤵 {}", white(message));
+}
+
+/// AI 処理中に表示するスピナーを生成・開始する。
+/// メッセージなしのシンプルなスピナーを表示する。
+pub fn jarvis_spinner() -> ProgressBar {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("🤵 {spinner}")
+            .expect("Invalid spinner template"),
+    );
+    spinner.enable_steady_tick(Duration::from_millis(80));
+    spinner
 }
 
 /// ストリーミング開始時のプレフィックスを表示する（改行なし）。

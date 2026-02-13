@@ -19,7 +19,7 @@ use async_openai::{
 };
 use futures_util::StreamExt;
 
-use crate::cli::jarvis::{jarvis_print_chunk, jarvis_print_end, jarvis_print_prefix};
+use crate::cli::jarvis::{jarvis_print_chunk, jarvis_print_end, jarvis_print_prefix, jarvis_spinner};
 
 /// AI の判定結果
 #[derive(Debug, Clone)]
@@ -119,12 +119,24 @@ impl JarvisAI {
             "Sending API request to OpenAI"
         );
 
-        let mut stream = self
+        // ローディングスピナーを開始
+        let spinner = jarvis_spinner();
+
+        // スピナー表示確認用に3秒スリープ
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let mut stream = match self
             .client
             .chat()
             .create_stream(request)
             .await
-            .context("Failed to create chat stream")?;
+        {
+            Ok(s) => s,
+            Err(e) => {
+                spinner.finish_and_clear();
+                return Err(anyhow::anyhow!(e).context("Failed to create chat stream"));
+            }
+        };
 
         debug!("Stream created successfully, starting to process chunks");
 
@@ -132,6 +144,7 @@ impl JarvisAI {
         let mut full_text = String::new();
         let mut tool_calls: Vec<ToolCallAccumulator> = Vec::new();
         let mut started_text = false;
+        let mut spinner_cleared = false;
         let mut chunk_count: u32 = 0;
 
         while let Some(result) = stream.next().await {
@@ -146,6 +159,9 @@ impl JarvisAI {
                         text_so_far_len = full_text.len(),
                         "Stream error occurred"
                     );
+                    if !spinner_cleared {
+                        spinner.finish_and_clear();
+                    }
                     if started_text {
                         jarvis_print_end();
                     }
@@ -165,6 +181,10 @@ impl JarvisAI {
                         "Received text chunk"
                     );
                     if !started_text {
+                        if !spinner_cleared {
+                            spinner.finish_and_clear();
+                            spinner_cleared = true;
+                        }
                         jarvis_print_prefix();
                         started_text = true;
                     }
@@ -175,6 +195,10 @@ impl JarvisAI {
 
                 // Tool Call の処理
                 if let Some(ref tc_chunks) = delta.tool_calls {
+                    if !spinner_cleared {
+                        spinner.finish_and_clear();
+                        spinner_cleared = true;
+                    }
                     debug!(
                         chunk = chunk_count,
                         tool_call_chunks = tc_chunks.len(),
@@ -194,6 +218,11 @@ impl JarvisAI {
                     );
                 }
             }
+        }
+
+        // ストリーム完了: スピナーがまだ残っていればクリア
+        if !spinner_cleared {
+            spinner.finish_and_clear();
         }
 
         if started_text {
