@@ -114,7 +114,7 @@ fn style_word(styled: &mut StyledText, word: &str, is_command: &mut bool) {
         Style::new().fg(Color::DarkGray)
     } else {
         // 通常の引数: White
-        Style::new().fg(Color::White)
+        Style::new().fg(Color::LightGray) // whiteだと薄いグレーになる
     };
 
     styled.push((style, word.to_string()));
