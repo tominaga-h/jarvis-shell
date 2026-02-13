@@ -10,6 +10,11 @@ pub fn jarvis_talk(message: &str) {
     println!("🤵 {}", white(message));
 }
 
+/// Jarvis が Tool Call を受信してコマンドを実行するときに使う共通関数。
+pub fn jarvis_command_notice(command: &str) {
+    println!("\n👉 {command}\n");
+}
+
 /// AI 処理中に表示するスピナーを生成・開始する。
 /// メッセージなしのシンプルなスピナーを表示する。
 pub fn jarvis_spinner() -> ProgressBar {

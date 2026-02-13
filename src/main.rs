@@ -6,7 +6,7 @@ mod storage;
 
 use ai::client::{AiResponse, JarvisAI};
 use cli::completer::JarvishCompleter;
-use cli::jarvis::jarvis_talk;
+use cli::jarvis::jarvis_command_notice;
 use cli::prompt::JarvisPrompt;
 use engine::classifier::{InputClassifier, InputType};
 use engine::{execute, try_builtin, CommandResult, LoopAction};
@@ -164,9 +164,7 @@ async fn main() {
                                         "AI interpreted natural language as a command"
                                     );
                                     // AI が自然言語からコマンドを解釈 → 実行前にアナウンス
-                                    jarvis_talk(&format!(
-                                        "Understood, sir. Proceeding to execute: {cmd}"
-                                    ));
+                                    jarvis_command_notice(cmd);
                                     execute(cmd)
                                 }
                                 Ok(AiResponse::NaturalLanguage(ref text)) => {
