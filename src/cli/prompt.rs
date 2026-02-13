@@ -42,19 +42,19 @@ fn dirs_home() -> Option<std::path::PathBuf> {
 ///
 /// 表示形式（通常モード・成功時）:
 /// ```text
-/// ✔︎ jarvish in ~/dev/project on  main
+/// ✔︎ jarvis in ~/dev/project on  main
 /// ❯
 /// ```
 ///
 /// 表示形式（通常モード・異常終了時）:
 /// ```text
-/// ✗ jarvish in ~/dev/project on  main
+/// ✗ jarvis in ~/dev/project on  main
 /// ❯
 /// ```
 ///
 /// 表示形式（Talking モード）:
 /// ```text
-/// jarvish is talking
+/// jarvis is talking
 /// ❯
 /// ```
 pub struct JarvisPrompt {
@@ -75,11 +75,11 @@ impl JarvisPrompt {
 
 impl Prompt for JarvisPrompt {
     fn render_prompt_left(&self) -> Cow<str> {
-        // Talking モード: 2行プロンプト（1行目: jarvish is talking、2行目: ❯）
+        // Talking モード: 2行プロンプト（1行目: jarvis is talking、2行目: ❯）
         if self.is_talking.load(Ordering::Relaxed) {
             return Cow::Owned(format!(
                 "💬 {} {} {} (cancel: ⌨️  Ctrl-C)\n",
-                cyan("jarvish"),
+                cyan("jarvis"),
                 white("is"),
                 yellow("talking mode")
             ));
@@ -101,9 +101,9 @@ impl Prompt for JarvisPrompt {
 
         let code = self.last_exit_code.load(Ordering::Relaxed);
         let label = if code == 0 {
-            cyan("✔︎ jarvish")
+            cyan("✔︎ jarvis")
         } else {
-            red("✗ jarvish")
+            red("✗ jarvis")
         };
 
         Cow::Owned(format!(
