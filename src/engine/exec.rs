@@ -1,13 +1,72 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::fd::OwnedFd;
 use std::process::{Command, Stdio};
 use std::thread;
 
+use nix::pty::openpty;
+use nix::sys::termios::{self, OutputFlags, SetArg};
 use tracing::debug;
 
 use super::parser::{Pipeline, Redirect, SimpleCommand};
 use super::CommandResult;
 use crate::cli::jarvis::jarvis_talk;
+
+// ── PTY ヘルパー ──
+
+/// 現在のターミナルサイズを取得する。
+/// 取得に失敗した場合はデフォルト値 (80x24) を返す。
+fn get_terminal_winsize() -> libc::winsize {
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
+    if ret == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
+        ws
+    } else {
+        libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }
+    }
+}
+
+/// PTY slave の OPOST フラグを無効にし、出力時の `\n` → `\r\n` 変換を抑制する。
+fn disable_opost(slave_fd: &OwnedFd) {
+    use std::os::fd::AsFd;
+    let fd = slave_fd.as_fd();
+    if let Ok(mut attrs) = termios::tcgetattr(fd) {
+        attrs.output_flags.remove(OutputFlags::OPOST);
+        let _ = termios::tcsetattr(fd, SetArg::TCSANOW, &attrs);
+    }
+}
+
+/// PTY ペアを作成し、(master File, slave OwnedFd) を返す。
+/// ターミナルサイズを伝播し、OPOST を無効化する。
+fn create_pty() -> io::Result<(File, OwnedFd)> {
+    let ws = get_terminal_winsize();
+    let pty = openpty(Some(&ws), None)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+    disable_opost(&pty.slave);
+
+    let master_file = File::from(pty.master);
+    Ok((master_file, pty.slave))
+}
+
+/// stdout/stderr キャプチャ用の (reader, writer Stdio) ペアを作成する。
+/// PTY を優先して使用し、子プロセスが `isatty()=true` と判定するようにする。
+/// PTY 作成に失敗した場合は os_pipe にフォールバック。
+fn create_capture_pair() -> io::Result<(Box<dyn Read + Send>, Stdio)> {
+    match create_pty() {
+        Ok((master, slave)) => Ok((Box::new(master), slave.into())),
+        Err(e) => {
+            debug!("PTY creation failed, falling back to pipe: {e}");
+            let (read, write) = os_pipe::pipe()?;
+            Ok((Box::new(read), write.into()))
+        }
+    }
+}
 
 /// パイプラインを実行する。
 ///
@@ -32,14 +91,15 @@ pub fn run_pipeline(pipeline: &Pipeline) -> CommandResult {
 }
 
 /// 単一コマンドをリダイレクト付きで実行（tee キャプチャあり）。
+/// PTY を使用して子プロセスの色出力を保持する。
 fn run_single_command(simple: &SimpleCommand) -> CommandResult {
     let cmd = &simple.cmd;
     let args: Vec<&str> = simple.args.iter().map(|s| s.as_str()).collect();
 
     debug!(command = %cmd, args = ?args, "Spawning external command");
 
-    // stdout 用パイプ (tee キャプチャ)
-    let (stdout_read, stdout_write) = match os_pipe::pipe() {
+    // stdout キャプチャ: PTY (色出力保持) / pipe (フォールバック)
+    let (stdout_reader, stdout_writer) = match create_capture_pair() {
         Ok(pair) => pair,
         Err(e) => {
             let msg = format!("jarvish: pipe error: {e}\n");
@@ -48,8 +108,8 @@ fn run_single_command(simple: &SimpleCommand) -> CommandResult {
         }
     };
 
-    // stderr 用パイプ (tee キャプチャ)
-    let (stderr_read, stderr_write) = match os_pipe::pipe() {
+    // stderr キャプチャ: PTY (色出力保持) / pipe (フォールバック)
+    let (stderr_reader, stderr_writer) = match create_capture_pair() {
         Ok(pair) => pair,
         Err(e) => {
             let msg = format!("jarvish: pipe error: {e}\n");
@@ -66,31 +126,31 @@ fn run_single_command(simple: &SimpleCommand) -> CommandResult {
     };
 
     // リダイレクト: stdout
-    // stdout_write は 1 箇所でのみ消費する必要がある
+    // stdout_writer は 1 箇所でのみ消費する必要がある
     let has_stdout_redirect = simple
         .redirects
         .iter()
         .any(|r| matches!(r, Redirect::StdoutOverwrite(_) | Redirect::StdoutAppend(_)));
 
     let final_stdout: Stdio = if has_stdout_redirect {
-        // ファイルへリダイレクト。tee パイプの書き込み端を閉じて tee スレッドが EOF を受け取れるようにする。
+        // ファイルへリダイレクト。writer を閉じて reader が EOF を受け取れるようにする。
         let file = find_stdout_redirect(&simple.redirects).expect("redirect checked above");
-        drop(stdout_write);
+        drop(stdout_writer);
         file.into()
     } else {
-        // リダイレクトなし: tee パイプ経由で出力をキャプチャ
-        stdout_write.into()
+        // リダイレクトなし: PTY/pipe 経由で出力をキャプチャ
+        stdout_writer
     };
 
     // 子プロセスを起動。spawn 後に command をドロップして
-    // パイプの書き込み端を親プロセス側で閉じる必要がある。
+    // PTY slave / パイプ書き込み端を親プロセス側で閉じる必要がある。
     let mut child = {
         let mut command = Command::new(cmd);
         command
             .args(&args)
             .stdin(final_stdin)
             .stdout(final_stdout)
-            .stderr(stderr_write);
+            .stderr(stderr_writer);
 
         match command.spawn() {
             Ok(child) => child,
@@ -105,13 +165,13 @@ fn run_single_command(simple: &SimpleCommand) -> CommandResult {
                 return CommandResult::error(msg, 127);
             }
         }
-    }; // command がここでドロップ → パイプ書き込み端が閉じる
+    }; // command がここでドロップ → PTY slave / パイプ書き込み端が閉じる
 
     // stdout tee スレッド
-    let stdout_handle = thread::spawn(move || tee_to_terminal(stdout_read, false));
+    let stdout_handle = thread::spawn(move || tee_to_terminal(stdout_reader, false));
 
     // stderr tee スレッド
-    let stderr_handle = thread::spawn(move || tee_to_terminal(stderr_read, true));
+    let stderr_handle = thread::spawn(move || tee_to_terminal(stderr_reader, true));
 
     let exit_code = match child.wait() {
         Ok(status) => status.code().unwrap_or(1),
@@ -173,8 +233,8 @@ fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
         };
 
         if is_last {
-            // 最終段: tee キャプチャ付きで実行
-            let (stdout_read, stdout_write) = match os_pipe::pipe() {
+            // 最終段: PTY + tee キャプチャ付きで実行（色出力保持）
+            let (stdout_reader, stdout_writer) = match create_capture_pair() {
                 Ok(pair) => pair,
                 Err(e) => {
                     let msg = format!("jarvish: pipe error: {e}\n");
@@ -183,7 +243,7 @@ fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
                 }
             };
 
-            let (stderr_read, stderr_write) = match os_pipe::pipe() {
+            let (stderr_reader, stderr_writer) = match create_capture_pair() {
                 Ok(pair) => pair,
                 Err(e) => {
                     let msg = format!("jarvish: pipe error: {e}\n");
@@ -201,10 +261,10 @@ fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
             let final_stdout: Stdio = if has_stdout_redirect {
                 let file =
                     find_stdout_redirect(&simple.redirects).expect("redirect checked above");
-                drop(stdout_write);
+                drop(stdout_writer);
                 file.into()
             } else {
-                stdout_write.into()
+                stdout_writer
             };
 
             let mut child = {
@@ -213,7 +273,7 @@ fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
                     .args(&args)
                     .stdin(stdin_cfg)
                     .stdout(final_stdout)
-                    .stderr(stderr_write);
+                    .stderr(stderr_writer);
 
                 match command.spawn() {
                     Ok(child) => child,
@@ -224,11 +284,11 @@ fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
                         return spawn_error(cmd, e);
                     }
                 }
-            }; // command がドロップ → パイプ書き込み端が閉じる
+            }; // command がドロップ → PTY slave / パイプ書き込み端が閉じる
 
             // tee スレッド
-            let stdout_handle = thread::spawn(move || tee_to_terminal(stdout_read, false));
-            let stderr_handle = thread::spawn(move || tee_to_terminal(stderr_read, true));
+            let stdout_handle = thread::spawn(move || tee_to_terminal(stdout_reader, false));
+            let stderr_handle = thread::spawn(move || tee_to_terminal(stderr_reader, true));
 
             let exit_code = match child.wait() {
                 Ok(status) => status.code().unwrap_or(1),
@@ -299,8 +359,9 @@ fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
     CommandResult::error("jarvish: internal error: empty pipeline".to_string(), 1)
 }
 
-/// 読み取りパイプからデータを読み、ターミナルに表示しつつバッファに蓄積する（tee パターン）。
-fn tee_to_terminal(read: os_pipe::PipeReader, is_stderr: bool) -> Vec<u8> {
+/// 読み取りソースからデータを読み、ターミナルに表示しつつバッファに蓄積する（tee パターン）。
+/// PTY master (`File`) と os_pipe (`PipeReader`) の両方を受け取れるようジェネリック。
+fn tee_to_terminal<R: Read>(read: R, is_stderr: bool) -> Vec<u8> {
     let mut buf = Vec::new();
     let reader = BufReader::new(read);
 
