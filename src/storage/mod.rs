@@ -59,16 +59,24 @@ impl BlackBox {
 
     /// コマンド実行結果を記録する。
     /// stdout/stderr が空でなければ Blob として保存し、メタデータを DB に INSERT する。
+    /// Alternate Screen を使用した TUI コマンドの場合、stdout blob はスキップする。
     pub fn record(&self, command: &str, result: &CommandResult) -> Result<()> {
         debug!(
             command = %command,
             exit_code = result.exit_code,
             stdout_len = result.stdout.len(),
             stderr_len = result.stderr.len(),
+            used_alt_screen = result.used_alt_screen,
             "Recording command result to BlackBox"
         );
 
-        let stdout_hash = self.blob_store.store(&result.stdout)?;
+        // Alternate Screen 使用時は stdout を保存しない
+        // （TUI の画面制御シーケンスは AI コンテキストとして無価値）
+        let stdout_hash = if result.used_alt_screen {
+            Ok(None)
+        } else {
+            self.blob_store.store(&result.stdout)
+        }?;
         let stderr_hash = self.blob_store.store(&result.stderr)?;
 
         let cwd = std::env::current_dir()
@@ -233,6 +241,7 @@ mod tests {
             stderr: stderr.to_string(),
             exit_code,
             action: LoopAction::Continue,
+            used_alt_screen: false,
         }
     }
 

@@ -5,12 +5,16 @@ mod logging;
 mod storage;
 
 use ai::client::{AiResponse, JarvisAI};
+use cli::completer::JarvishCompleter;
 use cli::jarvis::jarvis_talk;
+use cli::prompt::JarvisPrompt;
 use engine::classifier::{InputClassifier, InputType};
 use engine::{execute, try_builtin, CommandResult, LoopAction};
-use cli::prompt::JarvisPrompt;
-use reedline::{Highlighter, Reedline, Signal, StyledText};
 use nu_ansi_term::{Color, Style};
+use reedline::{
+    default_emacs_keybindings, ColumnarMenu, Emacs, Highlighter, KeyCode, KeyModifiers,
+    MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal, StyledText,
+};
 use storage::BlackBox;
 use tracing::{debug, info, warn};
 
@@ -35,7 +39,25 @@ async fn main() {
     let _guard = logging::init_logging();
     info!("jarvish started");
 
-    let mut editor = Reedline::create().with_highlighter(Box::new(WhiteHighlighter));
+    // Tab 補完の設定
+    let completer = Box::new(JarvishCompleter::new());
+    let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
+
+    let mut keybindings = default_emacs_keybindings();
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu("completion_menu".to_string()),
+            ReedlineEvent::MenuNext,
+        ]),
+    );
+
+    let mut editor = Reedline::create()
+        .with_highlighter(Box::new(WhiteHighlighter))
+        .with_completer(completer)
+        .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
+        .with_edit_mode(Box::new(Emacs::new(keybindings)));
     let prompt = JarvisPrompt::new();
 
     // Black Box（履歴永続化）の初期化

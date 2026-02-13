@@ -28,6 +28,10 @@ pub struct CommandResult {
     pub exit_code: i32,
     /// REPL ループの制御アクション
     pub action: LoopAction,
+    /// 子プロセスが Alternate Screen Buffer を使用したかどうか。
+    /// true の場合、stdout は TUI の画面制御シーケンスであり、
+    /// Black Box への保存をスキップすべきことを示す。
+    pub used_alt_screen: bool,
 }
 
 impl CommandResult {
@@ -38,6 +42,7 @@ impl CommandResult {
             stderr: String::new(),
             exit_code: 0,
             action: LoopAction::Continue,
+            used_alt_screen: false,
         }
     }
 
@@ -48,6 +53,7 @@ impl CommandResult {
             stderr,
             exit_code,
             action: LoopAction::Continue,
+            used_alt_screen: false,
         }
     }
 
@@ -58,6 +64,7 @@ impl CommandResult {
             stderr: String::new(),
             exit_code: 0,
             action: LoopAction::Exit,
+            used_alt_screen: false,
         }
     }
 }
