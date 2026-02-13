@@ -7,6 +7,7 @@ alwaysApply: true
 ## 最重要規約
 
 - 毎回、 `docs/OVERVIEW.md` を読み込み、プロジェクトの概要を確認すること。
+- `cargo build` `cargo test` `cargo check` コマンドはサンドボックスで実行しないこと。
 
 ## 規約
 
