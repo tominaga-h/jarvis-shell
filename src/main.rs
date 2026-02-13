@@ -6,29 +6,17 @@ mod storage;
 
 use ai::client::{AiResponse, JarvisAI};
 use cli::completer::JarvishCompleter;
+use cli::highlighter::JarvisHighlighter;
 use cli::jarvis::jarvis_command_notice;
 use cli::prompt::JarvisPrompt;
 use engine::classifier::{InputClassifier, InputType};
 use engine::{execute, try_builtin, CommandResult, LoopAction};
-use nu_ansi_term::{Color, Style};
 use reedline::{
-    default_emacs_keybindings, ColumnarMenu, Emacs, Highlighter, KeyCode, KeyModifiers,
-    MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal, StyledText,
+    default_emacs_keybindings, ColumnarMenu, Emacs, KeyCode, KeyModifiers, MenuBuilder, Reedline,
+    ReedlineEvent, ReedlineMenu, Signal,
 };
 use storage::BlackBox;
 use tracing::{debug, info, warn};
-
-/// ユーザー入力を白色でハイライトするシンプルなハイライター
-struct WhiteHighlighter;
-
-impl Highlighter for WhiteHighlighter {
-    fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
-        let mut styled = StyledText::new();
-        // Color::White は ANSI 7 (灰色) になるため、RGB で明るい白を指定
-        styled.push((Style::new().fg(Color::Rgb(255, 255, 255)), line.to_string()));
-        styled
-    }
-}
 
 #[tokio::main]
 async fn main() {
@@ -54,7 +42,7 @@ async fn main() {
     );
 
     let mut editor = Reedline::create()
-        .with_highlighter(Box::new(WhiteHighlighter))
+        .with_highlighter(Box::new(JarvisHighlighter::default()))
         .with_completer(completer)
         .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
         .with_edit_mode(Box::new(Emacs::new(keybindings)));
