@@ -5,6 +5,7 @@ mod logging;
 mod storage;
 
 use ai::client::{AiResponse, JarvisAI};
+use cli::jarvis::jarvis_talk;
 use engine::{execute, try_builtin, CommandResult, LoopAction};
 use cli::prompt::JarvisPrompt;
 use reedline::{Highlighter, Reedline, Signal, StyledText};
@@ -122,7 +123,8 @@ async fn main() {
                                 command = %cmd,
                                 "AI determined input is a command"
                             );
-                            // AI がコマンドと判定 → 実行
+                            // AI がコマンドと判定 → 実行前にアナウンス
+                            jarvis_talk(&format!("Understood, sir. Proceeding to execute: {cmd}"));
                             execute(cmd)
                         }
                         Ok(AiResponse::NaturalLanguage(ref text)) => {
