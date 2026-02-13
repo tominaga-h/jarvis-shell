@@ -4,6 +4,11 @@ use std::path::PathBuf;
 #[allow(unused_imports)]
 use super::{CommandResult, LoopAction};
 
+/// 指定されたコマンド名がビルトインかどうかを判定する（軽量チェック用）。
+pub fn is_builtin(cmd: &str) -> bool {
+    matches!(cmd, "cd" | "cwd" | "exit")
+}
+
 /// ビルトインコマンドを振り分ける。
 /// ビルトインでない場合は `None` を返し、呼び出し元が外部コマンドとして実行する。
 pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {

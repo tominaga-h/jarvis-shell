@@ -9,5 +9,5 @@
 - [ ] [#7] 今のJarvishだとvimとかが使えない
 - [ ] [#8] Jarvis AIをもっと優秀にしたい。今のJarvisだと「docs/TODO.mdに◯◯を追加して」と言っても追加されないし、Markdownの`- [ ]` のような文脈も読み取らない。WarpのOzならできるのに！
 - [ ] [#9] 今はAIの結果がコマンド/自然言語しかないけど、自然言語に対してAIが解釈したコマンドという3つ目の選択肢を用意し、ただのコマンドだったらJarvisにしゃべらせない
-- [ ] [#10] 「I'm tired, Jarvis」などクオーテーションを含む、且つクオートが閉じられない入力のときにエラーがでる「jarvish: parse error: missing closing quote」
+- [x] [#10] 「I'm tired, Jarvis」などクオーテーションを含む、且つクオートが閉じられない入力のときにエラーがでる「jarvish: parse error: missing closing quote」
 - [ ] [#11] デバッグログをもっとわかりやすく、定型フォーマットにしたい。
