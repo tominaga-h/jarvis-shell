@@ -18,7 +18,7 @@ use async_openai::{
 };
 use futures_util::StreamExt;
 
-use crate::jarvis::{jarvis_print_chunk, jarvis_print_end, jarvis_print_prefix};
+use crate::cli::jarvis::{jarvis_print_chunk, jarvis_print_end, jarvis_print_prefix};
 
 /// AI の判定結果
 #[derive(Debug, Clone)]

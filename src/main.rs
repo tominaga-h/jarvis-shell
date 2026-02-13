@@ -1,14 +1,11 @@
 mod ai;
-mod banner;
-mod color;
+mod cli;
 mod engine;
-mod jarvis;
-mod prompt;
 mod storage;
 
 use ai::client::{AiResponse, JarvisAI};
 use engine::{execute, try_builtin, CommandResult, LoopAction};
-use prompt::JarvisPrompt;
+use cli::prompt::JarvisPrompt;
 use reedline::{Highlighter, Reedline, Signal, StyledText};
 use nu_ansi_term::{Color, Style};
 use storage::BlackBox;
@@ -51,7 +48,7 @@ async fn main() {
         }
     };
 
-    banner::print_welcome();
+    cli::banner::print_welcome();
 
     loop {
         match editor.read_line(&prompt) {
@@ -132,5 +129,5 @@ async fn main() {
         }
     }
 
-    banner::print_goodbye();
+    cli::banner::print_goodbye();
 }

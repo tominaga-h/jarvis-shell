@@ -3,7 +3,7 @@ use std::process::Command;
 use std::thread;
 
 use super::CommandResult;
-use crate::jarvis::jarvis_talk;
+use crate::cli::jarvis::jarvis_talk;
 
 /// 外部コマンドを実行し、stdout/stderr をリアルタイムで画面に表示しつつバッファにキャプチャする。
 ///

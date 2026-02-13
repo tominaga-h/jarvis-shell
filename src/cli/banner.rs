@@ -1,8 +1,8 @@
 use chrono::Local;
 use rand::Rng;
 
-use crate::color::{bold_red, cyan, white, yellow};
-use crate::jarvis::jarvis_talk;
+use super::color::{bold_red, cyan, white, yellow};
+use super::jarvis::jarvis_talk;
 
 /// 時間帯に応じた挨拶を返す。
 ///  - 5〜11時:  "Good morning"

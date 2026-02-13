@@ -4,7 +4,7 @@ use std::path::Path;
 
 use reedline::{Color, Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
 
-use crate::color::{cyan, red, white, yellow};
+use super::color::{cyan, red, white, yellow};
 
 /// ホームディレクトリのパスを `~` に短縮する。
 ///
