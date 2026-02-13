@@ -153,7 +153,17 @@ async fn main() {
                                     );
                                     // AI が自然言語からコマンドを解釈 → 実行前にアナウンス
                                     jarvis_command_notice(cmd);
-                                    execute(cmd)
+                                    let mut result = execute(cmd);
+                                    // AI が実行したコマンドをコンテキストとして stdout に記録
+                                    // 次回の AI 呼び出しで何が実行されたか把握できるようにする
+                                    if result.stdout.is_empty() {
+                                        result.stdout =
+                                            format!("[Jarvis executed: {cmd}]");
+                                    } else {
+                                        result.stdout =
+                                            format!("[Jarvis executed: {cmd}]\n{}", result.stdout);
+                                    }
+                                    result
                                 }
                                 Ok(AiResponse::NaturalLanguage(ref text)) => {
                                     debug!(
