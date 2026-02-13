@@ -24,6 +24,7 @@ use async_openai::{
 use futures_util::StreamExt;
 
 use crate::cli::jarvis::{jarvis_print_chunk, jarvis_print_end, jarvis_print_prefix, jarvis_spinner, jarvis_talk};
+use crate::engine::CommandResult;
 
 /// AI の判定結果
 #[derive(Debug, Clone)]
@@ -72,6 +73,22 @@ You have `read_file` and `write_file` tools. Use them when the user asks you to 
 Important guidelines:
 - Be concise. Terminal output should be short and actionable.
 - When suggesting fixes, provide the exact command the user should run.
+- Maintain the "Iron Man J.A.R.V.I.S." persona: professional, helpful, with subtle dry wit.
+- Address the user as "sir" occasionally."#;
+
+/// エラー調査用システムプロンプト
+const ERROR_INVESTIGATION_PROMPT: &str = r#"You are J.A.R.V.I.S., an AI assistant integrated into the terminal shell "jarvish".
+A shell command has just failed, and you are tasked with investigating the error.
+
+Your role:
+1. Analyze the failed command, its exit code, stdout, and stderr to determine the root cause.
+2. Provide a clear, concise explanation of why the command failed.
+3. If possible, suggest a fix. If the fix is a shell command, call the `execute_shell_command` tool to run it.
+4. If the user's language can be inferred from context (e.g. Japanese command history), respond in that language.
+
+Important guidelines:
+- Be concise and actionable. Focus on the error cause and solution.
+- If you suggest a command fix, explain what it does before calling `execute_shell_command`.
 - Maintain the "Iron Man J.A.R.V.I.S." persona: professional, helpful, with subtle dry wit.
 - Address the user as "sir" occasionally."#;
 
@@ -243,6 +260,127 @@ impl JarvisAI {
         warn!("Agent loop reached maximum rounds ({MAX_AGENT_ROUNDS})");
         Ok(AiResponse::NaturalLanguage(
             "I apologize, sir. I've reached the maximum number of processing steps.".to_string(),
+        ))
+    }
+
+    /// コマンド異常終了時にエラーを調査する。
+    ///
+    /// 失敗したコマンドの情報（コマンド文字列、exit code、stdout、stderr）を
+    /// AI に送信し、原因の分析と修正案の提示を行う。
+    /// AI がコマンドを提案した場合は `AiResponse::Command` を返す。
+    pub async fn investigate_error(
+        &self,
+        command: &str,
+        result: &CommandResult,
+        context: &str,
+    ) -> Result<AiResponse> {
+        debug!(
+            command = %command,
+            exit_code = result.exit_code,
+            stdout_len = result.stdout.len(),
+            stderr_len = result.stderr.len(),
+            "investigate_error() called"
+        );
+
+        // エラー情報をユーザーメッセージとして構築
+        let mut error_details = format!(
+            "The following command failed:\n\
+             Command: {command}\n\
+             Exit code: {}\n",
+            result.exit_code
+        );
+        if !result.stdout.is_empty() {
+            error_details.push_str(&format!("\nstdout:\n{}\n", result.stdout));
+        }
+        if !result.stderr.is_empty() {
+            error_details.push_str(&format!("\nstderr:\n{}\n", result.stderr));
+        }
+        error_details.push_str("\nPlease investigate the error and suggest a fix.");
+
+        // システムプロンプトにコンテキスト（直近の履歴）を付加
+        let system_content = if context.is_empty() {
+            ERROR_INVESTIGATION_PROMPT.to_string()
+        } else {
+            format!("{ERROR_INVESTIGATION_PROMPT}\n\n{context}")
+        };
+
+        let tools = Self::build_tools();
+
+        let mut messages: Vec<ChatCompletionRequestMessage> = vec![
+            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                content: ChatCompletionRequestSystemMessageContent::Text(system_content),
+                name: None,
+            }),
+            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text(error_details),
+                name: None,
+            }),
+        ];
+
+        // --- エージェントループ（process_input と同構造） ---
+        for round in 0..MAX_AGENT_ROUNDS {
+            debug!(round = round, messages_count = messages.len(), "Error investigation agent loop round");
+
+            let request = CreateChatCompletionRequest {
+                model: MODEL.to_string(),
+                messages: messages.clone(),
+                tools: Some(tools.clone()),
+                stream: Some(true),
+                ..Default::default()
+            };
+
+            let stream_result = self.process_stream(request, round == 0).await?;
+
+            // Tool Call がなければ最終応答として返す
+            if stream_result.tool_calls.is_empty() {
+                return Ok(AiResponse::NaturalLanguage(stream_result.full_text));
+            }
+
+            // execute_shell_command があればコマンドとして返す
+            if let Some(cmd) = Self::extract_shell_command(&stream_result.tool_calls) {
+                info!(
+                    response_type = "Command",
+                    command = %cmd,
+                    round = round,
+                    "Error investigation: AI suggests fix command"
+                );
+                return Ok(AiResponse::Command(cmd));
+            }
+
+            // ファイル操作ツールを処理
+            let assistant_tool_calls = Self::build_assistant_tool_calls(&stream_result.tool_calls);
+            messages.push(ChatCompletionRequestMessage::Assistant(
+                ChatCompletionRequestAssistantMessage {
+                    content: if stream_result.full_text.is_empty() {
+                        None
+                    } else {
+                        Some(ChatCompletionRequestAssistantMessageContent::Text(
+                            stream_result.full_text,
+                        ))
+                    },
+                    refusal: None,
+                    name: None,
+                    audio: None,
+                    tool_calls: Some(assistant_tool_calls),
+                    #[allow(deprecated)]
+                    function_call: None,
+                },
+            ));
+
+            for tc in &stream_result.tool_calls {
+                let tool_result = self.execute_tool(&tc.function_name, &tc.arguments).await;
+                messages.push(ChatCompletionRequestMessage::Tool(
+                    ChatCompletionRequestToolMessage {
+                        content: ChatCompletionRequestToolMessageContent::Text(tool_result),
+                        tool_call_id: tc.id.clone(),
+                    },
+                ));
+            }
+        }
+
+        warn!("Error investigation agent loop reached maximum rounds ({MAX_AGENT_ROUNDS})");
+        Ok(AiResponse::NaturalLanguage(
+            "I apologize, sir. I've reached the maximum number of processing steps for the investigation.".to_string(),
         ))
     }
 

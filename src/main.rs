@@ -4,10 +4,13 @@ mod engine;
 mod logging;
 mod storage;
 
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
+
 use ai::client::{AiResponse, JarvisAI};
 use cli::completer::JarvishCompleter;
 use cli::highlighter::JarvisHighlighter;
-use cli::jarvis::jarvis_command_notice;
+use cli::jarvis::{jarvis_ask_investigate, jarvis_command_notice};
 use cli::prompt::JarvisPrompt;
 use engine::classifier::{InputClassifier, InputType};
 use engine::{execute, try_builtin, CommandResult, LoopAction};
@@ -46,7 +49,10 @@ async fn main() {
         .with_completer(completer)
         .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
         .with_edit_mode(Box::new(Emacs::new(keybindings)));
-    let prompt = JarvisPrompt::new();
+
+    // 直前コマンドの終了コードを共有するアトミック変数
+    let last_exit_code = Arc::new(AtomicI32::new(0));
+    let prompt = JarvisPrompt::new(Arc::clone(&last_exit_code));
 
     // Black Box（履歴永続化）の初期化
     let black_box = match BlackBox::open() {
@@ -100,6 +106,8 @@ async fn main() {
                         action = ?result.action,
                         "Builtin command executed"
                     );
+                    // プロンプト表示用に終了コードを更新
+                    last_exit_code.store(result.exit_code, Ordering::Relaxed);
                     println!(); // 実行結果の後に空行を追加
 
                     match result.action {
@@ -124,6 +132,9 @@ async fn main() {
                 // 2. アルゴリズムで入力を分類（AI を呼ばず瞬時に判定）
                 let input_type = classifier.classify(&line);
                 debug!(input = %line, classification = ?input_type, "Input classified");
+
+                // コマンドの出自を追跡（AI Tool Call かユーザー直接入力か）
+                let mut from_tool_call = false;
 
                 let result = match input_type {
                     InputType::Command => {
@@ -151,6 +162,7 @@ async fn main() {
                                         command = %cmd,
                                         "AI interpreted natural language as a command"
                                     );
+                                    from_tool_call = true;
                                     // AI が自然言語からコマンドを解釈 → 実行前にアナウンス
                                     jarvis_command_notice(cmd);
                                     let mut result = execute(cmd);
@@ -192,6 +204,8 @@ async fn main() {
                     }
                 };
 
+                // プロンプト表示用に終了コードを更新
+                last_exit_code.store(result.exit_code, Ordering::Relaxed);
                 println!(); // 実行結果の後に空行を追加
 
                 // 履歴を記録
@@ -200,6 +214,56 @@ async fn main() {
                         if let Err(e) = bb.record(&line, &result) {
                             warn!("Failed to record history: {e}");
                             eprintln!("jarvish: warning: failed to record history: {e}");
+                        }
+                    }
+                }
+
+                // === エラー調査フロー ===
+                // コマンドが異常終了し、AI が利用可能な場合にエラー調査を実行する
+                if result.exit_code != 0 {
+                    if let Some(ref ai) = ai_client {
+                        // 調査開始の判定:
+                        // - Tool Call（AI 発信のコマンド）→ ユーザー確認なしで自動調査
+                        // - ユーザー直接入力 → 確認プロンプト後に調査
+                        let should_investigate = if from_tool_call {
+                            info!("Tool Call command failed, auto-investigating");
+                            true
+                        } else {
+                            jarvis_ask_investigate(result.exit_code)
+                        };
+
+                        if should_investigate {
+                            // BlackBox から最新コンテキストを取得（失敗したコマンドも含む）
+                            let context = black_box
+                                .as_ref()
+                                .and_then(|bb| bb.get_recent_context(5).ok())
+                                .unwrap_or_default();
+
+                            match ai.investigate_error(&line, &result, &context).await {
+                                Ok(AiResponse::Command(ref fix_cmd)) => {
+                                    // AI が修正コマンドを提案 → 実行
+                                    jarvis_command_notice(fix_cmd);
+                                    let fix_result = execute(fix_cmd);
+                                    last_exit_code.store(fix_result.exit_code, Ordering::Relaxed);
+                                    println!();
+
+                                    // 修正コマンドの結果も履歴に記録
+                                    if fix_result.action == LoopAction::Continue {
+                                        if let Some(ref bb) = black_box {
+                                            if let Err(e) = bb.record(fix_cmd, &fix_result) {
+                                                warn!("Failed to record fix command history: {e}");
+                                            }
+                                        }
+                                    }
+                                }
+                                Ok(AiResponse::NaturalLanguage(_)) => {
+                                    // AI が自然言語で説明 → ストリーミング表示済み
+                                    println!();
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "Error investigation failed");
+                                }
+                            }
                         }
                     }
                 }

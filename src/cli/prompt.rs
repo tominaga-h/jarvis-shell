@@ -1,10 +1,12 @@
 use std::borrow::Cow;
 use std::env;
 use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 
 use reedline::{Color, Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
 
-use super::color::{cyan, red, white, yellow};
+use super::color::{cyan, green, red, white, yellow};
 
 /// ホームディレクトリのパスを `~` に短縮する。
 ///
@@ -38,22 +40,25 @@ fn dirs_home() -> Option<std::path::PathBuf> {
 
 /// Jarvis Shell のカスタムプロンプト。
 ///
-/// 表示形式:
+/// 表示形式（成功時）:
 /// ```text
 /// ⚡jarvish in ~/dev/project on  main
 ///  ❯
 /// ```
-pub struct JarvisPrompt;
-
-impl JarvisPrompt {
-    pub fn new() -> Self {
-        Self
-    }
+///
+/// 表示形式（異常終了時）:
+/// ```text
+/// ⚡jarvish in ~/dev/project on  main
+///  ✗ 1 ❯
+/// ```
+pub struct JarvisPrompt {
+    /// 直前コマンドの終了コード。メインループから共有される。
+    last_exit_code: Arc<AtomicI32>,
 }
 
-impl Default for JarvisPrompt {
-    fn default() -> Self {
-        Self::new()
+impl JarvisPrompt {
+    pub fn new(last_exit_code: Arc<AtomicI32>) -> Self {
+        Self { last_exit_code }
     }
 }
 
@@ -72,10 +77,15 @@ impl Prompt for JarvisPrompt {
             None => String::new(),
         };
 
+        let code = self.last_exit_code.load(Ordering::Relaxed);
+        let label = if code == 0 {
+            cyan("✔︎ jarvish")
+        } else {
+            red("✗ jarvish")
+        };
+
         Cow::Owned(format!(
-            "{} {} {}{git_part}\n",
-            // "{} {}{git_part}\n",
-            red("⚡jarvish"),
+            "{label} {} {}{git_part}\n",
             white("in"),
             yellow(&cwd),
         ))
@@ -90,7 +100,7 @@ impl Prompt for JarvisPrompt {
     }
 
     fn render_prompt_indicator(&self, _edit_mode: PromptEditMode) -> Cow<str> {
-        Cow::Borrowed("❯ ")
+        Cow::Owned(green("❯ "))
     }
 
     fn render_prompt_multiline_indicator(&self) -> Cow<str> {

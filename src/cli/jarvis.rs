@@ -1,8 +1,9 @@
+use std::io::{self, Write};
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressStyle};
 
-use super::color::white;
+use super::color::{cyan, white, yellow};
 
 /// Jarvis が発話するときに使う共通関数。
 /// 先頭に 🤵 絵文字を付与し、白色テキストで表示する。
@@ -41,4 +42,27 @@ pub fn jarvis_print_chunk(chunk: &str) {
 /// ストリーミング終了時の改行を出力する。
 pub fn jarvis_print_end() {
     println!();
+}
+
+/// コマンド異常終了時にユーザーへ調査の可否を確認する。
+///
+/// 「調査しますか？ [Y/n]: 」と表示し、ユーザーが `Y`/`y`/空行（Enter）を
+/// 入力した場合に `true` を返す。それ以外は `false`。
+pub fn jarvis_ask_investigate(exit_code: i32) -> bool {
+    print!(
+        "🤵 {} {}",
+        cyan(&format!("Sir, the command exited with an error (code: {exit_code}).")),
+        yellow("Would you like to investigate? [Y/n]: ")
+    );
+    let _ = io::stdout().flush();
+
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+
+    println!();
+
+    let trimmed = input.trim().to_lowercase();
+    trimmed.is_empty() || trimmed == "y" || trimmed == "yes"
 }

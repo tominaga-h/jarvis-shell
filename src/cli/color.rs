@@ -4,6 +4,7 @@
 /// 呼び出し側は RESET の付け忘れを気にする必要がない。
 
 const RED: &str = "\x1b[91m";
+const GREEN: &str = "\x1b[92m";
 const YELLOW: &str = "\x1b[33m";
 const CYAN: &str = "\x1b[36m";
 const WHITE: &str = "\x1b[97m";
@@ -12,6 +13,10 @@ const RESET: &str = "\x1b[0m";
 
 pub fn red(text: &str) -> String {
     format!("{RED}{text}{RESET}")
+}
+
+pub fn green(text: &str) -> String {
+    format!("{GREEN}{text}{RESET}")
 }
 
 pub fn yellow(text: &str) -> String {
