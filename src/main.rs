@@ -37,7 +37,7 @@ async fn main() {
 
     // ログシステムの初期化（_guard は main 終了まで保持する必要がある）
     let _guard = logging::init_logging();
-    info!("jarvish started");
+    info!("\n\n==== J.A.R.V.I.S.H. STARTED ====\n");
 
     // Tab 補完の設定
     let completer = Box::new(JarvishCompleter::new());
@@ -94,6 +94,9 @@ async fn main() {
     loop {
         match editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
+
+                info!("\n\n==== USER INPUT RECEIVED, START PROCESS ====");
+
                 let line = line.trim().to_string();
                 if line.is_empty() {
                     continue;
@@ -204,6 +207,8 @@ async fn main() {
                         }
                     }
                 }
+
+                info!("\n==== FINISHED PROCESS ====\n\n");
             }
             Ok(Signal::CtrlC) => {
                 // 現在の行をクリアして続行
@@ -221,6 +226,6 @@ async fn main() {
         }
     }
 
-    info!("jarvish shutting down");
+    info!("\n\n==== J.A.R.V.I.S.H. SHUTTING DOWN ====\n\n");
     cli::banner::print_goodbye();
 }

@@ -306,6 +306,7 @@ impl JarvisAI {
                         chunk = chunk_count,
                         content_length = content.len(),
                         has_content = true,
+                        content = %content,
                         "Received text chunk"
                     );
                     if !started_text {
