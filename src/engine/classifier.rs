@@ -114,7 +114,8 @@ impl InputClassifier {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
                     // 実行可能かの簡易チェック（Unix: ファイルであること）
-                    if let Ok(metadata) = entry.metadata() {
+                    // NOTE: fs::metadata はシンボリックリンクを辿る（entry.metadata は辿らない）
+                    if let Ok(metadata) = fs::metadata(entry.path()) {
                         if metadata.is_file() {
                             commands.insert(name.to_string());
                         }
