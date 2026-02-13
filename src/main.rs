@@ -364,7 +364,7 @@ async fn main() {
                     conversation_state = None;
                     info!("Talking mode ended (Ctrl-C)");
                 }
-                // 現在の行をクリアして続行
+                println!(); // 改行して次のプロンプトを見やすくする
             }
             Ok(Signal::CtrlD) => {
                 // EOF → シェル終了
