@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
+use chrono::Local;
 use reedline::{Color, Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
 
 use super::color::{cyan, green, red, white, yellow};
@@ -106,7 +107,8 @@ impl Prompt for JarvisPrompt {
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
-        Cow::Borrowed("")
+        let now = Local::now().format("%H:%M:%S").to_string();
+        Cow::Owned(white(&now))
     }
 
     fn render_prompt_indicator(&self, _edit_mode: PromptEditMode) -> Cow<'_, str> {
