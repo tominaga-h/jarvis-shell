@@ -1,4 +1,4 @@
-pub mod builtin;
+pub mod builtins;
 pub mod classifier;
 mod dispatch;
 pub mod exec;

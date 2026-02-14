@@ -6,7 +6,7 @@
 
 use tracing::debug;
 
-use super::{builtin, exec, expand, parser, CommandResult};
+use super::{builtins, exec, expand, parser, CommandResult};
 
 /// ビルトインコマンドのみを試行する。
 /// ビルトインでなければ None を返す（AI ルーティング前のチェック用）。
@@ -22,7 +22,7 @@ pub fn try_builtin(input: &str) -> Option<CommandResult> {
 
     // 先頭ワードがビルトインでなければ即 None → AI に回す
     let first_word = input.split_whitespace().next().unwrap_or("");
-    if !builtin::is_builtin(first_word) {
+    if !builtins::is_builtin(first_word) {
         debug!(
             command = %first_word,
             is_builtin = false,
@@ -52,7 +52,7 @@ pub fn try_builtin(input: &str) -> Option<CommandResult> {
     let cmd = &expanded[0];
     let args: Vec<&str> = expanded[1..].iter().map(|s| s.as_str()).collect();
 
-    let result = builtin::dispatch_builtin(cmd, &args);
+    let result = builtins::dispatch_builtin(cmd, &args);
     debug!(
         command = %cmd,
         is_builtin = result.is_some(),
@@ -118,7 +118,7 @@ pub fn execute(input: &str) -> CommandResult {
     if pipeline.commands.len() == 1 && pipeline.commands[0].redirects.is_empty() {
         let simple = &pipeline.commands[0];
         let args: Vec<&str> = simple.args.iter().map(|s| s.as_str()).collect();
-        if let Some(result) = builtin::dispatch_builtin(&simple.cmd, &args) {
+        if let Some(result) = builtins::dispatch_builtin(&simple.cmd, &args) {
             debug!(command = %simple.cmd, "Dispatched as builtin command");
             return result;
         }
