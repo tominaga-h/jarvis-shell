@@ -39,12 +39,8 @@ impl BlackBox {
 
     /// 指定されたディレクトリで BlackBox を初期化する（テスト用にも使用）。
     pub fn open_at(data_dir: PathBuf) -> Result<Self> {
-        std::fs::create_dir_all(&data_dir).with_context(|| {
-            format!(
-                "failed to create data directory: {}",
-                data_dir.display()
-            )
-        })?;
+        std::fs::create_dir_all(&data_dir)
+            .with_context(|| format!("failed to create data directory: {}", data_dir.display()))?;
 
         let db_path = data_dir.join("history.db");
         let conn = Connection::open(&db_path)
@@ -124,13 +120,13 @@ impl BlackBox {
             if let Some(ref stdout) = entry.stdout {
                 let truncated = Self::truncate_lines(stdout, 50);
                 if !truncated.is_empty() {
-                    context.push_str(&format!("stdout:\n{}\n", truncated));
+                    context.push_str(&format!("stdout:\n{truncated}\n"));
                 }
             }
             if let Some(ref stderr) = entry.stderr {
                 let truncated = Self::truncate_lines(stderr, 50);
                 if !truncated.is_empty() {
-                    context.push_str(&format!("stderr:\n{}\n", truncated));
+                    context.push_str(&format!("stderr:\n{truncated}\n"));
                 }
             }
         }
@@ -205,8 +201,8 @@ impl BlackBox {
     /// データディレクトリのパスを返す。
     /// `directories` クレートを使用してプラットフォームに応じたパスを決定する。
     fn data_dir() -> Result<PathBuf> {
-        let proj_dirs = ProjectDirs::from("", "", "jarvish")
-            .context("failed to determine data directory")?;
+        let proj_dirs =
+            ProjectDirs::from("", "", "jarvish").context("failed to determine data directory")?;
         Ok(proj_dirs.data_dir().to_path_buf())
     }
 

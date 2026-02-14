@@ -1,260 +1,24 @@
-use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, IsTerminal, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+//! パイプライン実行エンジン
+//!
+//! 単一コマンドやパイプラインの実行を管理する。
+//! PTY セッション（vim/less 等の対話コマンド対応）とレガシーモード（tee キャプチャ）を
+//! 使い分け、stdout/stderr をキャプチャしつつターミナルに表示する。
+
+use std::io::{self, IsTerminal};
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::thread;
 
-use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-use nix::pty::openpty;
-use nix::sys::termios::{self, OutputFlags, SetArg, Termios};
 use tracing::debug;
 
+use super::io::{capture_pty_output, forward_stdin, tee_stderr, tee_to_terminal};
 use super::parser::{Pipeline, Redirect, SimpleCommand};
+use super::pty::{create_capture_pair, create_session_pty};
+use super::redirect::{find_stdin_redirect, find_stdout_redirect};
+use super::terminal::TerminalStateGuard;
 use super::CommandResult;
 use crate::cli::jarvis::jarvis_talk;
-
-// ── Alternate Screen 検出 ──
-
-/// Alternate Screen Buffer 有効化シーケンス: ESC [ ? 1 0 4 9 h
-const ALT_SCREEN_ENABLE: &[u8] = b"\x1b[?1049h";
-
-/// バイトスライス内に Alternate Screen 有効化シーケンスが含まれているかチェックする。
-fn contains_alt_screen_seq(data: &[u8]) -> bool {
-    data.windows(ALT_SCREEN_ENABLE.len())
-        .any(|w| w == ALT_SCREEN_ENABLE)
-}
-
-// ── PTY ヘルパー ──
-
-/// 現在のターミナルサイズを取得する。
-/// 取得に失敗した場合はデフォルト値 (80x24) を返す。
-fn get_terminal_winsize() -> libc::winsize {
-    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
-    if ret == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
-        ws
-    } else {
-        libc::winsize {
-            ws_row: 24,
-            ws_col: 80,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        }
-    }
-}
-
-/// PTY slave の OPOST フラグを無効にし、出力時の `\n` → `\r\n` 変換を抑制する。
-/// レガシーモード（tee キャプチャ）専用。
-fn disable_opost(slave_fd: &OwnedFd) {
-    let fd = slave_fd.as_fd();
-    if let Ok(mut attrs) = termios::tcgetattr(fd) {
-        attrs.output_flags.remove(OutputFlags::OPOST);
-        let _ = termios::tcsetattr(fd, SetArg::TCSANOW, &attrs);
-    }
-}
-
-/// セッション PTY ペアを作成し、(master File, slave OwnedFd) を返す。
-/// フル PTY セッション用: OPOST は有効のまま（line discipline が \n→\r\n 変換を行う）。
-fn create_session_pty() -> io::Result<(File, OwnedFd)> {
-    let ws = get_terminal_winsize();
-    let pty = openpty(Some(&ws), None)
-        .map_err(|e| io::Error::other(e.to_string()))?;
-
-    let master_file = File::from(pty.master);
-    Ok((master_file, pty.slave))
-}
-
-/// レガシー PTY ペアを作成し、(master File, slave OwnedFd) を返す。
-/// tee キャプチャ用: OPOST を無効化する。
-fn create_legacy_pty() -> io::Result<(File, OwnedFd)> {
-    let ws = get_terminal_winsize();
-    let pty = openpty(Some(&ws), None)
-        .map_err(|e| io::Error::other(e.to_string()))?;
-
-    disable_opost(&pty.slave);
-
-    let master_file = File::from(pty.master);
-    Ok((master_file, pty.slave))
-}
-
-/// stdout/stderr キャプチャ用の (reader, writer Stdio) ペアを作成する。
-/// PTY を優先して使用し、子プロセスが `isatty()=true` と判定するようにする。
-/// PTY 作成に失敗した場合は os_pipe にフォールバック。
-fn create_capture_pair() -> io::Result<(Box<dyn Read + Send>, Stdio)> {
-    match create_legacy_pty() {
-        Ok((master, slave)) => Ok((Box::new(master), slave.into())),
-        Err(e) => {
-            debug!("PTY creation failed, falling back to pipe: {e}");
-            let (read, write) = os_pipe::pipe()?;
-            Ok((Box::new(read), write.into()))
-        }
-    }
-}
-
-// ── ターミナル状態管理 ──
-
-/// 現在のターミナル属性を保存する。
-/// 非ターミナル環境（テスト等）では Err を返す。
-fn save_terminal_state() -> io::Result<Termios> {
-    termios::tcgetattr(io::stdin().as_fd())
-        .map_err(|e| io::Error::other(e.to_string()))
-}
-
-/// 保存しておいたターミナル属性を復元する。
-fn restore_terminal_state(saved: &Termios) {
-    let _ = termios::tcsetattr(io::stdin().as_fd(), SetArg::TCSANOW, saved);
-}
-
-/// RAII ガード: スコープを抜けるときに自動的にターミナル状態を復元する。
-/// エラー発生時や早期リターン、パニック時も確実に復元される。
-struct TerminalStateGuard {
-    saved: Termios,
-    active: bool,
-}
-
-impl TerminalStateGuard {
-    /// ターミナル状態を保存してガードを作成する。
-    fn new() -> io::Result<Self> {
-        let saved = save_terminal_state()?;
-        Ok(Self { saved, active: false })
-    }
-
-    /// raw mode を有効にする。有効化後、ガードがドロップされるまで復元される。
-    fn activate_raw_mode(&mut self) -> io::Result<()> {
-        let mut raw = self.saved.clone();
-        termios::cfmakeraw(&mut raw);
-        termios::tcsetattr(io::stdin().as_fd(), SetArg::TCSANOW, &raw)
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        self.active = true;
-        Ok(())
-    }
-}
-
-impl Drop for TerminalStateGuard {
-    fn drop(&mut self) {
-        if self.active {
-            restore_terminal_state(&self.saved);
-        }
-    }
-}
-
-// ── stdin 転送 ──
-
-/// 実 stdin → PTY master へのキーストローク転送。
-/// poll ベースで停止パイプとウィンドウサイズ変更を監視する。
-fn forward_stdin(mut master_write: File, shutdown_read: os_pipe::PipeReader, pty_master_fd: RawFd) {
-    let stdin_fd = io::stdin().as_raw_fd();
-    let shutdown_fd = shutdown_read.as_raw_fd();
-    let mut last_ws = get_terminal_winsize();
-    let mut read_buf = [0u8; 4096];
-
-    loop {
-        let mut fds = [
-            PollFd::new(
-                unsafe { BorrowedFd::borrow_raw(stdin_fd) },
-                PollFlags::POLLIN,
-            ),
-            PollFd::new(
-                unsafe { BorrowedFd::borrow_raw(shutdown_fd) },
-                PollFlags::POLLIN,
-            ),
-        ];
-
-        // 100ms タイムアウト: ウィンドウサイズ変更を定期チェック
-        match poll(&mut fds, PollTimeout::from(100u16)) {
-            Ok(_) => {}
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(_) => break,
-        }
-
-        // 停止シグナルをチェック
-        if let Some(revents) = fds[1].revents() {
-            if revents.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) {
-                break;
-            }
-        }
-
-        // ウィンドウサイズ変更を検出し、PTY に伝播 (SIGWINCH 相当)
-        let current_ws = get_terminal_winsize();
-        if current_ws.ws_row != last_ws.ws_row || current_ws.ws_col != last_ws.ws_col {
-            unsafe {
-                libc::ioctl(pty_master_fd, libc::TIOCSWINSZ, &current_ws);
-            }
-            last_ws = current_ws;
-        }
-
-        // stdin からキーストロークを読み取り、PTY master に転送
-        if let Some(revents) = fds[0].revents() {
-            if revents.contains(PollFlags::POLLIN) {
-                let n = unsafe {
-                    libc::read(
-                        stdin_fd,
-                        read_buf.as_mut_ptr() as *mut libc::c_void,
-                        read_buf.len(),
-                    )
-                };
-                if n <= 0 {
-                    break;
-                }
-                let _ = master_write.write_all(&read_buf[..n as usize]);
-            }
-            // stdin 側が EOF/HUP した場合も終了
-            if revents.contains(PollFlags::POLLHUP) {
-                break;
-            }
-        }
-    }
-}
-
-// ── 出力キャプチャ ──
-
-/// PTY master から読み取った出力の結果。
-#[derive(Default)]
-struct CaptureResult {
-    bytes: Vec<u8>,
-    used_alt_screen: bool,
-}
-
-/// PTY master から読み取った出力をターミナルに表示しつつキャプチャする。
-/// Alternate Screen の使用を検出し、使用された場合はキャプチャを停止する。
-fn capture_pty_output(mut master: File) -> CaptureResult {
-    let mut result = CaptureResult::default();
-    let mut read_buf = [0u8; 4096];
-
-    loop {
-        match master.read(&mut read_buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                let chunk = &read_buf[..n];
-
-                // Alternate Screen 検出
-                if !result.used_alt_screen && contains_alt_screen_seq(chunk) {
-                    result.used_alt_screen = true;
-                }
-
-                // ターミナルに表示 (常に行う)
-                let mut out = io::stdout().lock();
-                let _ = out.write_all(chunk);
-                let _ = out.flush();
-
-                // キャプチャバッファに蓄積 (alt screen 未使用時のみ)
-                if !result.used_alt_screen {
-                    result.bytes.extend_from_slice(chunk);
-                }
-            }
-            Err(e) => {
-                // EIO = PTY slave が閉じた (子プロセス終了)
-                if e.raw_os_error() == Some(libc::EIO) {
-                    break;
-                }
-                break;
-            }
-        }
-    }
-
-    result
-}
 
 // ── パイプライン実行 ──
 
@@ -266,10 +30,7 @@ fn capture_pty_output(mut master: File) -> CaptureResult {
 /// - リダイレクト: `>`, `>>`, `<` を処理
 pub fn run_pipeline(pipeline: &Pipeline) -> CommandResult {
     let n = pipeline.commands.len();
-    debug!(
-        pipeline_length = n,
-        "Running pipeline"
-    );
+    debug!(pipeline_length = n, "Running pipeline");
 
     if n == 1 {
         return run_single_command(&pipeline.commands[0]);
@@ -333,8 +94,6 @@ fn run_single_command_pty_session(simple: &SimpleCommand) -> io::Result<CommandR
     if stdin_fd < 0 || stdout_fd < 0 {
         return Err(io::Error::last_os_error());
     }
-    // slave は spawn 前にドロップ不要: dup 済みの fd は独立
-    // spawn 後に slave をドロップする（親側のコピーを閉じる）
 
     // 5. 子プロセスを起動
     let mut child = {
@@ -362,12 +121,10 @@ fn run_single_command_pty_session(simple: &SimpleCommand) -> io::Result<CommandR
         match command.spawn() {
             Ok(child) => child,
             Err(e) => {
-                // spawn 失敗: dup した fd の残りをクリーンアップ
-                // (Command が stdin_fd, stdout_fd を所有しているので通常は不要だが安全のため)
                 return Err(e);
             }
         }
-    }; // command ドロップ → stdin_fd, stdout_fd, stderr_write が閉じる
+    };
 
     // 6. 親側の PTY slave fd を閉じる
     drop(slave);
@@ -375,7 +132,6 @@ fn run_single_command_pty_session(simple: &SimpleCommand) -> io::Result<CommandR
     // 7. 親ターミナルを raw mode に設定（ガードが自動復元を保証）
     if let Err(e) = terminal_guard.activate_raw_mode() {
         debug!("Failed to set raw mode: {e}");
-        // raw mode 設定に失敗しても続行（非対話コマンドは動作する）
     }
 
     // 8. stdin 転送スレッドを起動 (停止パイプ付き)
@@ -487,16 +243,7 @@ fn run_single_command_legacy(simple: &SimpleCommand) -> CommandResult {
 
         match command.spawn() {
             Ok(child) => child,
-            Err(e) => {
-                let reason = match e.kind() {
-                    io::ErrorKind::NotFound => "command not found".to_string(),
-                    io::ErrorKind::PermissionDenied => "permission denied".to_string(),
-                    _ => format!("{e}"),
-                };
-                let msg = format!("{cmd}: {reason}. Something wrong, sir?");
-                jarvis_talk(&msg);
-                return CommandResult::error(msg, 127);
-            }
+            Err(e) => return spawn_error(cmd, e),
         }
     };
 
@@ -601,8 +348,7 @@ fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
                 .any(|r| matches!(r, Redirect::StdoutOverwrite(_) | Redirect::StdoutAppend(_)));
 
             let final_stdout: Stdio = if has_stdout_redirect {
-                let file =
-                    find_stdout_redirect(&simple.redirects).expect("redirect checked above");
+                let file = find_stdout_redirect(&simple.redirects).expect("redirect checked above");
                 drop(stdout_writer);
                 file.into()
             } else {
@@ -630,8 +376,7 @@ fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
 
             let stdout_handle = thread::spawn(move || tee_to_terminal(stdout_reader, false));
             let stderr_handle = thread::spawn(move || tee_to_terminal(stderr_reader, true));
-            let mid_stderr_handle =
-                thread::spawn(move || tee_to_terminal(mid_stderr_reader, true));
+            let mid_stderr_handle = thread::spawn(move || tee_to_terminal(mid_stderr_reader, true));
 
             let exit_code = match child.wait() {
                 Ok(status) => status.code().unwrap_or(1),
@@ -712,104 +457,6 @@ fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
     CommandResult::error("jarvish: internal error: empty pipeline".to_string(), 1)
 }
 
-// ── tee ヘルパー ──
-
-/// 読み取りソースからデータを読み、ターミナルに表示しつつバッファに蓄積する（tee パターン）。
-/// レガシーモードおよびパイプライン用。
-fn tee_to_terminal<R: Read>(read: R, is_stderr: bool) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let reader = io::BufReader::new(read);
-
-    for line in reader.split(b'\n') {
-        match line {
-            Ok(mut bytes) => {
-                // バッファには \n のみ保存（キャプチャ用）
-                bytes.push(b'\n');
-                buf.extend_from_slice(&bytes);
-
-                // ターミナル出力時は \r\n で行頭復帰させる
-                // （OPOST 無効の PTY から読み取るため \n → \r\n 変換が行われない）
-                if is_stderr {
-                    let mut err = io::stderr().lock();
-                    let _ = err.write_all(&bytes[..bytes.len() - 1]); // 内容（\n なし）
-                    let _ = err.write_all(b"\r\n");                   // \r\n で終端
-                    let _ = err.flush();
-                } else {
-                    let mut out = io::stdout().lock();
-                    let _ = out.write_all(&bytes[..bytes.len() - 1]); // 内容（\n なし）
-                    let _ = out.write_all(b"\r\n");                   // \r\n で終端
-                    let _ = out.flush();
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    buf
-}
-
-/// stderr パイプからデータを読み取り、ターミナルに表示しつつバッファに蓄積する。
-/// PTY セッション用。
-fn tee_stderr(read: os_pipe::PipeReader) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let mut reader = io::BufReader::new(read);
-    let mut read_buf = [0u8; 4096];
-
-    loop {
-        match reader.read(&mut read_buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                let chunk = &read_buf[..n];
-                let mut err = io::stderr().lock();
-                let _ = err.write_all(chunk);
-                let _ = err.flush();
-                buf.extend_from_slice(chunk);
-            }
-            Err(_) => break,
-        }
-    }
-    buf
-}
-
-// ── リダイレクト ヘルパー ──
-
-/// リダイレクトリストから stdout リダイレクト先ファイルを開く。
-fn find_stdout_redirect(redirects: &[Redirect]) -> Option<File> {
-    let mut result = None;
-    for r in redirects {
-        match r {
-            Redirect::StdoutOverwrite(path) => {
-                result = File::create(path).ok();
-            }
-            Redirect::StdoutAppend(path) => {
-                result = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .ok();
-            }
-            _ => {}
-        }
-    }
-    result
-}
-
-/// リダイレクトリストから stdin リダイレクト元ファイルを開く。
-fn find_stdin_redirect(redirects: &[Redirect]) -> Result<Option<File>, CommandResult> {
-    for r in redirects {
-        if let Redirect::StdinFrom(path) = r {
-            return match File::open(path) {
-                Ok(f) => Ok(Some(f)),
-                Err(e) => {
-                    let msg = format!("jarvish: {path}: {e}\n");
-                    eprint!("{msg}");
-                    Err(CommandResult::error(msg, 1))
-                }
-            };
-        }
-    }
-    Ok(None)
-}
-
 // ── エラーヘルパー ──
 
 /// プロセス起動エラーを CommandResult として返すヘルパー。
@@ -875,14 +522,6 @@ mod tests {
         let result = run_single_command(&simple("__jarvish_nonexistent_command__", &[]));
         assert_ne!(result.exit_code, 0);
         assert!(!result.stderr.is_empty());
-    }
-
-    #[test]
-    fn alt_screen_detection() {
-        assert!(contains_alt_screen_seq(b"before\x1b[?1049hafter"));
-        assert!(contains_alt_screen_seq(b"\x1b[?1049h"));
-        assert!(!contains_alt_screen_seq(b"no alt screen here"));
-        assert!(!contains_alt_screen_seq(b"\x1b[?1049")); // incomplete
     }
 
     // ── run_pipeline テスト: パイプ ──

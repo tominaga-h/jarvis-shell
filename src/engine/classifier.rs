@@ -134,8 +134,7 @@ impl InputClassifier {
         lower.starts_with("jarvis")
             || lower.starts_with("hey jarvis")
             || lower.starts_with("j,")
-            || lower.starts_with("j ")
-                && !self.is_command_in_path("j")
+            || lower.starts_with("j ") && !self.is_command_in_path("j")
     }
 
     /// 自然言語パターン（疑問詞、依頼表現 等）にマッチするかを判定する。
@@ -154,12 +153,9 @@ impl InputClassifier {
         let has_multiple_words = lower.contains(' ');
         if has_multiple_words {
             let question_starters = [
-                "what", "how", "why", "where", "when", "who", "which",
-                "can", "could", "would", "should", "shall",
-                "is", "are", "was", "were", "am",
-                "do", "does", "did",
-                "tell", "explain", "describe", "show",
-                "please", "help",
+                "what", "how", "why", "where", "when", "who", "which", "can", "could", "would",
+                "should", "shall", "is", "are", "was", "were", "am", "do", "does", "did", "tell",
+                "explain", "describe", "show", "please", "help",
             ];
 
             if question_starters.contains(&first_word) {
@@ -212,7 +208,7 @@ impl InputClassifier {
             // 環境変数代入パターン（KEY=value）
             || input.split_whitespace().any(|token| {
                 token.contains('=')
-                    && token.chars().next().map_or(false, |c| c.is_ascii_uppercase())
+                    && token.chars().next().is_some_and(|c| c.is_ascii_uppercase())
             })
     }
 
@@ -286,7 +282,10 @@ mod tests {
     fn classify_jarvis_trigger() {
         let c = test_classifier();
         assert_eq!(c.classify("jarvis, help me"), InputType::NaturalLanguage);
-        assert_eq!(c.classify("Jarvis what is this?"), InputType::NaturalLanguage);
+        assert_eq!(
+            c.classify("Jarvis what is this?"),
+            InputType::NaturalLanguage
+        );
         assert_eq!(c.classify("hey jarvis"), InputType::NaturalLanguage);
         assert_eq!(c.classify("j, commit please"), InputType::NaturalLanguage);
     }
@@ -294,10 +293,19 @@ mod tests {
     #[test]
     fn classify_question_patterns() {
         let c = test_classifier();
-        assert_eq!(c.classify("what does this error mean?"), InputType::NaturalLanguage);
+        assert_eq!(
+            c.classify("what does this error mean?"),
+            InputType::NaturalLanguage
+        );
         assert_eq!(c.classify("how do I fix this?"), InputType::NaturalLanguage);
-        assert_eq!(c.classify("why did the build fail?"), InputType::NaturalLanguage);
-        assert_eq!(c.classify("where is the config file?"), InputType::NaturalLanguage);
+        assert_eq!(
+            c.classify("why did the build fail?"),
+            InputType::NaturalLanguage
+        );
+        assert_eq!(
+            c.classify("where is the config file?"),
+            InputType::NaturalLanguage
+        );
     }
 
     #[test]
@@ -310,17 +318,26 @@ mod tests {
     #[test]
     fn classify_request_patterns() {
         let c = test_classifier();
-        assert_eq!(c.classify("please explain the output"), InputType::NaturalLanguage);
+        assert_eq!(
+            c.classify("please explain the output"),
+            InputType::NaturalLanguage
+        );
         assert_eq!(c.classify("help me debug this"), InputType::NaturalLanguage);
         assert_eq!(c.classify("explain this error"), InputType::NaturalLanguage);
-        assert_eq!(c.classify("tell me about git rebase"), InputType::NaturalLanguage);
+        assert_eq!(
+            c.classify("tell me about git rebase"),
+            InputType::NaturalLanguage
+        );
     }
 
     #[test]
     fn classify_japanese_patterns() {
         let c = test_classifier();
         assert_eq!(c.classify("エラーを教えて"), InputType::NaturalLanguage);
-        assert_eq!(c.classify("このファイルを修正して"), InputType::NaturalLanguage);
+        assert_eq!(
+            c.classify("このファイルを修正して"),
+            InputType::NaturalLanguage
+        );
         assert_eq!(c.classify("gitとは"), InputType::NaturalLanguage);
         assert_eq!(c.classify("これはなんですか"), InputType::NaturalLanguage);
     }
@@ -338,8 +355,14 @@ mod tests {
     fn path_cache_contains_common_commands() {
         let c = test_classifier();
         // ls と cat は macOS/Linux のどちらにも存在するはず
-        assert!(c.path_commands.contains("ls"), "PATH cache should contain 'ls'");
-        assert!(c.path_commands.contains("cat"), "PATH cache should contain 'cat'");
+        assert!(
+            c.path_commands.contains("ls"),
+            "PATH cache should contain 'ls'"
+        );
+        assert!(
+            c.path_commands.contains("cat"),
+            "PATH cache should contain 'cat'"
+        );
     }
 
     #[test]

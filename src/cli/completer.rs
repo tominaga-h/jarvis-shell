@@ -73,10 +73,7 @@ impl JarvishCompleter {
                     return None;
                 }
 
-                let is_dir = entry
-                    .file_type()
-                    .map(|ft| ft.is_dir())
-                    .unwrap_or(false);
+                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
 
                 // 補完値: ディレクトリ部分を保持し、ディレクトリには `/` を付与
                 let value = if let Some(idx) = partial.rfind('/') {

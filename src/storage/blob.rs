@@ -42,8 +42,8 @@ impl BlobStore {
         }
 
         // zstd 圧縮して書き込み
-        let compressed = zstd::encode_all(content.as_bytes(), 3)
-            .context("failed to compress blob content")?;
+        let compressed =
+            zstd::encode_all(content.as_bytes(), 3).context("failed to compress blob content")?;
         fs::write(&blob_path, &compressed)
             .with_context(|| format!("failed to write blob: {}", blob_path.display()))?;
 

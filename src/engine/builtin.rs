@@ -23,7 +23,7 @@ pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
 /// cd: カレントディレクトリを変更する。
 /// - 引数なし → `$HOME` へ移動
 /// - 引数あり → 指定パスへ移動
-/// 展開は execute 側で実施済み
+///   展開は execute 側で実施済み
 fn builtin_cd(args: &[&str]) -> CommandResult {
     let target: PathBuf = if let Some(path) = args.first() {
         PathBuf::from(path)
@@ -108,10 +108,7 @@ mod tests {
 
         let cwd = env::current_dir().unwrap();
         // macOS では /tmp → /private/tmp にシンボリックリンクされるため canonicalize する
-        assert_eq!(
-            cwd.canonicalize().unwrap(),
-            target.canonicalize().unwrap()
-        );
+        assert_eq!(cwd.canonicalize().unwrap(), target.canonicalize().unwrap());
     }
 
     #[test]

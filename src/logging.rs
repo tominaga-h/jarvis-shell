@@ -5,7 +5,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{FixedOffset, Utc};
 use tracing_subscriber::fmt::time::FormatTime;
@@ -62,7 +62,7 @@ impl JstRollingAppender {
     }
 
     /// 指定した日付のログファイルを開く（なければ作成）。
-    fn open_log_file(dir: &PathBuf, prefix: &str, date: chrono::NaiveDate) -> std::io::Result<File> {
+    fn open_log_file(dir: &Path, prefix: &str, date: chrono::NaiveDate) -> std::io::Result<File> {
         let filename = format!("{}.{}", prefix, date.format("%Y-%m-%d"));
         OpenOptions::new()
             .create(true)
