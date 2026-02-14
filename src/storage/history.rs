@@ -287,60 +287,7 @@ impl History for BlackBoxHistory {
     }
 
     fn search(&self, query: SearchQuery) -> Result<Vec<HistoryItem>, ReedlineError> {
-        // #region agent log
-        {
-            use std::io::Write;
-            let dir_str = match query.direction {
-                SearchDirection::Forward => "Forward",
-                SearchDirection::Backward => "Backward",
-            };
-            let cmd_filter = match &query.filter.command_line {
-                Some(CommandLineSearch::Prefix(p)) => format!("Prefix({})", p),
-                Some(CommandLineSearch::Substring(s)) => format!("Substring({})", s),
-                Some(CommandLineSearch::Exact(e)) => format!("Exact({})", e),
-                None => "None".to_string(),
-            };
-            let log = format!(
-                "{{\"sessionId\":\"866495\",\"hypothesisId\":\"A\",\"location\":\"history.rs:search\",\"message\":\"search called\",\"data\":{{\"direction\":\"{}\",\"start_id\":{},\"end_id\":{},\"limit\":{},\"cmd_filter\":\"{}\",\"cwd_exact\":{},\"exit_successful\":{}}},\"timestamp\":{}}}\n",
-                dir_str,
-                query.start_id.map(|id| id.0.to_string()).unwrap_or("null".to_string()),
-                query.end_id.map(|id| id.0.to_string()).unwrap_or("null".to_string()),
-                query.limit.map(|l| l.to_string()).unwrap_or("null".to_string()),
-                cmd_filter,
-                query.filter.cwd_exact.as_deref().map(|s| format!("\"{}\"", s)).unwrap_or("null".to_string()),
-                query.filter.exit_successful.map(|b| b.to_string()).unwrap_or("null".to_string()),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()
-            );
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/Users/mad-tmng/lab/rust/jarvis-shell/.cursor/debug-866495.log")
-            {
-                let _ = f.write_all(log.as_bytes());
-            }
-        }
-        // #endregion
-
         let (sql, params) = self.build_sql(&query, "id, command, cwd, exit_code, created_at");
-
-        // #region agent log
-        {
-            use std::io::Write;
-            let log = format!(
-                "{{\"sessionId\":\"866495\",\"hypothesisId\":\"A\",\"location\":\"history.rs:search_sql\",\"message\":\"generated SQL\",\"data\":{{\"sql\":\"{}\",\"param_count\":{}}},\"timestamp\":{}}}\n",
-                sql.replace('"', "\\\""),
-                params.len(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()
-            );
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/Users/mad-tmng/lab/rust/jarvis-shell/.cursor/debug-866495.log")
-            {
-                let _ = f.write_all(log.as_bytes());
-            }
-        }
-        // #endregion
 
         let mut stmt = self.conn.prepare(&sql).map_err(Self::to_reedline_err)?;
         let rows = stmt
@@ -351,35 +298,6 @@ impl History for BlackBoxHistory {
         for row in rows {
             items.push(row.map_err(Self::to_reedline_err)?);
         }
-
-        // #region agent log
-        {
-            use std::io::Write;
-            let ids: Vec<String> = items
-                .iter()
-                .map(|i| i.id.map(|id| id.0.to_string()).unwrap_or("?".to_string()))
-                .collect();
-            let cmds: Vec<String> = items
-                .iter()
-                .take(5)
-                .map(|i| i.command_line.clone())
-                .collect();
-            let log = format!(
-                "{{\"sessionId\":\"866495\",\"hypothesisId\":\"A\",\"location\":\"history.rs:search_result\",\"message\":\"search results\",\"data\":{{\"count\":{},\"ids\":[{}],\"cmds\":[{}]}},\"timestamp\":{}}}\n",
-                items.len(),
-                ids.iter().take(10).map(|s| s.as_str()).collect::<Vec<_>>().join(","),
-                cmds.iter().map(|s| format!("\"{}\"", s.replace('"', "\\\""))).collect::<Vec<_>>().join(","),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()
-            );
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/Users/mad-tmng/lab/rust/jarvis-shell/.cursor/debug-866495.log")
-            {
-                let _ = f.write_all(log.as_bytes());
-            }
-        }
-        // #endregion
 
         Ok(items)
     }
