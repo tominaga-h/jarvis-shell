@@ -10,7 +10,7 @@ use std::sync::Arc;
 use ai::client::{AiResponse, ConversationState, JarvisAI};
 use cli::completer::JarvishCompleter;
 use cli::highlighter::JarvisHighlighter;
-use cli::jarvis::{jarvis_ask_investigate, jarvis_command_notice};
+use cli::jarvis::{jarvis_ask_investigate, jarvis_notice};
 use cli::prompt::{JarvisPrompt, EXIT_CODE_NONE};
 use engine::classifier::{InputClassifier, InputType};
 use engine::{execute, try_builtin, CommandResult, LoopAction};
@@ -175,7 +175,7 @@ async fn main() {
                                             "AI continued conversation with a command"
                                         );
                                         from_tool_call = true;
-                                        jarvis_command_notice(cmd);
+                                        jarvis_notice(cmd);
                                         let mut result = execute(cmd);
                                         if result.stdout.is_empty() {
                                             result.stdout =
@@ -233,7 +233,7 @@ async fn main() {
                                             );
                                             from_tool_call = true;
                                             // AI が自然言語からコマンドを解釈 → 実行前にアナウンス
-                                            jarvis_command_notice(cmd);
+                                            jarvis_notice(cmd);
                                             let mut result = execute(cmd);
                                             // AI が実行したコマンドをコンテキストとして stdout に記録
                                             if result.stdout.is_empty() {
@@ -325,7 +325,7 @@ async fn main() {
                                 Ok(conv_result) => match conv_result.response {
                                     AiResponse::Command(ref fix_cmd) => {
                                         // AI が修正コマンドを提案 → 実行
-                                        jarvis_command_notice(fix_cmd);
+                                        jarvis_notice(fix_cmd);
                                         let fix_result = execute(fix_cmd);
                                         last_exit_code
                                             .store(fix_result.exit_code, Ordering::Relaxed);

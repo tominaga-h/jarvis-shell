@@ -23,7 +23,7 @@ use async_openai::{
 };
 use futures_util::StreamExt;
 
-use crate::cli::jarvis::{jarvis_print_chunk, jarvis_print_end, jarvis_print_prefix, jarvis_spinner, jarvis_talk};
+use crate::cli::jarvis::{jarvis_print_chunk, jarvis_print_end, jarvis_print_prefix, jarvis_read_file, jarvis_write_file, jarvis_spinner};
 use crate::engine::CommandResult;
 
 /// AI の判定結果
@@ -646,7 +646,7 @@ impl JarvisAI {
             None => return "Error: 'path' parameter is required".to_string(),
         };
 
-        jarvis_talk(&format!("Reading file: {path}"));
+        jarvis_read_file(&path);
 
         match std::fs::read_to_string(path) {
             Ok(content) => {
@@ -677,7 +677,7 @@ impl JarvisAI {
             None => return "Error: 'content' parameter is required".to_string(),
         };
 
-        jarvis_talk(&format!("Writing file: {path}"));
+        jarvis_write_file(&path);
 
         // 親ディレクトリが存在しない場合は作成
         if let Some(parent) = std::path::Path::new(path).parent() {

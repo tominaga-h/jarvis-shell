@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -303,6 +303,14 @@ fn run_single_command(simple: &SimpleCommand) -> CommandResult {
 /// 子プロセスをセッションリーダーとして起動し、PTY を制御端末として割り当てる。
 /// stdin は PTY 経由で転送し、stdout は PTY 経由でキャプチャする。
 fn run_single_command_pty_session(simple: &SimpleCommand) -> io::Result<CommandResult> {
+    // テストビルドでは PTY セッションモードを使用しない。
+    // PTY セッションは親ターミナルを raw mode（OPOST 無効）に変更するため、
+    // 複数テストが並列実行されるとターミナル状態のレースコンディションが発生し、
+    // 出力が斜めになる（\n → \r\n 変換が失われる）問題を引き起こす。
+    if cfg!(test) || !io::stdout().is_terminal() {
+        return Err(io::Error::other("PTY session not available"));
+    }
+
     let cmd = &simple.cmd;
     let args: Vec<&str> = simple.args.iter().map(|s| s.as_str()).collect();
 

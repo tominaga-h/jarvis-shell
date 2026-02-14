@@ -12,8 +12,18 @@ pub fn jarvis_talk(message: &str) {
 }
 
 /// Jarvis が Tool Call を受信してコマンドを実行するときに使う共通関数。
-pub fn jarvis_command_notice(command: &str) {
+pub fn jarvis_notice(command: &str) {
     println!("\n👉 {command}\n");
+}
+
+/// Jarvis がファイルを読み取るときに使う共通関数。
+pub fn jarvis_read_file(path: &str) {
+    println!("\n📖 Reading file: {path}\n");
+}
+
+/// Jarvis がファイルを書き込むときに使う共通関数。
+pub fn jarvis_write_file(path: &str) {
+    println!("\n📝 Writing file: {path}\n");
 }
 
 /// AI 処理中に表示するスピナーを生成・開始する。
