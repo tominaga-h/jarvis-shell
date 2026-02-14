@@ -30,6 +30,10 @@ async fn main() {
     let _guard = logging::init_logging();
     info!("\n\n==== J.A.R.V.I.S.H. STARTED ====\n");
 
+    // 入力分類器の初期化（PATH キャッシュを構築）
+    // ハイライターと REPL ループの両方で共有するため Arc で包む
+    let classifier = Arc::new(InputClassifier::new());
+
     // Tab 補完の設定
     let completer = Box::new(JarvishCompleter::new());
     let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
@@ -45,7 +49,7 @@ async fn main() {
     );
 
     let mut editor = Reedline::create()
-        .with_highlighter(Box::new(JarvisHighlighter::default()))
+        .with_highlighter(Box::new(JarvisHighlighter::new(Arc::clone(&classifier))))
         .with_completer(completer)
         .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
         .with_edit_mode(Box::new(Emacs::new(keybindings)));
@@ -85,9 +89,6 @@ async fn main() {
             None // API キー未設定時は AI 機能を無効化
         }
     };
-
-    // 入力分類器の初期化（PATH キャッシュを構築）
-    let classifier = InputClassifier::new();
 
     cli::banner::print_welcome();
 

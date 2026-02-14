@@ -1,5 +1,9 @@
+use std::sync::Arc;
+
 use nu_ansi_term::{Color, Style};
 use reedline::{Highlighter, StyledText};
+
+use crate::engine::classifier::{InputClassifier, InputType};
 
 /// Jarvis Shell 用のシンタックスハイライター
 ///
@@ -13,16 +17,28 @@ use reedline::{Highlighter, StyledText};
 /// - 文字列リテラル (`"..."`, `'...'`): Yellow
 /// - 閉じられていないクオート: Red (警告)
 /// - その他（引数など）: White
-pub struct JarvisHighlighter;
+///
+/// 自然言語入力時はハイライトを適用せず、プレーンテキストとして表示する。
+pub struct JarvisHighlighter {
+    classifier: Arc<InputClassifier>,
+}
 
-impl Default for JarvisHighlighter {
-    fn default() -> Self {
-        Self
+impl JarvisHighlighter {
+    /// InputClassifier を共有して新しいハイライターを作成する。
+    pub fn new(classifier: Arc<InputClassifier>) -> Self {
+        Self { classifier }
     }
 }
 
 impl Highlighter for JarvisHighlighter {
     fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
+        // 自然言語入力にはハイライトを適用しない（プレーンテキストで返す）
+        if self.classifier.classify(line) == InputType::NaturalLanguage {
+            let mut styled = StyledText::new();
+            styled.push((Style::default(), line.to_string()));
+            return styled;
+        }
+
         let mut styled = StyledText::new();
         let mut chars = line.chars().peekable();
         let mut current_word = String::new();
@@ -124,9 +140,14 @@ fn style_word(styled: &mut StyledText, word: &str, is_command: &mut bool) {
 mod tests {
     use super::*;
 
+    /// テスト用ハイライターを作成するヘルパー
+    fn test_highlighter() -> JarvisHighlighter {
+        JarvisHighlighter::new(Arc::new(InputClassifier::new()))
+    }
+
     /// ハイライト結果から (Style, String) のペア一覧を取得するヘルパー
     fn highlight_segments(input: &str) -> Vec<(Style, String)> {
-        let h = JarvisHighlighter;
+        let h = test_highlighter();
         let styled = h.highlight(input, 0);
         styled.buffer.clone()
     }
@@ -371,6 +392,48 @@ mod tests {
                 (pipe_style(), "|".into()),
                 (cmd_style(), "grep".into()),
             ]
+        );
+    }
+
+    // ── 自然言語入力はハイライトしない ──
+
+    #[test]
+    fn test_natural_language_no_highlight() {
+        // 自然言語入力はプレーンテキスト（スタイルなし）で返される
+        let segs = highlight_segments("what does this error mean?");
+        assert_eq!(
+            segs,
+            vec![(Style::default(), "what does this error mean?".into())]
+        );
+    }
+
+    #[test]
+    fn test_jarvis_trigger_no_highlight() {
+        // Jarvis トリガーはハイライトされない
+        let segs = highlight_segments("jarvis, help me");
+        assert_eq!(
+            segs,
+            vec![(Style::default(), "jarvis, help me".into())]
+        );
+    }
+
+    #[test]
+    fn test_japanese_natural_language_no_highlight() {
+        // 日本語の自然言語入力はハイライトされない
+        let segs = highlight_segments("エラーを教えて");
+        assert_eq!(
+            segs,
+            vec![(Style::default(), "エラーを教えて".into())]
+        );
+    }
+
+    #[test]
+    fn test_please_request_no_highlight() {
+        // "please" で始まる依頼表現はハイライトされない
+        let segs = highlight_segments("please explain the output");
+        assert_eq!(
+            segs,
+            vec![(Style::default(), "please explain the output".into())]
         );
     }
 }
