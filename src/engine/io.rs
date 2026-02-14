@@ -169,6 +169,10 @@ pub(super) fn tee_to_terminal<R: Read>(read: R, is_stderr: bool) -> Vec<u8> {
 
 /// stderr パイプからデータを読み取り、ターミナルに表示しつつバッファに蓄積する。
 /// PTY セッション用。
+///
+/// raw mode では OPOST が無効のため `\n` → `\r\n` 自動変換が行われない。
+/// stderr は os_pipe 経由なので、ターミナル出力時に手動で変換する。
+/// キャプチャバッファには生データを保存する。
 pub(super) fn tee_stderr(read: os_pipe::PipeReader) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut reader = io::BufReader::new(read);
@@ -179,13 +183,31 @@ pub(super) fn tee_stderr(read: os_pipe::PipeReader) -> Vec<u8> {
             Ok(0) => break,
             Ok(n) => {
                 let chunk = &read_buf[..n];
-                let mut err = io::stderr().lock();
-                let _ = err.write_all(chunk);
-                let _ = err.flush();
                 buf.extend_from_slice(chunk);
+
+                // ターミナル出力時は bare \n → \r\n に変換
+                let converted = convert_lf_to_crlf(chunk);
+                let mut err = io::stderr().lock();
+                let _ = err.write_all(&converted);
+                let _ = err.flush();
             }
             Err(_) => break,
         }
     }
     buf
+}
+
+/// bare `\n` を `\r\n` に変換する（ターミナル raw mode 出力用）。
+/// 既存の `\r\n` はそのまま保持する。
+fn convert_lf_to_crlf(input: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(input.len());
+    let mut prev = 0u8;
+    for &byte in input {
+        if byte == b'\n' && prev != b'\r' {
+            output.push(b'\r');
+        }
+        output.push(byte);
+        prev = byte;
+    }
+    output
 }

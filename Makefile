@@ -1,6 +1,6 @@
 HOOKS_DIR := $(shell git rev-parse --git-common-dir)/hooks
 
-.PHONY: install-hooks uninstall-hooks
+.PHONY: install-hooks uninstall-hooks test
 
 install-hooks: ## Install git hooks
 	@mkdir -p $(HOOKS_DIR)
@@ -11,3 +11,6 @@ install-hooks: ## Install git hooks
 uninstall-hooks: ## Remove git hooks
 	rm -f $(HOOKS_DIR)/pre-push
 	@echo "Removed pre-push hook"
+
+check: ## Run pre-push checks
+	bash githooks/pre-push.sh --no-hook --fix
