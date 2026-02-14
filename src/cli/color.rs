@@ -13,6 +13,7 @@ pub fn red(text: &str) -> String {
     styled(Color::LightRed, text, false)
 }
 
+#[allow(dead_code)]
 pub fn magenta(text: &str) -> String {
     styled(Color::Magenta, text, false)
 }

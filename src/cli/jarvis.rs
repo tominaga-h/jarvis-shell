@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressStyle};
 
-use super::color::{cyan, white, yellow};
+use super::color::{white, red};
 
 /// Jarvis が発話するときに使う共通関数。
 /// 先頭に 🤵 絵文字を付与し、白色テキストで表示する。
@@ -60,9 +60,9 @@ pub fn jarvis_print_end() {
 /// 入力した場合に `true` を返す。それ以外は `false`。
 pub fn jarvis_ask_investigate(exit_code: i32) -> bool {
     print!(
-        "🤵 {} {}",
-        cyan(&format!("Sir, the command exited with an error (code: {exit_code}).")),
-        yellow("Would you like to investigate? [Y/n]: ")
+        "🤵 Sir, {} {}",
+        red(&format!("the command exited with an error (code: {exit_code}).")),
+        white("Would you like to investigate? [Y/n]: ")
     );
     let _ = io::stdout().flush();
 
