@@ -19,7 +19,7 @@ fn expand_tilde(path: &str) -> String {
     } else if let Some(rest) = path.strip_prefix("~/") {
         // `~/...` の場合
         match env::var("HOME") {
-            Ok(home) => format!("{}/{}", home, rest),
+            Ok(home) => format!("{home}/{rest}"),
             Err(_) => path.to_string(),
         }
     } else {

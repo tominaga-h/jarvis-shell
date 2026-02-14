@@ -75,11 +75,7 @@ impl Prompt for JarvisPrompt {
             .unwrap_or_else(|_| "?".to_string());
 
         let git_part = match current_git_branch() {
-            Some(branch) => format!(
-                " {} {}",
-                white("on"),
-                cyan(&format!("\u{e0a0} {branch}"))
-            ),
+            Some(branch) => format!(" {} {}", white("on"), cyan(&format!("\u{e0a0} {branch}"))),
             None => String::new(),
         };
 

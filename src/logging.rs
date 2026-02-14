@@ -5,7 +5,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{FixedOffset, Utc};
 use tracing_subscriber::fmt::time::FormatTime;

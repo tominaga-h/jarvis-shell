@@ -63,16 +63,14 @@ pub fn parse_pipeline(tokens: Vec<String>) -> Result<Pipeline, ParseError> {
 }
 
 /// トークン列を `|` で分割し、各セグメントを返す。
-fn split_by_pipe<'a>(tokens: &'a [String]) -> Result<Vec<&'a [String]>, ParseError> {
+fn split_by_pipe(tokens: &[String]) -> Result<Vec<&[String]>, ParseError> {
     let mut segments: Vec<&[String]> = Vec::new();
     let mut start = 0;
 
     for (i, token) in tokens.iter().enumerate() {
         if token == "|" {
             if i == start {
-                return Err(ParseError(
-                    "syntax error: unexpected token '|'".to_string(),
-                ));
+                return Err(ParseError("syntax error: unexpected token '|'".to_string()));
             }
             segments.push(&tokens[start..i]);
             start = i + 1;
@@ -163,12 +161,7 @@ mod tests {
 
     #[test]
     fn two_commands_piped() {
-        let tokens = vec![
-            "git".into(),
-            "log".into(),
-            "|".into(),
-            "head".into(),
-        ];
+        let tokens = vec!["git".into(), "log".into(), "|".into(), "head".into()];
         let pipeline = parse_pipeline(tokens).unwrap();
         assert_eq!(pipeline.commands.len(), 2);
         assert_eq!(pipeline.commands[0].cmd, "git");
@@ -202,12 +195,7 @@ mod tests {
 
     #[test]
     fn stdout_overwrite_redirect() {
-        let tokens = vec![
-            "echo".into(),
-            "hello".into(),
-            ">".into(),
-            "out.txt".into(),
-        ];
+        let tokens = vec!["echo".into(), "hello".into(), ">".into(), "out.txt".into()];
         let pipeline = parse_pipeline(tokens).unwrap();
         assert_eq!(pipeline.commands.len(), 1);
         assert_eq!(pipeline.commands[0].cmd, "echo");
@@ -220,12 +208,7 @@ mod tests {
 
     #[test]
     fn stdout_append_redirect() {
-        let tokens = vec![
-            "echo".into(),
-            "hello".into(),
-            ">>".into(),
-            "out.txt".into(),
-        ];
+        let tokens = vec!["echo".into(), "hello".into(), ">>".into(), "out.txt".into()];
         let pipeline = parse_pipeline(tokens).unwrap();
         assert_eq!(
             pipeline.commands[0].redirects,
@@ -235,11 +218,7 @@ mod tests {
 
     #[test]
     fn stdin_redirect() {
-        let tokens = vec![
-            "cat".into(),
-            "<".into(),
-            "input.txt".into(),
-        ];
+        let tokens = vec!["cat".into(), "<".into(), "input.txt".into()];
         let pipeline = parse_pipeline(tokens).unwrap();
         assert_eq!(
             pipeline.commands[0].redirects,

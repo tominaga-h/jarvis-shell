@@ -373,11 +373,7 @@ mod tests {
         let segs = highlight_segments("   ");
         assert_eq!(
             segs,
-            vec![
-                (ws(), " ".into()),
-                (ws(), " ".into()),
-                (ws(), " ".into()),
-            ]
+            vec![(ws(), " ".into()), (ws(), " ".into()), (ws(), " ".into()),]
         );
     }
 
@@ -411,20 +407,14 @@ mod tests {
     fn test_jarvis_trigger_no_highlight() {
         // Jarvis トリガーはハイライトされない
         let segs = highlight_segments("jarvis, help me");
-        assert_eq!(
-            segs,
-            vec![(Style::default(), "jarvis, help me".into())]
-        );
+        assert_eq!(segs, vec![(Style::default(), "jarvis, help me".into())]);
     }
 
     #[test]
     fn test_japanese_natural_language_no_highlight() {
         // 日本語の自然言語入力はハイライトされない
         let segs = highlight_segments("エラーを教えて");
-        assert_eq!(
-            segs,
-            vec![(Style::default(), "エラーを教えて".into())]
-        );
+        assert_eq!(segs, vec![(Style::default(), "エラーを教えて".into())]);
     }
 
     #[test]
