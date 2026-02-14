@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 
 use reedline::HistoryItem;
 
-use crate::engine::classifier::InputType;
+use crate::engine::classifier::{is_ai_goodbye_response, InputType};
 use crate::engine::{execute, try_builtin, CommandResult, LoopAction};
 
 use super::Shell;
@@ -40,6 +40,11 @@ impl Shell {
 
         // 3. 入力タイプに応じて実行
         let (result, from_tool_call, should_update_exit_code, executed_command) = match input_type {
+            InputType::Goodbye => {
+                // Goodbye → シェル終了（farewell メッセージは run() 側で表示）
+                info!("Goodbye input detected, exiting shell");
+                return false;
+            }
             InputType::Command => {
                 // コマンド → AI を介さず直接実行
                 debug!(input = %line, "Executing as command (no AI)");
@@ -82,6 +87,14 @@ impl Shell {
         // 7. エラー調査フロー
         if result.exit_code != 0 {
             self.investigate_error(&line, &result, from_tool_call).await;
+        }
+
+        // 8. AI Goodbye 検出: AI の応答が farewell を含む場合はシェル終了
+        //    AI が既に farewell を言っているためバナーは非表示にする
+        if !from_tool_call && is_ai_goodbye_response(&result.stdout) {
+            info!("AI goodbye response detected, exiting shell");
+            self.farewell_shown = true;
+            return false;
         }
 
         info!("\n==== FINISHED PROCESS ====\n\n");

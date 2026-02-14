@@ -8,7 +8,7 @@ mod editor;
 mod input;
 mod investigate;
 
-use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
 use reedline::{Reedline, Signal};
@@ -29,6 +29,8 @@ pub struct Shell {
     conversation_state: Option<ConversationState>,
     last_exit_code: Arc<AtomicI32>,
     classifier: Arc<InputClassifier>,
+    /// Farewell メッセージが既に表示済みかどうか（AI goodbye 等で表示済みの場合 true）
+    farewell_shown: bool,
 }
 
 impl Shell {
@@ -90,15 +92,23 @@ impl Shell {
             conversation_state: None,
             last_exit_code,
             classifier,
+            farewell_shown: false,
         }
     }
 
     /// REPL ループを実行する。
     ///
     /// ユーザー入力を受け取り、ビルトイン/コマンド/自然言語を処理する。
-    /// Ctrl-D またはexit コマンドで終了する。
-    pub async fn run(&mut self) {
+    /// Ctrl-D、exit コマンド、または goodbye 入力で終了する。
+    ///
+    /// 戻り値: シェルの終了コード。
+    /// - 通常: 直前に実行したコマンドの終了コードを返す（bash/zsh と同じ挙動）
+    /// - `exit N`: 引数で指定された終了コード
+    /// - REPL 内部エラー: `1`
+    pub async fn run(&mut self) -> i32 {
         crate::cli::banner::print_welcome();
+
+        let mut repl_error = false;
 
         loop {
             match self.editor.read_line(&self.prompt) {
@@ -120,8 +130,26 @@ impl Shell {
                 Err(e) => {
                     warn!(error = %e, "REPL error, exiting");
                     eprintln!("jarvish: error: {e}");
+                    repl_error = true;
                     break;
                 }
+            }
+        }
+
+        // Farewell メッセージ表示（AI goodbye で既に表示済みの場合はスキップ）
+        if !self.farewell_shown {
+            crate::cli::banner::print_goodbye();
+        }
+
+        // 終了コードを決定
+        if repl_error {
+            1
+        } else {
+            let code = self.last_exit_code.load(Ordering::Relaxed);
+            if code == EXIT_CODE_NONE {
+                0
+            } else {
+                code
             }
         }
     }

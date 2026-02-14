@@ -16,6 +16,8 @@ pub enum InputType {
     Command,
     /// 自然言語（AI に送信して応答を生成）
     NaturalLanguage,
+    /// Goodbye（シェルを終了する）
+    Goodbye,
 }
 
 /// アルゴリズムベースの入力分類器
@@ -41,6 +43,7 @@ impl InputClassifier {
     /// ユーザー入力を分類する。
     ///
     /// 判定ロジック（優先順位順）:
+    /// 0. Goodbye パターン → Goodbye（最優先）
     /// 1. Jarvis トリガー → NaturalLanguage
     /// 2. 自然言語パターン → NaturalLanguage
     /// 3. パス実行パターン → Command
@@ -51,6 +54,12 @@ impl InputClassifier {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return InputType::Command;
+        }
+
+        // 0. Goodbye パターン（最優先）
+        if Self::is_goodbye_pattern(trimmed) {
+            debug!(input = %trimmed, reason = "goodbye_pattern", "Classified as Goodbye");
+            return InputType::Goodbye;
         }
 
         // 1. Jarvis トリガー
@@ -92,6 +101,97 @@ impl InputClassifier {
     }
 
     // ========== プライベートヘルパー ==========
+
+    /// ユーザー入力が Goodbye パターンにマッチするかを判定する。
+    ///
+    /// 英語・日本語の別れの挨拶を検出する。
+    /// 誤検出を防ぐため、入力が短い（概ね3語以下）場合に限定する。
+    fn is_goodbye_pattern(input: &str) -> bool {
+        let lower = input.to_lowercase();
+
+        // Jarvis 呼びかけプレフィックスを除去して本文を取得
+        let body = Self::strip_jarvis_prefix(&lower);
+
+        // 本文が長すぎる場合は goodbye 意図ではないと判定（"say goodbye to X" 等を除外）
+        let word_count = body.split_whitespace().count();
+        if word_count > 4 {
+            return false;
+        }
+
+        // 英語 goodbye パターン（完全一致 or 先頭一致）
+        let goodbye_phrases = [
+            "bye",
+            "bye bye",
+            "bye-bye",
+            "byebye",
+            "goodbye",
+            "good bye",
+            "good-bye",
+            "see you",
+            "see ya",
+            "good night",
+            "goodnight",
+            "farewell",
+            "ciao",
+        ];
+
+        for phrase in &goodbye_phrases {
+            if body == *phrase || body.starts_with(&format!("{phrase} ")) {
+                return true;
+            }
+        }
+
+        // 日本語 goodbye パターン（末尾一致 or 完全一致）
+        let jp_patterns = [
+            "さようなら",
+            "さよなら",
+            "おやすみ",
+            "おやすみなさい",
+            "バイバイ",
+            "ばいばい",
+            "じゃあね",
+            "じゃね",
+            "またね",
+            "また明日",
+            "またあとで",
+            "おつかれ",
+            "おつかれさま",
+            "おつかれさまでした",
+            "お疲れ様",
+            "お疲れさま",
+            "お疲れさまでした",
+        ];
+
+        for pattern in &jp_patterns {
+            if body == *pattern || body.ends_with(pattern) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Jarvis 呼びかけプレフィックス（"jarvis, ", "hey jarvis, ", "j, " 等）を除去する。
+    fn strip_jarvis_prefix(input: &str) -> &str {
+        let prefixes = [
+            "hey jarvis, ",
+            "hey jarvis,",
+            "hey jarvis ",
+            "jarvis, ",
+            "jarvis,",
+            "jarvis ",
+            "j, ",
+            "j,",
+        ];
+
+        for prefix in &prefixes {
+            if let Some(rest) = input.strip_prefix(prefix) {
+                return rest.trim();
+            }
+        }
+
+        input
+    }
 
     /// PATH 環境変数を走査し、実行可能ファイル名を HashSet に格納する。
     fn build_path_cache() -> HashSet<String> {
@@ -216,6 +316,46 @@ impl InputClassifier {
     fn first_token(input: &str) -> &str {
         input.split_whitespace().next().unwrap_or("")
     }
+}
+
+/// AI の応答テキストが Goodbye（別れの挨拶）を含むかを判定する。
+///
+/// 誤検出を防ぐため、応答テキストの末尾付近（最後の3行）のみを検査する。
+/// AI が文中で "goodbye" に言及しただけの場合はトリガーしない。
+pub fn is_ai_goodbye_response(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // 末尾3行を取得して検査対象とする
+    let lines: Vec<&str> = trimmed.lines().collect();
+    let tail_start = if lines.len() > 3 { lines.len() - 3 } else { 0 };
+    let tail = lines[tail_start..].join("\n").to_lowercase();
+
+    let farewell_patterns = [
+        // 英語
+        "goodbye",
+        "good bye",
+        "farewell",
+        "signing off",
+        "until next time",
+        "see you later",
+        "see you soon",
+        "good night",
+        "take care",
+        // 日本語
+        "さようなら",
+        "さよなら",
+        "おやすみなさい",
+        "良い夜を",
+        "良い一日を",
+        "お疲れ様",
+        "お疲れさま",
+        "またお会い",
+    ];
+
+    farewell_patterns.iter().any(|p| tail.contains(p))
 }
 
 #[cfg(test)]
@@ -384,5 +524,124 @@ mod tests {
     fn classify_semicolon_command() {
         let c = test_classifier();
         assert_eq!(c.classify("echo hello; echo world"), InputType::Command);
+    }
+
+    // ── InputType: Goodbye 判定 ──
+
+    #[test]
+    fn classify_goodbye_english() {
+        let c = test_classifier();
+        assert_eq!(c.classify("bye"), InputType::Goodbye);
+        assert_eq!(c.classify("Bye"), InputType::Goodbye);
+        assert_eq!(c.classify("BYE"), InputType::Goodbye);
+        assert_eq!(c.classify("bye bye"), InputType::Goodbye);
+        assert_eq!(c.classify("bye-bye"), InputType::Goodbye);
+        assert_eq!(c.classify("goodbye"), InputType::Goodbye);
+        assert_eq!(c.classify("Goodbye"), InputType::Goodbye);
+        assert_eq!(c.classify("good bye"), InputType::Goodbye);
+        assert_eq!(c.classify("farewell"), InputType::Goodbye);
+        assert_eq!(c.classify("see you"), InputType::Goodbye);
+        assert_eq!(c.classify("see ya"), InputType::Goodbye);
+        assert_eq!(c.classify("good night"), InputType::Goodbye);
+        assert_eq!(c.classify("goodnight"), InputType::Goodbye);
+        assert_eq!(c.classify("ciao"), InputType::Goodbye);
+    }
+
+    #[test]
+    fn classify_goodbye_japanese() {
+        let c = test_classifier();
+        assert_eq!(c.classify("さようなら"), InputType::Goodbye);
+        assert_eq!(c.classify("さよなら"), InputType::Goodbye);
+        assert_eq!(c.classify("おやすみ"), InputType::Goodbye);
+        assert_eq!(c.classify("おやすみなさい"), InputType::Goodbye);
+        assert_eq!(c.classify("バイバイ"), InputType::Goodbye);
+        assert_eq!(c.classify("ばいばい"), InputType::Goodbye);
+        assert_eq!(c.classify("じゃあね"), InputType::Goodbye);
+        assert_eq!(c.classify("じゃね"), InputType::Goodbye);
+        assert_eq!(c.classify("またね"), InputType::Goodbye);
+        assert_eq!(c.classify("また明日"), InputType::Goodbye);
+        assert_eq!(c.classify("おつかれ"), InputType::Goodbye);
+        assert_eq!(c.classify("おつかれさま"), InputType::Goodbye);
+        assert_eq!(c.classify("おつかれさまでした"), InputType::Goodbye);
+        assert_eq!(c.classify("お疲れ様"), InputType::Goodbye);
+    }
+
+    #[test]
+    fn classify_goodbye_with_jarvis_prefix() {
+        let c = test_classifier();
+        assert_eq!(c.classify("jarvis, goodbye"), InputType::Goodbye);
+        assert_eq!(c.classify("Jarvis goodbye"), InputType::Goodbye);
+        assert_eq!(c.classify("hey jarvis, bye"), InputType::Goodbye);
+        assert_eq!(c.classify("j, bye"), InputType::Goodbye);
+        assert_eq!(c.classify("jarvis, おやすみ"), InputType::Goodbye);
+    }
+
+    #[test]
+    fn classify_goodbye_with_trailing_words() {
+        let c = test_classifier();
+        // 短い追加語は許容する
+        assert_eq!(c.classify("bye jarvis"), InputType::Goodbye);
+        assert_eq!(c.classify("goodbye sir"), InputType::Goodbye);
+        assert_eq!(c.classify("see you later"), InputType::Goodbye);
+    }
+
+    #[test]
+    fn classify_goodbye_false_positives() {
+        let c = test_classifier();
+        // 長い文の中に goodbye が含まれる場合は goodbye として扱わない
+        assert_ne!(
+            c.classify("say goodbye to the old config file and update"),
+            InputType::Goodbye
+        );
+        assert_ne!(
+            c.classify("echo goodbye world from here today"),
+            InputType::Goodbye
+        );
+    }
+
+    // ── AI Goodbye レスポンス検出 ──
+
+    #[test]
+    fn ai_goodbye_response_english() {
+        assert!(is_ai_goodbye_response("Goodbye, sir. It was a pleasure."));
+        assert!(is_ai_goodbye_response(
+            "I've completed the task.\nFarewell, sir."
+        ));
+        assert!(is_ai_goodbye_response(
+            "That's all done.\nUntil next time, sir."
+        ));
+        assert!(is_ai_goodbye_response("Take care, sir. Signing off."));
+    }
+
+    #[test]
+    fn ai_goodbye_response_japanese() {
+        assert!(is_ai_goodbye_response("承知しました。さようなら。"));
+        assert!(is_ai_goodbye_response(
+            "タスクは完了しました。\nおやすみなさい。"
+        ));
+        assert!(is_ai_goodbye_response("お疲れ様でした。良い一日を。"));
+    }
+
+    #[test]
+    fn ai_goodbye_response_not_goodbye() {
+        // 空テキスト
+        assert!(!is_ai_goodbye_response(""));
+        // farewell パターンを含まない通常応答
+        assert!(!is_ai_goodbye_response(
+            "Here is the command you need: ls -la"
+        ));
+        assert!(!is_ai_goodbye_response("エラーの原因はこちらです。"));
+    }
+
+    #[test]
+    fn ai_goodbye_response_only_checks_tail() {
+        // 先頭に goodbye があっても末尾3行になければ検出しない
+        let long_response = "Goodbye was mentioned here.\n\
+                             Line 2\n\
+                             Line 3\n\
+                             Line 4\n\
+                             Line 5\n\
+                             This is just a normal response.";
+        assert!(!is_ai_goodbye_response(long_response));
     }
 }

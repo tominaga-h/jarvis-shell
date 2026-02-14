@@ -14,11 +14,13 @@ async fn main() {
 
     // ログシステムの初期化（_guard は main 終了まで保持する必要がある）
     let _guard = logging::init_logging();
+
     info!("\n\n==== J.A.R.V.I.S.H. STARTED ====\n");
 
     let mut shell = shell::Shell::new();
-    shell.run().await;
+    let exit_code = shell.run().await;
 
     info!("\n\n==== J.A.R.V.I.S.H. SHUTTING DOWN ====\n\n");
-    cli::banner::print_goodbye();
+
+    std::process::exit(exit_code);
 }

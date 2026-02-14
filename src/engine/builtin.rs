@@ -15,7 +15,7 @@ pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
     match cmd {
         "cd" => Some(builtin_cd(args)),
         "cwd" => Some(builtin_cwd()),
-        "exit" => Some(builtin_exit()),
+        "exit" => Some(builtin_exit(args)),
         _ => None,
     }
 }
@@ -66,8 +66,26 @@ fn builtin_cwd() -> CommandResult {
 }
 
 /// exit: REPL ループを終了する。
-fn builtin_exit() -> CommandResult {
-    CommandResult::exit()
+/// - 引数なし → 終了コード 0
+/// - `exit N` → 終了コード N（0〜255。範囲外は 255 にクランプ）
+/// - `exit foo` → エラー（数値でない引数）
+fn builtin_exit(args: &[&str]) -> CommandResult {
+    match args.first() {
+        None => CommandResult::exit_with(0),
+        Some(code_str) => match code_str.parse::<i32>() {
+            Ok(code) => {
+                // bash と同様に 0〜255 の範囲にクランプ
+                let code = code.clamp(0, 255);
+                CommandResult::exit_with(code)
+            }
+            Err(_) => {
+                let msg = format!("jarvish: exit: {code_str}: numeric argument required\n");
+                eprint!("{msg}");
+                // bash と同様に不正な引数では終了コード 2 で終了する
+                CommandResult::exit_with(2)
+            }
+        },
+    }
 }
 
 #[cfg(test)]
@@ -155,6 +173,39 @@ mod tests {
         let result = dispatch_builtin("exit", &[]).unwrap();
         assert_eq!(result.action, LoopAction::Exit);
         assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn exit_with_code_returns_specified_code() {
+        let result = dispatch_builtin("exit", &["1"]).unwrap();
+        assert_eq!(result.action, LoopAction::Exit);
+        assert_eq!(result.exit_code, 1);
+
+        let result = dispatch_builtin("exit", &["127"]).unwrap();
+        assert_eq!(result.action, LoopAction::Exit);
+        assert_eq!(result.exit_code, 127);
+
+        let result = dispatch_builtin("exit", &["0"]).unwrap();
+        assert_eq!(result.action, LoopAction::Exit);
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn exit_clamps_out_of_range_code() {
+        let result = dispatch_builtin("exit", &["999"]).unwrap();
+        assert_eq!(result.action, LoopAction::Exit);
+        assert_eq!(result.exit_code, 255);
+
+        let result = dispatch_builtin("exit", &["-1"]).unwrap();
+        assert_eq!(result.action, LoopAction::Exit);
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn exit_non_numeric_returns_error() {
+        let result = dispatch_builtin("exit", &["foo"]).unwrap();
+        assert_eq!(result.action, LoopAction::Exit);
+        assert_eq!(result.exit_code, 2);
     }
 
     #[test]

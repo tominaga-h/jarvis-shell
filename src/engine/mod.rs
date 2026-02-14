@@ -62,12 +62,12 @@ impl CommandResult {
         }
     }
 
-    /// Exit アクションを返すヘルパー
-    pub fn exit() -> Self {
+    /// 指定した終了コードで Exit アクションを返すヘルパー
+    pub fn exit_with(exit_code: i32) -> Self {
         Self {
             stdout: String::new(),
             stderr: String::new(),
-            exit_code: 0,
+            exit_code,
             action: LoopAction::Exit,
             used_alt_screen: false,
         }
