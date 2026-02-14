@@ -1,4 +1,5 @@
 pub mod blob;
+pub mod history;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -9,6 +10,8 @@ use tracing::debug;
 
 use crate::engine::CommandResult;
 use blob::BlobStore;
+
+pub use history::BlackBoxHistory;
 
 /// コマンド履歴エントリ。AI コンテキストとして使用する。
 #[derive(Debug, Clone)]
@@ -54,8 +57,11 @@ impl BlackBox {
     }
 
     /// コマンド実行結果を記録する。
-    /// stdout/stderr が空でなければ Blob として保存し、メタデータを DB に INSERT する。
+    /// stdout/stderr が空でなければ Blob として保存し、メタデータを DB に UPDATE する。
     /// Alternate Screen を使用した TUI コマンドの場合、stdout blob はスキップする。
+    ///
+    /// reedline の History::save() が先に INSERT しているため、
+    /// 最新の該当行を UPDATE する。該当行が見つからない場合は INSERT にフォールバックする。
     pub fn record(&self, command: &str, result: &CommandResult) -> Result<()> {
         debug!(
             command = %command,
@@ -75,25 +81,39 @@ impl BlackBox {
         }?;
         let stderr_hash = self.blob_store.store(&result.stderr)?;
 
-        let cwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let created_at = Utc::now().to_rfc3339();
-
-        self.conn
+        // reedline の save() が先に INSERT した最新行を UPDATE する
+        let rows_updated = self
+            .conn
             .execute(
-                "INSERT INTO command_history (command, cwd, exit_code, stdout_hash, stderr_hash, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    command,
-                    cwd,
-                    result.exit_code,
-                    stdout_hash,
-                    stderr_hash,
-                    created_at,
-                ],
+                "UPDATE command_history \
+                 SET exit_code = ?1, stdout_hash = ?2, stderr_hash = ?3 \
+                 WHERE id = (SELECT MAX(id) FROM command_history WHERE command = ?4)",
+                rusqlite::params![result.exit_code, stdout_hash, stderr_hash, command,],
             )
-            .context("failed to insert command history")?;
+            .context("failed to update command history")?;
+
+        // save() が呼ばれていない場合（初回起動時やテスト時）は INSERT にフォールバック
+        if rows_updated == 0 {
+            let cwd = std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let created_at = Utc::now().to_rfc3339();
+
+            self.conn
+                .execute(
+                    "INSERT INTO command_history (command, cwd, exit_code, stdout_hash, stderr_hash, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        command,
+                        cwd,
+                        result.exit_code,
+                        stdout_hash,
+                        stderr_hash,
+                        created_at,
+                    ],
+                )
+                .context("failed to insert command history")?;
+        }
 
         Ok(())
     }
@@ -200,7 +220,8 @@ impl BlackBox {
 
     /// データディレクトリのパスを返す。
     /// `directories` クレートを使用してプラットフォームに応じたパスを決定する。
-    fn data_dir() -> Result<PathBuf> {
+    /// BlackBoxHistory からも使用するため `pub(crate)` にしている。
+    pub(crate) fn data_dir() -> Result<PathBuf> {
         let proj_dirs =
             ProjectDirs::from("", "", "jarvish").context("failed to determine data directory")?;
         Ok(proj_dirs.data_dir().to_path_buf())

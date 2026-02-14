@@ -40,7 +40,15 @@ impl Shell {
         // ハイライターと REPL ループの両方で共有するため Arc で包む
         let classifier = Arc::new(InputClassifier::new());
 
-        let reedline = editor::build_editor(Arc::clone(&classifier));
+        // 履歴 DB のパスを決定（BlackBox と同じ history.db を共有）
+        let db_path = BlackBox::data_dir()
+            .map(|dir| dir.join("history.db"))
+            .unwrap_or_else(|_| {
+                warn!("Failed to determine data directory for history, using fallback");
+                std::path::PathBuf::from(".jarvish_history.db")
+            });
+
+        let reedline = editor::build_editor(Arc::clone(&classifier), db_path);
 
         // 直前コマンドの終了コードを共有するアトミック変数
         // 初期値は EXIT_CODE_NONE（未設定）。コマンド実行時に実際の終了コードで上書きされる。
