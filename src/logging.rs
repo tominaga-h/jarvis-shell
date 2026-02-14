@@ -63,7 +63,7 @@ impl JstRollingAppender {
 
     /// 指定した日付のログファイルを開く（なければ作成）。
     fn open_log_file(dir: &Path, prefix: &str, date: chrono::NaiveDate) -> std::io::Result<File> {
-        let filename = format!("{}.{}", prefix, date.format("%Y-%m-%d"));
+        let filename = format!("{}_{}.log", prefix, date.format("%Y-%m-%d"));
         OpenOptions::new()
             .create(true)
             .append(true)
@@ -108,7 +108,7 @@ fn log_dir() -> PathBuf {
 /// ログシステムを初期化する。
 ///
 /// - ログレベルは `JARVISH_LOG` 環境変数で制御（デフォルト: `debug`）
-/// - ログファイルは `var/logs/jarvish.log.YYYY-MM-DD` に日次ローテーション（JST基準）で出力
+/// - ログファイルは `var/logs/jarvish_YYYY-MM-DD.log` に日次ローテーション（JST基準）で出力
 /// - タイムスタンプは JST (UTC+09:00) で記録
 /// - フォーマット: タイムスタンプ + レベル + ターゲット + メッセージ
 ///
@@ -127,13 +127,12 @@ pub fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
     }
 
     // JST ベースの日次ローテーションアペンダーを作成
-    let file_appender =
-        JstRollingAppender::new(log_dir.clone(), "jarvish.log").unwrap_or_else(|e| {
-            panic!(
-                "jarvish: failed to create log file in {}: {e}",
-                log_dir.display()
-            )
-        });
+    let file_appender = JstRollingAppender::new(log_dir.clone(), "jarvish").unwrap_or_else(|e| {
+        panic!(
+            "jarvish: failed to create log file in {}: {e}",
+            log_dir.display()
+        )
+    });
 
     // 非ブロッキング書き込み用のワーカーを作成
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
