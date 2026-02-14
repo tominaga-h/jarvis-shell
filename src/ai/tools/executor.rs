@@ -38,9 +38,9 @@ fn execute_read_file(arguments: &str) -> String {
         None => return "Error: 'path' parameter is required".to_string(),
     };
 
-    jarvis_read_file(path);
+    let spinner = jarvis_read_file(path);
 
-    match std::fs::read_to_string(path) {
+    let result = match std::fs::read_to_string(path) {
         Ok(content) => {
             info!(path = %path, content_length = content.len(), "File read successfully");
             content
@@ -49,7 +49,10 @@ fn execute_read_file(arguments: &str) -> String {
             warn!(path = %path, error = %e, "Failed to read file");
             format!("Error reading file '{path}': {e}")
         }
-    }
+    };
+
+    spinner.finish_and_clear();
+    result
 }
 
 /// write_file ツールのローカル実行
@@ -69,19 +72,20 @@ fn execute_write_file(arguments: &str) -> String {
         None => return "Error: 'content' parameter is required".to_string(),
     };
 
-    jarvis_write_file(path);
+    let spinner = jarvis_write_file(path);
 
     // 親ディレクトリが存在しない場合は作成
     if let Some(parent) = std::path::Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 warn!(path = %path, error = %e, "Failed to create parent directory");
+                spinner.finish_and_clear();
                 return format!("Error creating directory for '{path}': {e}");
             }
         }
     }
 
-    match std::fs::write(path, content) {
+    let result = match std::fs::write(path, content) {
         Ok(()) => {
             info!(path = %path, content_length = content.len(), "File written successfully");
             format!("Successfully wrote {} bytes to '{path}'", content.len())
@@ -90,5 +94,8 @@ fn execute_write_file(arguments: &str) -> String {
             warn!(path = %path, error = %e, "Failed to write file");
             format!("Error writing file '{path}': {e}")
         }
-    }
+    };
+
+    spinner.finish_and_clear();
+    result
 }

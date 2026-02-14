@@ -17,13 +17,23 @@ pub fn jarvis_notice(command: &str) {
 }
 
 /// Jarvis がファイルを読み取るときに使う共通関数。
-pub fn jarvis_read_file(path: &str) {
-    println!("\n📖 Reading file: {path}\n");
+/// メッセージを `println!` で永続出力し、スピナーを分離して返す。
+/// 呼び出し元で `finish_and_clear()` を呼んでスピナーを停止すること。
+pub fn jarvis_read_file(path: &str) -> ProgressBar {
+    println!("📖 Reading file: {path}");
+    let spinner = ProgressBar::new_spinner();
+    spinner.enable_steady_tick(Duration::from_millis(80));
+    spinner
 }
 
 /// Jarvis がファイルを書き込むときに使う共通関数。
-pub fn jarvis_write_file(path: &str) {
-    println!("\n📝 Writing file: {path}\n");
+/// メッセージを `println!` で永続出力し、スピナーを分離して返す。
+/// 呼び出し元で `finish_and_clear()` を呼んでスピナーを停止すること。
+pub fn jarvis_write_file(path: &str) -> ProgressBar {
+    println!("📝 Writing file: {path}");
+    let spinner = ProgressBar::new_spinner();
+    spinner.enable_steady_tick(Duration::from_millis(80));
+    spinner
 }
 
 /// AI 処理中に表示するスピナーを生成・開始する。
