@@ -5,8 +5,14 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 
 use reedline::{Color, Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
+use tracing::{debug};
 
 use super::color::{cyan, green, red, white, yellow};
+
+/// `last_exit_code` が未設定（コマンド未実行）であることを示すセンチネル値。
+/// `AtomicI32` は `Option<i32>` を直接保持できないため、
+/// 通常の終了コード（0〜255）と衝突しない `i32::MIN` を使用する。
+pub const EXIT_CODE_NONE: i32 = i32::MIN;
 
 /// ホームディレクトリのパスを `~` に短縮する。
 ///
@@ -52,40 +58,29 @@ fn dirs_home() -> Option<std::path::PathBuf> {
 /// ❯
 /// ```
 ///
-/// 表示形式（Talking モード）:
+/// 表示形式（会話コンテキストあり）:
 /// ```text
-/// jarvis is talking
+/// 💬 jarvis in ~/dev/project on  main
 /// ❯
 /// ```
 pub struct JarvisPrompt {
     /// 直前コマンドの終了コード。メインループから共有される。
     last_exit_code: Arc<AtomicI32>,
-    /// Talking モード中かどうか。メインループから共有される。
-    is_talking: Arc<AtomicBool>,
+    /// AI との会話コンテキストが存在するかどうか。メインループから共有される。
+    has_conversation: Arc<AtomicBool>,
 }
 
 impl JarvisPrompt {
-    pub fn new(last_exit_code: Arc<AtomicI32>, is_talking: Arc<AtomicBool>) -> Self {
+    pub fn new(last_exit_code: Arc<AtomicI32>, has_conversation: Arc<AtomicBool>) -> Self {
         Self {
             last_exit_code,
-            is_talking,
+            has_conversation,
         }
     }
 }
 
 impl Prompt for JarvisPrompt {
     fn render_prompt_left(&self) -> Cow<str> {
-        // Talking モード: 2行プロンプト（1行目: jarvis is talking、2行目: ❯）
-        if self.is_talking.load(Ordering::Relaxed) {
-            return Cow::Owned(format!(
-                "💬 {} {} {} (cancel: ⌨️  Ctrl-C)\n",
-                cyan("jarvis"),
-                white("is"),
-                yellow("talking mode")
-            ));
-        }
-
-        // 通常モード: 2行のプロンプト
         let cwd = env::current_dir()
             .map(|p| shorten_path(&p))
             .unwrap_or_else(|_| "?".to_string());
@@ -100,10 +95,24 @@ impl Prompt for JarvisPrompt {
         };
 
         let code = self.last_exit_code.load(Ordering::Relaxed);
-        let label = if code == 0 {
+        let has_conv = self.has_conversation.load(Ordering::Relaxed);
+
+        debug!("[[[code: {}, has_conv: {}]]]", code, has_conv);
+
+        // 判定優先順位: エラー > 会話中 > 成功 > 初期状態
+        // エラー時（code != 0 かつ未設定でない）: ✗ jarvis
+        // 会話コンテキストあり:                   💬 jarvis
+        // コマンド成功（code == 0）:              ✔︎ jarvis
+        // 初期状態（コマンド未実行）:              jarvis
+        let label = if code != 0 && code != EXIT_CODE_NONE {
+            red("✗ jarvis")
+        } else if has_conv {
+            cyan("💬 jarvis")
+        } else if code == 0 {
             cyan("✔︎ jarvis")
         } else {
-            red("✗ jarvis")
+            // EXIT_CODE_NONE && !has_conv → 初期状態
+            cyan("jarvis")
         };
 
         Cow::Owned(format!(

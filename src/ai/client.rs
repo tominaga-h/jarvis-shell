@@ -35,7 +35,7 @@ pub enum AiResponse {
     NaturalLanguage(String),
 }
 
-/// 会話の状態を保持する構造体。Talking モードでの会話継続に使用。
+/// 会話の状態を保持する構造体。会話コンテキストの継続に使用。
 pub struct ConversationState {
     messages: Vec<ChatCompletionRequestMessage>,
 }
@@ -44,7 +44,7 @@ pub struct ConversationState {
 pub struct ConversationResult {
     /// AI の応答
     pub response: AiResponse,
-    /// 会話の状態（Talking モードでの会話継続に使用）
+    /// 会話の状態（会話コンテキストの継続に使用）
     pub conversation: ConversationState,
 }
 
@@ -137,7 +137,7 @@ impl JarvisAI {
     /// ユーザー入力を AI に送信し、コマンドか自然言語かを判定する。
     /// エージェントループにより、複数ステップのツール呼び出し（read_file → write_file 等）を処理する。
     /// 自然言語の場合はストリーミングでターミナルに表示しつつ、全文を返す。
-    /// 会話履歴も返却し、Talking モードでの会話継続に使用できる。
+    /// 会話履歴も返却し、会話コンテキストの継続に使用できる。
     pub async fn process_input(&self, input: &str, context: &str) -> Result<ConversationResult> {
         debug!(
             user_input = %input,
@@ -182,7 +182,7 @@ impl JarvisAI {
     /// 失敗したコマンドの情報（コマンド文字列、exit code、stdout、stderr）を
     /// AI に送信し、原因の分析と修正案の提示を行う。
     /// AI がコマンドを提案した場合は `AiResponse::Command` を返す。
-    /// 会話履歴も返却し、Talking モードでの会話継続に使用できる。
+    /// 会話履歴も返却し、会話コンテキストの継続に使用できる。
     pub async fn investigate_error(
         &self,
         command: &str,
@@ -237,7 +237,7 @@ impl JarvisAI {
         })
     }
 
-    /// Talking モードで会話を継続する。
+    /// 既存の会話コンテキストを使って会話を継続する。
     ///
     /// 既存の会話状態にユーザーの新しい入力を追加し、エージェントループを実行する。
     /// 会話コンテキストが保持されるため、AI は前の会話を踏まえた応答を返す。

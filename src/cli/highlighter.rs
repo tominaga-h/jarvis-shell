@@ -139,7 +139,7 @@ mod tests {
         Style::new().fg(Color::Blue)
     }
     fn arg_style() -> Style {
-        Style::new().fg(Color::White)
+        Style::new().fg(Color::LightGray)
     }
     fn pipe_style() -> Style {
         Style::new().fg(Color::Cyan).bold()

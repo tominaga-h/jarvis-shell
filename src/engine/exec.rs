@@ -106,13 +106,37 @@ fn restore_terminal_state(saved: &Termios) {
     let _ = termios::tcsetattr(io::stdin().as_fd(), SetArg::TCSANOW, saved);
 }
 
-/// 親ターミナルを raw mode に設定する。
-/// キーストロークが即時転送されるようにするため。
-fn set_raw_mode(saved: &Termios) -> io::Result<()> {
-    let mut raw = saved.clone();
-    termios::cfmakeraw(&mut raw);
-    termios::tcsetattr(io::stdin().as_fd(), SetArg::TCSANOW, &raw)
-        .map_err(|e| io::Error::other(e.to_string()))
+/// RAII ガード: スコープを抜けるときに自動的にターミナル状態を復元する。
+/// エラー発生時や早期リターン、パニック時も確実に復元される。
+struct TerminalStateGuard {
+    saved: Termios,
+    active: bool,
+}
+
+impl TerminalStateGuard {
+    /// ターミナル状態を保存してガードを作成する。
+    fn new() -> io::Result<Self> {
+        let saved = save_terminal_state()?;
+        Ok(Self { saved, active: false })
+    }
+
+    /// raw mode を有効にする。有効化後、ガードがドロップされるまで復元される。
+    fn activate_raw_mode(&mut self) -> io::Result<()> {
+        let mut raw = self.saved.clone();
+        termios::cfmakeraw(&mut raw);
+        termios::tcsetattr(io::stdin().as_fd(), SetArg::TCSANOW, &raw)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        self.active = true;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalStateGuard {
+    fn drop(&mut self) {
+        if self.active {
+            restore_terminal_state(&self.saved);
+        }
+    }
 }
 
 // ── stdin 転送 ──
@@ -291,8 +315,8 @@ fn run_single_command_pty_session(simple: &SimpleCommand) -> io::Result<CommandR
     // 2. stderr 用パイプを作成
     let (stderr_read, stderr_write) = os_pipe::pipe()?;
 
-    // 3. ターミナル状態を保存
-    let saved_termios = save_terminal_state()?;
+    // 3. ターミナル状態ガードを作成（RAII で確実に復元）
+    let mut terminal_guard = TerminalStateGuard::new()?;
 
     // 4. PTY slave fd を複製して stdin / stdout に割り当てる
     let slave_raw_fd = slave.as_raw_fd();
@@ -340,8 +364,8 @@ fn run_single_command_pty_session(simple: &SimpleCommand) -> io::Result<CommandR
     // 6. 親側の PTY slave fd を閉じる
     drop(slave);
 
-    // 7. 親ターミナルを raw mode に設定
-    if let Err(e) = set_raw_mode(&saved_termios) {
+    // 7. 親ターミナルを raw mode に設定（ガードが自動復元を保証）
+    if let Err(e) = terminal_guard.activate_raw_mode() {
         debug!("Failed to set raw mode: {e}");
         // raw mode 設定に失敗しても続行（非対話コマンドは動作する）
     }
@@ -371,8 +395,7 @@ fn run_single_command_pty_session(simple: &SimpleCommand) -> io::Result<CommandR
     // 12. stdin 転送スレッドを停止
     drop(shutdown_write);
 
-    // 13. ターミナル状態を復元
-    restore_terminal_state(&saved_termios);
+    // 13. ターミナル状態は terminal_guard の Drop で自動復元される
 
     // 14. スレッドを join
     let _ = stdin_handle.join();
@@ -692,17 +715,23 @@ fn tee_to_terminal<R: Read>(read: R, is_stderr: bool) -> Vec<u8> {
     for line in reader.split(b'\n') {
         match line {
             Ok(mut bytes) => {
+                // バッファには \n のみ保存（キャプチャ用）
                 bytes.push(b'\n');
+                buf.extend_from_slice(&bytes);
+
+                // ターミナル出力時は \r\n で行頭復帰させる
+                // （OPOST 無効の PTY から読み取るため \n → \r\n 変換が行われない）
                 if is_stderr {
                     let mut err = io::stderr().lock();
-                    let _ = err.write_all(&bytes);
+                    let _ = err.write_all(&bytes[..bytes.len() - 1]); // 内容（\n なし）
+                    let _ = err.write_all(b"\r\n");                   // \r\n で終端
                     let _ = err.flush();
                 } else {
                     let mut out = io::stdout().lock();
-                    let _ = out.write_all(&bytes);
+                    let _ = out.write_all(&bytes[..bytes.len() - 1]); // 内容（\n なし）
+                    let _ = out.write_all(b"\r\n");                   // \r\n で終端
                     let _ = out.flush();
                 }
-                buf.extend_from_slice(&bytes);
             }
             Err(_) => break,
         }
