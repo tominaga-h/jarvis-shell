@@ -1,9 +1,20 @@
 use std::env;
 
+use clap::Parser;
+
 use crate::engine::CommandResult;
 
+/// cwd: 現在のカレントディレクトリを表示する。
+#[derive(Parser)]
+#[command(name = "cwd", about = "現在のカレントディレクトリを表示する")]
+struct CwdArgs {}
+
 /// cwd: 現在のカレントディレクトリを出力する。
-pub(super) fn execute() -> CommandResult {
+pub(super) fn execute(args: &[&str]) -> CommandResult {
+    if let Err(result) = super::parse_args::<CwdArgs>("cwd", args) {
+        return result;
+    }
+
     match env::current_dir() {
         Ok(path) => {
             let output = format!("{}\n", path.display());
@@ -58,12 +69,19 @@ mod tests {
     fn cwd_returns_current_directory() {
         let _guard = CwdGuard::new();
         let expected = env::current_dir().unwrap();
-        let result = execute();
+        let result = execute(&[]);
         assert_eq!(result.exit_code, 0);
         assert!(!result.stdout.trim().is_empty());
         assert_eq!(
             PathBuf::from(result.stdout.trim()).canonicalize().unwrap(),
             expected.canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn cwd_help_returns_success() {
+        let result = execute(&["--help"]);
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("cwd"));
     }
 }

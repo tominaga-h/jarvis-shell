@@ -45,6 +45,19 @@ pub fn try_builtin(input: &str) -> Option<CommandResult> {
         return Some(CommandResult::success(String::new()));
     }
 
+    // パイプ/リダイレクト演算子を含む場合は None を返す。
+    // → execute() 側でパイプライン処理される。
+    if tokens
+        .iter()
+        .any(|t| matches!(t.as_str(), "|" | ">" | ">>" | "<"))
+    {
+        debug!(
+            command = %first_word,
+            "try_builtin: contains pipe/redirect, deferring to execute()"
+        );
+        return None;
+    }
+
     let expanded: Vec<String> = tokens
         .into_iter()
         .map(|t| expand::expand_token(&t))
@@ -124,7 +137,34 @@ pub fn execute(input: &str) -> CommandResult {
         }
     }
 
-    // 5. 外部コマンドまたはパイプラインを実行
+    // 5. パイプラインの先頭がビルトインの場合、実行して出力を後続に渡す
+    if pipeline.commands.len() > 1 {
+        let first = &pipeline.commands[0];
+        let args: Vec<&str> = first.args.iter().map(|s| s.as_str()).collect();
+        if let Some(result) = builtins::dispatch_builtin(&first.cmd, &args) {
+            debug!(
+                command = %first.cmd,
+                exit_code = result.exit_code,
+                "Builtin at pipeline head, replacing with printf"
+            );
+            if result.exit_code != 0 {
+                return result;
+            }
+            // ビルトインの stdout を printf で出力するコマンドに置き換え
+            let mut new_commands = pipeline.commands.clone();
+            new_commands[0] = parser::SimpleCommand {
+                cmd: "printf".to_string(),
+                args: vec!["%s".to_string(), result.stdout],
+                redirects: vec![],
+            };
+            let new_pipeline = parser::Pipeline {
+                commands: new_commands,
+            };
+            return exec::run_pipeline(&new_pipeline);
+        }
+    }
+
+    // 6. 外部コマンドまたはパイプラインを実行
     exec::run_pipeline(&pipeline)
 }
 
@@ -193,6 +233,23 @@ mod tests {
         assert!(try_builtin("git status").is_none());
         assert!(try_builtin("ls -la").is_none());
         assert!(try_builtin("echo hello").is_none());
+    }
+
+    // ── try_builtin: パイプ/リダイレクト演算子を含む場合は None ──
+
+    #[test]
+    fn try_builtin_with_pipe_returns_none() {
+        // ビルトインでもパイプを含む場合は execute() に委譲する
+        assert!(try_builtin("history | less").is_none());
+        assert!(try_builtin("export | grep PATH").is_none());
+        assert!(try_builtin("cwd | cat").is_none());
+    }
+
+    #[test]
+    fn try_builtin_with_redirect_returns_none() {
+        // リダイレクトを含む場合も execute() に委譲する
+        assert!(try_builtin("history > /tmp/hist.txt").is_none());
+        assert!(try_builtin("export >> /tmp/env.txt").is_none());
     }
 
     // ── execute: パイプ ──
@@ -268,5 +325,30 @@ mod tests {
         let result = execute("echo test123");
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout.trim(), "test123");
+    }
+
+    // ── execute: ビルトイン先頭パイプライン ──
+
+    #[test]
+    #[serial]
+    fn execute_builtin_pipe_to_cat() {
+        // cwd | cat → 現在のディレクトリが出力される
+        let expected = env::current_dir().unwrap();
+        let result = execute("cwd | cat");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), expected.display().to_string());
+    }
+
+    #[test]
+    #[serial]
+    fn execute_builtin_pipe_to_grep() {
+        // export | grep PATH → PATH を含む行が出力される
+        let result = execute("export | grep PATH");
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            result.stdout.contains("PATH"),
+            "expected stdout to contain PATH, got: {}",
+            result.stdout
+        );
     }
 }

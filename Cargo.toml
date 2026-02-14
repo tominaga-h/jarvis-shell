@@ -33,6 +33,7 @@ tracing-appender = "0.2"
 which = "8"
 nix = { version = "0.31", features = ["term", "fs", "poll"] }
 libc = "0.2"
+clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"

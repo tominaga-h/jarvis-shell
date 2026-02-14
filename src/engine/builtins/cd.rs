@@ -1,14 +1,29 @@
 use std::env;
 use std::path::PathBuf;
 
+use clap::Parser;
+
 use crate::engine::CommandResult;
+
+/// cd: カレントディレクトリを変更する。
+#[derive(Parser)]
+#[command(name = "cd", about = "カレントディレクトリを変更する")]
+struct CdArgs {
+    /// 移動先のパス (省略時は $HOME)
+    path: Option<String>,
+}
 
 /// cd: カレントディレクトリを変更する。
 /// - 引数なし → `$HOME` へ移動
 /// - 引数あり → 指定パスへ移動
 ///   展開は execute 側で実施済み
 pub(super) fn execute(args: &[&str]) -> CommandResult {
-    let target: PathBuf = if let Some(path) = args.first() {
+    let parsed = match super::parse_args::<CdArgs>("cd", args) {
+        Ok(a) => a,
+        Err(result) => return result,
+    };
+
+    let target: PathBuf = if let Some(path) = parsed.path {
         PathBuf::from(path)
     } else {
         // 引数なしの場合は $HOME へ
@@ -80,5 +95,12 @@ mod tests {
         let result = execute(&["/nonexistent_path_that_does_not_exist"]);
         assert_ne!(result.exit_code, 0);
         assert!(result.stderr.contains("cd:"));
+    }
+
+    #[test]
+    fn cd_help_returns_success() {
+        let result = execute(&["--help"]);
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("cd"));
     }
 }

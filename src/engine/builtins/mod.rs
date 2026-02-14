@@ -1,12 +1,33 @@
 mod cd;
 mod cwd;
 mod exit;
+mod export;
+mod history;
+mod unset;
 
 use super::CommandResult;
 
+/// clap の `try_parse_from` を使って引数をパースする共通ヘルパー。
+///
+/// - パース成功 → `Ok(T)`
+/// - `--help` → stdout に出力し `Err(CommandResult::success(...))`
+/// - 引数エラー → stderr に出力し `Err(CommandResult::error(..., 2))`
+fn parse_args<T: clap::Parser>(cmd: &str, args: &[&str]) -> Result<T, CommandResult> {
+    T::try_parse_from(std::iter::once(cmd).chain(args.iter().copied())).map_err(|e| {
+        let msg = e.to_string();
+        if e.use_stderr() {
+            eprint!("{msg}");
+            CommandResult::error(msg, 2)
+        } else {
+            print!("{msg}");
+            CommandResult::success(msg)
+        }
+    })
+}
+
 /// 指定されたコマンド名がビルトインかどうかを判定する（軽量チェック用）。
 pub fn is_builtin(cmd: &str) -> bool {
-    matches!(cmd, "cd" | "cwd" | "exit")
+    matches!(cmd, "cd" | "cwd" | "exit" | "export" | "unset" | "history")
 }
 
 /// ビルトインコマンドを振り分ける。
@@ -14,8 +35,11 @@ pub fn is_builtin(cmd: &str) -> bool {
 pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
     match cmd {
         "cd" => Some(cd::execute(args)),
-        "cwd" => Some(cwd::execute()),
+        "cwd" => Some(cwd::execute(args)),
         "exit" => Some(exit::execute(args)),
+        "export" => Some(export::execute(args)),
+        "unset" => Some(unset::execute(args)),
+        "history" => Some(history::execute(args)),
         _ => None,
     }
 }
@@ -101,5 +125,22 @@ mod tests {
             PathBuf::from(cwd2.stdout.trim()).canonicalize().unwrap(),
             dir2.path().canonicalize().unwrap()
         );
+    }
+
+    // ── 新規ビルトイン登録テスト ──
+
+    #[test]
+    fn new_builtins_are_registered() {
+        assert!(is_builtin("export"));
+        assert!(is_builtin("unset"));
+        assert!(is_builtin("history"));
+    }
+
+    #[test]
+    fn new_builtins_dispatch_returns_some() {
+        // export（引数なし → 全変数表示、正常終了するはず）
+        assert!(dispatch_builtin("export", &[]).is_some());
+        // history --help → 正常終了
+        assert!(dispatch_builtin("history", &["--help"]).is_some());
     }
 }

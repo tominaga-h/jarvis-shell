@@ -1,11 +1,28 @@
+use clap::Parser;
+
 use crate::engine::CommandResult;
+
+/// exit: REPL ループを終了する。
+#[derive(Parser)]
+#[command(name = "exit", about = "シェルを終了する")]
+struct ExitArgs {
+    /// 終了コード (0-255, デフォルト: 0)
+    #[arg(allow_hyphen_values = true)]
+    code: Option<String>,
+}
 
 /// exit: REPL ループを終了する。
 /// - 引数なし → 終了コード 0
 /// - `exit N` → 終了コード N（0〜255。範囲外は 255 にクランプ）
 /// - `exit foo` → エラー（数値でない引数）
+/// - `exit --help` → ヘルプ表示（シェルは終了しない）
 pub(super) fn execute(args: &[&str]) -> CommandResult {
-    match args.first() {
+    let parsed = match super::parse_args::<ExitArgs>("exit", args) {
+        Ok(a) => a,
+        Err(result) => return result,
+    };
+
+    match parsed.code {
         None => CommandResult::exit_with(0),
         Some(code_str) => match code_str.parse::<i32>() {
             Ok(code) => {
@@ -66,5 +83,14 @@ mod tests {
         let result = execute(&["foo"]);
         assert_eq!(result.action, LoopAction::Exit);
         assert_eq!(result.exit_code, 2);
+    }
+
+    #[test]
+    fn exit_help_does_not_exit() {
+        let result = execute(&["--help"]);
+        // --help ではシェルを終了しない（Continue）
+        assert_eq!(result.action, LoopAction::Continue);
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("exit"));
     }
 }
