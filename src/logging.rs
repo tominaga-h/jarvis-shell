@@ -62,7 +62,7 @@ impl JstRollingAppender {
     }
 
     /// 指定した日付のログファイルを開く（なければ作成）。
-    fn open_log_file(dir: &PathBuf, prefix: &str, date: chrono::NaiveDate) -> std::io::Result<File> {
+    fn open_log_file(dir: &Path, prefix: &str, date: chrono::NaiveDate) -> std::io::Result<File> {
         let filename = format!("{}_{}.log", prefix, date.format("%Y-%m-%d"));
         OpenOptions::new()
             .create(true)
@@ -127,13 +127,12 @@ pub fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
     }
 
     // JST ベースの日次ローテーションアペンダーを作成
-    let file_appender =
-        JstRollingAppender::new(log_dir.clone(), "jarvish").unwrap_or_else(|e| {
-            panic!(
-                "jarvish: failed to create log file in {}: {e}",
-                log_dir.display()
-            )
-        });
+    let file_appender = JstRollingAppender::new(log_dir.clone(), "jarvish").unwrap_or_else(|e| {
+        panic!(
+            "jarvish: failed to create log file in {}: {e}",
+            log_dir.display()
+        )
+    });
 
     // 非ブロッキング書き込み用のワーカーを作成
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
