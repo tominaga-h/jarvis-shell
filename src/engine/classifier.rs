@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::sync::RwLock;
 
 use tracing::{debug, info, warn};
 
@@ -24,9 +25,11 @@ pub enum InputType {
 ///
 /// 起動時に PATH 内の実行可能コマンド名を `HashSet` にキャッシュし、
 /// O(1) でコマンド判定を行う。
+/// `RwLock` による内部可変性を持ち、`export PATH=...` 等で PATH が変更された際に
+/// キャッシュを動的にリロードできる。
 pub struct InputClassifier {
-    /// PATH 内の実行可能コマンド名のキャッシュ
-    path_commands: HashSet<String>,
+    /// PATH 内の実行可能コマンド名のキャッシュ（RwLock で動的リロード可能）
+    path_commands: RwLock<HashSet<String>>,
 }
 
 impl InputClassifier {
@@ -37,7 +40,26 @@ impl InputClassifier {
             cached_commands = path_commands.len(),
             "InputClassifier initialized with PATH cache"
         );
-        Self { path_commands }
+        Self {
+            path_commands: RwLock::new(path_commands),
+        }
+    }
+
+    /// PATH キャッシュを再構築する。
+    ///
+    /// `export PATH=...` や `unset PATH` で PATH 環境変数が変更された際に呼び出す。
+    /// 現在の PATH 環境変数を再スキャンし、キャッシュを差し替える。
+    pub fn reload_path_cache(&self) {
+        let new_cache = Self::build_path_cache();
+        info!(cached_commands = new_cache.len(), "PATH cache reloaded");
+        *self.path_commands.write().unwrap() = new_cache;
+    }
+
+    /// PATH キャッシュの読み取りロックガードを返す。
+    ///
+    /// `JarvishCompleter` 等、外部から PATH コマンド一覧を参照する際に使用する。
+    pub fn path_commands(&self) -> std::sync::RwLockReadGuard<'_, HashSet<String>> {
+        self.path_commands.read().unwrap()
     }
 
     /// ユーザー入力を分類する。
@@ -293,7 +315,7 @@ impl InputClassifier {
 
     /// 先頭トークンが PATH キャッシュに存在するか。
     fn is_command_in_path(&self, token: &str) -> bool {
-        self.path_commands.contains(token)
+        self.path_commands.read().unwrap().contains(token)
     }
 
     /// 入力にシェル構文（パイプ、論理演算子、セミコロン、変数展開、代入）が含まれるか。
@@ -494,21 +516,82 @@ mod tests {
     #[test]
     fn path_cache_contains_common_commands() {
         let c = test_classifier();
+        let cache = c.path_commands();
         // ls と cat は macOS/Linux のどちらにも存在するはず
-        assert!(
-            c.path_commands.contains("ls"),
-            "PATH cache should contain 'ls'"
-        );
-        assert!(
-            c.path_commands.contains("cat"),
-            "PATH cache should contain 'cat'"
-        );
+        assert!(cache.contains("ls"), "PATH cache should contain 'ls'");
+        assert!(cache.contains("cat"), "PATH cache should contain 'cat'");
     }
 
     #[test]
     fn path_cache_does_not_contain_nonsense() {
         let c = test_classifier();
-        assert!(!c.path_commands.contains("xyzzy_nonexistent_command_12345"));
+        assert!(!c
+            .path_commands()
+            .contains("xyzzy_nonexistent_command_12345"));
+    }
+
+    #[test]
+    fn reload_path_cache_reflects_new_path() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let c = test_classifier();
+
+        // テスト用の架空コマンド名（"jarvis" で始まると Jarvis トリガーに引っかかるので注意）
+        let fake_cmd = "zzz_jarvish_test_fake_cmd_42";
+        assert!(
+            !c.path_commands().contains(fake_cmd),
+            "fake command should not exist before reload"
+        );
+        assert_eq!(
+            c.classify(fake_cmd),
+            InputType::NaturalLanguage,
+            "unknown command should be classified as NaturalLanguage"
+        );
+
+        // 一時ディレクトリを作成し、架空コマンドを配置
+        let tmp_dir = std::env::temp_dir().join("jarvish_test_path_reload");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).expect("failed to create temp dir");
+        let fake_bin = tmp_dir.join(fake_cmd);
+        fs::write(&fake_bin, "#!/bin/sh\necho hello\n").expect("failed to write fake bin");
+        fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o755))
+            .expect("failed to set permissions");
+
+        // PATH を一時的に変更
+        let original_path = std::env::var("PATH").unwrap();
+        let new_path = format!("{}:{}", tmp_dir.display(), original_path);
+        // SAFETY: テストはシングルスレッドで実行（cargo test はデフォルトでシリアル実行可能）
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+
+        // リロード前: キャッシュはまだ古いので NaturalLanguage
+        assert_eq!(
+            c.classify(fake_cmd),
+            InputType::NaturalLanguage,
+            "should still be NaturalLanguage before reload"
+        );
+
+        // リロード
+        c.reload_path_cache();
+
+        // リロード後: 新しいコマンドが Command として認識される
+        assert!(
+            c.path_commands().contains(fake_cmd),
+            "fake command should be in cache after reload"
+        );
+        assert_eq!(
+            c.classify(fake_cmd),
+            InputType::Command,
+            "should be classified as Command after reload"
+        );
+
+        // クリーンアップ: PATH を元に戻す
+        unsafe {
+            std::env::set_var("PATH", &original_path);
+        }
+        let _ = fs::remove_dir_all(&tmp_dir);
     }
 
     // ── エッジケース ──

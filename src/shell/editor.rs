@@ -22,7 +22,7 @@ use crate::storage::BlackBoxHistory;
 ///
 /// `db_path` は BlackBox と共有する `history.db` へのパス。
 pub fn build_editor(classifier: Arc<InputClassifier>, db_path: PathBuf) -> Reedline {
-    let completer = Box::new(JarvishCompleter::new());
+    let completer = Box::new(JarvishCompleter::new(Arc::clone(&classifier)));
     let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
 
     // コマンド履歴を BlackBox の SQLite テーブル (command_history) で管理

@@ -2,44 +2,60 @@
 //!
 //! - 先頭トークン: PATH 内の実行可能コマンド + ビルトイン (cd, cwd, exit)
 //! - それ以降: カレントディレクトリ基準のファイル / ディレクトリ名
+//!
+//! `InputClassifier` の PATH キャッシュを共有参照し、
+//! `export PATH=...` 等による動的変更を即座に反映する。
 
-use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::sync::Arc;
 
 use reedline::{Completer, Span, Suggestion};
 
+use crate::engine::classifier::InputClassifier;
+
+/// ビルトインコマンド名（補完候補に常に含める）
+const BUILTIN_COMMANDS: &[&str] = &["cd", "cwd", "exit", "export", "unset", "help", "history"];
+
 /// Jarvish 用の補完エンジン
+///
+/// `InputClassifier` の PATH キャッシュを `Arc` で共有し、
+/// PATH 変更時のリロードが自動的に補完候補にも反映される。
 pub struct JarvishCompleter {
-    /// PATH 内の実行可能コマンド名 + ビルトイン（ソート済み）
-    commands: Vec<String>,
+    /// PATH キャッシュの共有参照元
+    classifier: Arc<InputClassifier>,
 }
 
 impl JarvishCompleter {
-    /// PATH を走査し、ビルトインコマンドとマージして初期化する。
-    pub fn new() -> Self {
-        let mut set = Self::build_path_cache();
-
-        // ビルトインコマンドを追加
-        for b in &["cd", "cwd", "exit"] {
-            set.insert((*b).to_string());
-        }
-
-        let mut commands: Vec<String> = set.into_iter().collect();
-        commands.sort();
-
-        Self { commands }
+    /// `InputClassifier` の PATH キャッシュを共有して初期化する。
+    pub fn new(classifier: Arc<InputClassifier>) -> Self {
+        Self { classifier }
     }
 
     // ========== 補完ロジック ==========
 
     /// コマンド名補完（先頭トークン）
+    ///
+    /// `InputClassifier` の PATH キャッシュ + ビルトインコマンドから候補を生成する。
     fn complete_command(&self, partial: &str, span: Span) -> Vec<Suggestion> {
-        self.commands
+        let path_commands = self.classifier.path_commands();
+
+        // PATH コマンド + ビルトインからマッチするものを収集
+        let mut matches: Vec<&str> = path_commands
             .iter()
+            .map(|s| s.as_str())
+            .chain(BUILTIN_COMMANDS.iter().copied())
             .filter(|cmd| cmd.starts_with(partial))
+            .collect();
+
+        // ソート & 重複除去
+        matches.sort_unstable();
+        matches.dedup();
+
+        matches
+            .into_iter()
             .map(|cmd| Suggestion {
-                value: cmd.clone(),
+                value: cmd.to_string(),
                 description: None,
                 style: None,
                 extra: None,
@@ -106,35 +122,6 @@ impl JarvishCompleter {
     }
 
     // ========== ヘルパー ==========
-
-    /// PATH 環境変数を走査し、実行可能ファイル名を収集する。
-    fn build_path_cache() -> HashSet<String> {
-        let mut commands = HashSet::new();
-
-        let path_var = match env::var("PATH") {
-            Ok(p) => p,
-            Err(_) => return commands,
-        };
-
-        for dir in env::split_paths(&path_var) {
-            let entries = match fs::read_dir(&dir) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-
-            for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if let Ok(meta) = fs::metadata(entry.path()) {
-                        if meta.is_file() {
-                            commands.insert(name.to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        commands
-    }
 
     /// 部分パス文字列を「検索ディレクトリ」と「ファイル名プレフィックス」に分割する。
     ///

@@ -29,9 +29,11 @@ impl Shell {
 
         debug!(input = %line, "User input received");
 
-        // 1. ビルトインコマンドをチェック（cd, cwd, exit は AI を介さず直接実行）
+        // 1. ビルトインコマンドをチェック（cd, cwd, exit, export 等は AI を介さず直接実行）
+        //    PATH 変更を検出するため、ビルトイン実行前の PATH を保存する
+        let path_before = std::env::var("PATH").ok();
         if let Some(result) = try_builtin(&line) {
-            return self.handle_builtin(&line, result);
+            return self.handle_builtin(&line, result, path_before);
         }
 
         // 2. アルゴリズムで入力を分類（AI を呼ばず瞬時に判定）
@@ -103,14 +105,30 @@ impl Shell {
 
     /// ビルトインコマンドの結果を処理する。
     ///
+    /// `path_before` はビルトイン実行前の PATH 環境変数の値。
+    /// ビルトイン実行後に PATH が変更されていれば、分類器の PATH キャッシュをリロードする。
+    ///
     /// 戻り値: `true` = REPL ループ続行、`false` = シェル終了
-    fn handle_builtin(&mut self, line: &str, result: CommandResult) -> bool {
+    fn handle_builtin(
+        &mut self,
+        line: &str,
+        result: CommandResult,
+        path_before: Option<String>,
+    ) -> bool {
         debug!(
             command = %line,
             exit_code = result.exit_code,
             action = ?result.action,
             "Builtin command executed"
         );
+
+        // PATH 変更検出: export PATH=... や unset PATH でキャッシュをリロード
+        let path_after = std::env::var("PATH").ok();
+        if path_before != path_after {
+            info!("PATH changed, reloading classifier cache");
+            self.classifier.reload_path_cache();
+        }
+
         // プロンプト表示用に終了コードを更新
         self.last_exit_code
             .store(result.exit_code, Ordering::Relaxed);
