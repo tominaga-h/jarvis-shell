@@ -2,6 +2,7 @@ mod cd;
 mod cwd;
 mod exit;
 mod export;
+mod help;
 mod history;
 mod unset;
 
@@ -27,7 +28,10 @@ fn parse_args<T: clap::Parser>(cmd: &str, args: &[&str]) -> Result<T, CommandRes
 
 /// 指定されたコマンド名がビルトインかどうかを判定する（軽量チェック用）。
 pub fn is_builtin(cmd: &str) -> bool {
-    matches!(cmd, "cd" | "cwd" | "exit" | "export" | "unset" | "history")
+    matches!(
+        cmd,
+        "cd" | "cwd" | "exit" | "export" | "help" | "unset" | "history"
+    )
 }
 
 /// ビルトインコマンドを振り分ける。
@@ -38,6 +42,7 @@ pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
         "cwd" => Some(cwd::execute(args)),
         "exit" => Some(exit::execute(args)),
         "export" => Some(export::execute(args)),
+        "help" => Some(help::execute(args)),
         "unset" => Some(unset::execute(args)),
         "history" => Some(history::execute(args)),
         _ => None,
@@ -132,6 +137,7 @@ mod tests {
     #[test]
     fn new_builtins_are_registered() {
         assert!(is_builtin("export"));
+        assert!(is_builtin("help"));
         assert!(is_builtin("unset"));
         assert!(is_builtin("history"));
     }
