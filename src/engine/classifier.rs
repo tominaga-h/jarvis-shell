@@ -200,15 +200,20 @@ impl InputClassifier {
         self.path_commands.contains(token)
     }
 
-    /// 入力にシェル構文（パイプ、論理演算子、セミコロン、変数展開）が含まれるか。
+    /// 入力にシェル構文（パイプ、論理演算子、セミコロン、変数展開、代入）が含まれるか。
     fn has_shell_syntax(input: &str) -> bool {
         // パイプ、論理演算子、セミコロン
-        input.contains(" | ")
+        input.contains('|')
             || input.contains(" && ")
             || input.contains(" || ")
             || input.contains(';')
             // 変数展開（先頭が $ で始まる）
             || input.starts_with('$')
+            // 環境変数代入パターン（KEY=value）
+            || input.split_whitespace().any(|token| {
+                token.contains('=')
+                    && token.chars().next().map_or(false, |c| c.is_ascii_uppercase())
+            })
     }
 
     /// 入力文字列から先頭トークン（空白前の最初の語）を取得する。

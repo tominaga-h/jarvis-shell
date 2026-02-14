@@ -4,7 +4,7 @@ mod engine;
 mod logging;
 mod storage;
 
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
 use ai::client::{AiResponse, ConversationState, JarvisAI};
@@ -58,11 +58,9 @@ async fn main() {
     // 初期値は EXIT_CODE_NONE（未設定）。コマンド実行時に実際の終了コードで上書きされる。
     let last_exit_code = Arc::new(AtomicI32::new(EXIT_CODE_NONE));
 
-    // 会話コンテキスト（AI との会話継続中）のインジケータ（プロンプト表示用）
-    let has_conversation = Arc::new(AtomicBool::new(false));
     let mut conversation_state: Option<ConversationState> = None;
 
-    let prompt = JarvisPrompt::new(Arc::clone(&last_exit_code), Arc::clone(&has_conversation));
+    let prompt = JarvisPrompt::new(Arc::clone(&last_exit_code));
 
     // Black Box（履歴永続化）の初期化
     let black_box = match BlackBox::open() {
@@ -209,7 +207,6 @@ async fn main() {
                                             input = %line,
                                             "Conversation continuation failed, falling back to direct execution"
                                         );
-                                        has_conversation.store(false, Ordering::Relaxed);
                                         // AI エラー時はコマンドとして直接実行にフォールバック
                                         execute(&line)
                                     }
@@ -255,7 +252,6 @@ async fn main() {
                                                 "AI responded with natural language"
                                             );
                                             // 会話コンテキストを保存
-                                            has_conversation.store(true, Ordering::Relaxed);
                                             conversation_state =
                                                 Some(conv_result.conversation);
                                             // コマンド未実行のため終了コードは更新しない
@@ -347,7 +343,6 @@ async fn main() {
                                     }
                                     AiResponse::NaturalLanguage(_) => {
                                         // 会話コンテキストを保存
-                                        has_conversation.store(true, Ordering::Relaxed);
                                         conversation_state =
                                             Some(conv_result.conversation);
                                         // AI が自然言語で説明 → ストリーミング表示済み

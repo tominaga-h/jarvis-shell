@@ -1,11 +1,10 @@
 use std::borrow::Cow;
 use std::env;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
 use reedline::{Color, Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
-use tracing::{debug};
 
 use super::color::{cyan, green, red, white, yellow};
 
@@ -58,24 +57,14 @@ fn dirs_home() -> Option<std::path::PathBuf> {
 /// ❯
 /// ```
 ///
-/// 表示形式（会話コンテキストあり）:
-/// ```text
-/// 💬 jarvis in ~/dev/project on  main
-/// ❯
-/// ```
 pub struct JarvisPrompt {
     /// 直前コマンドの終了コード。メインループから共有される。
     last_exit_code: Arc<AtomicI32>,
-    /// AI との会話コンテキストが存在するかどうか。メインループから共有される。
-    has_conversation: Arc<AtomicBool>,
 }
 
 impl JarvisPrompt {
-    pub fn new(last_exit_code: Arc<AtomicI32>, has_conversation: Arc<AtomicBool>) -> Self {
-        Self {
-            last_exit_code,
-            has_conversation,
-        }
+    pub fn new(last_exit_code: Arc<AtomicI32>) -> Self {
+        Self { last_exit_code }
     }
 }
 
@@ -95,23 +84,17 @@ impl Prompt for JarvisPrompt {
         };
 
         let code = self.last_exit_code.load(Ordering::Relaxed);
-        let has_conv = self.has_conversation.load(Ordering::Relaxed);
 
-        debug!("[[[code: {}, has_conv: {}]]]", code, has_conv);
-
-        // 判定優先順位: エラー > 会話中 > 成功 > 初期状態
+        // 判定: エラー > 成功 > 初期状態
         // エラー時（code != 0 かつ未設定でない）: ✗ jarvis
-        // 会話コンテキストあり:                   💬 jarvis
         // コマンド成功（code == 0）:              ✔︎ jarvis
         // 初期状態（コマンド未実行）:              jarvis
         let label = if code != 0 && code != EXIT_CODE_NONE {
             red("✗ jarvis")
-        } else if has_conv {
-            cyan("💬 jarvis")
         } else if code == 0 {
             cyan("✔︎ jarvis")
         } else {
-            // EXIT_CODE_NONE && !has_conv → 初期状態
+            // EXIT_CODE_NONE → 初期状態
             cyan("jarvis")
         };
 
