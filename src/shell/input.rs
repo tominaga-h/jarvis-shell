@@ -7,6 +7,8 @@ use std::sync::atomic::Ordering;
 
 use tracing::{debug, info, warn};
 
+use reedline::HistoryItem;
+
 use crate::engine::classifier::InputType;
 use crate::engine::{execute, try_builtin, CommandResult, LoopAction};
 
@@ -37,11 +39,11 @@ impl Shell {
         debug!(input = %line, classification = ?input_type, "Input classified");
 
         // 3. 入力タイプに応じて実行
-        let (result, from_tool_call, should_update_exit_code) = match input_type {
+        let (result, from_tool_call, should_update_exit_code, executed_command) = match input_type {
             InputType::Command => {
                 // コマンド → AI を介さず直接実行
                 debug!(input = %line, "Executing as command (no AI)");
-                (execute(&line), false, true)
+                (execute(&line), false, true, None)
             }
             InputType::NaturalLanguage => {
                 // 自然言語 → AI にルーティング
@@ -50,6 +52,7 @@ impl Shell {
                     ai_result.result,
                     ai_result.from_tool_call,
                     ai_result.should_update_exit_code,
+                    ai_result.executed_command,
                 )
             }
         };
@@ -65,7 +68,18 @@ impl Shell {
         // 5. 履歴を記録
         self.record_history(&line, &result);
 
-        // 6. エラー調査フロー
+        // 6. AI が実行したコマンドを reedline 履歴に追加（矢印キーで辿れるようにする）
+        if let Some(ref cmd) = executed_command {
+            if let Err(e) = self
+                .editor
+                .history_mut()
+                .save(HistoryItem::from_command_line(cmd))
+            {
+                warn!("Failed to save AI-executed command to reedline history: {e}");
+            }
+        }
+
+        // 7. エラー調査フロー
         if result.exit_code != 0 {
             self.investigate_error(&line, &result, from_tool_call).await;
         }

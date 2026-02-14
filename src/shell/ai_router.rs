@@ -19,6 +19,8 @@ pub(super) struct AiRoutingResult {
     pub from_tool_call: bool,
     /// 終了コードを更新すべきかどうか（NaturalLanguage 応答時は false）
     pub should_update_exit_code: bool,
+    /// AI が実際に実行したコマンド文字列（矢印キー履歴に追加するため）
+    pub executed_command: Option<String>,
 }
 
 impl Shell {
@@ -35,6 +37,7 @@ impl Shell {
                     result: execute(line),
                     from_tool_call: false,
                     should_update_exit_code: true,
+                    executed_command: None,
                 };
             }
         };
@@ -68,6 +71,7 @@ impl Shell {
                         result,
                         from_tool_call: true,
                         should_update_exit_code: true,
+                        executed_command: Some(cmd.clone()),
                     }
                 }
                 Ok(AiResponse::NaturalLanguage(ref text)) => {
@@ -83,6 +87,7 @@ impl Shell {
                         from_tool_call: false,
                         // コマンド未実行のため終了コードは更新しない
                         should_update_exit_code: false,
+                        executed_command: None,
                     }
                 }
                 Err(e) => {
@@ -95,6 +100,7 @@ impl Shell {
                         result: execute(line),
                         from_tool_call: false,
                         should_update_exit_code: true,
+                        executed_command: None,
                     }
                 }
             }
@@ -130,6 +136,7 @@ impl Shell {
                             result,
                             from_tool_call: true,
                             should_update_exit_code: true,
+                            executed_command: Some(cmd.clone()),
                         }
                     }
                     AiResponse::NaturalLanguage(ref text) => {
@@ -145,6 +152,7 @@ impl Shell {
                             from_tool_call: false,
                             // コマンド未実行のため終了コードは更新しない
                             should_update_exit_code: false,
+                            executed_command: None,
                         }
                     }
                 },
@@ -158,6 +166,7 @@ impl Shell {
                         result: execute(line),
                         from_tool_call: false,
                         should_update_exit_code: true,
+                        executed_command: None,
                     }
                 }
             }

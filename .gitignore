@@ -25,3 +25,6 @@
 # Log files
 var/logs/*
 !var/logs/.gitkeep
+
+# curosr
+.cursor/*.log
