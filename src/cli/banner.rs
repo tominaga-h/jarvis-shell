@@ -65,7 +65,6 @@ pub fn print_goodbye() {
 
     let idx = rand::rng().random_range(0..messages.len());
 
-    println!();
     jarvis_talk(messages[idx]);
     println!();
 }
