@@ -37,8 +37,25 @@ pub(super) fn execute(args: &[&str]) -> CommandResult {
         }
     };
 
+    // 変更前の PWD を保存（OLDPWD 用）
+    let old_pwd = env::var("PWD").ok().or_else(|| {
+        env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+    });
+
     match env::set_current_dir(&target) {
-        Ok(()) => CommandResult::success(String::new()),
+        Ok(()) => {
+            // OLDPWD を設定
+            if let Some(old) = old_pwd {
+                env::set_var("OLDPWD", &old);
+            }
+            // PWD を新しいディレクトリに設定
+            if let Ok(new_pwd) = env::current_dir() {
+                env::set_var("PWD", &new_pwd);
+            }
+            CommandResult::success(String::new())
+        }
         Err(e) => {
             let msg = format!("jarvish: cd: {}: {e}\n", target.display());
             eprint!("{msg}");
@@ -102,5 +119,45 @@ mod tests {
         let result = execute(&["--help"]);
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("cd"));
+    }
+
+    #[test]
+    #[serial]
+    fn cd_updates_pwd_env_var() {
+        let _guard = CwdGuard::new();
+        let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
+        let target = tmpdir.path().to_path_buf();
+
+        let result = execute(&[target.to_str().unwrap()]);
+        assert_eq!(result.exit_code, 0);
+
+        // $PWD が新しいディレクトリに更新されていること
+        let pwd = env::var("PWD").expect("PWD should be set after cd");
+        assert_eq!(
+            PathBuf::from(&pwd).canonicalize().unwrap(),
+            target.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn cd_updates_oldpwd_env_var() {
+        let _guard = CwdGuard::new();
+        let original_pwd = env::current_dir().unwrap();
+        // PWD を現在のディレクトリに明示設定
+        env::set_var("PWD", &original_pwd);
+
+        let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
+        let target = tmpdir.path().to_path_buf();
+
+        let result = execute(&[target.to_str().unwrap()]);
+        assert_eq!(result.exit_code, 0);
+
+        // $OLDPWD が変更前のディレクトリを保持していること
+        let oldpwd = env::var("OLDPWD").expect("OLDPWD should be set after cd");
+        assert_eq!(
+            PathBuf::from(&oldpwd).canonicalize().unwrap(),
+            original_pwd.canonicalize().unwrap()
+        );
     }
 }
