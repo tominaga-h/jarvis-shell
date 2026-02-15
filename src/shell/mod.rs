@@ -43,15 +43,7 @@ impl Shell {
         let classifier = Arc::new(InputClassifier::new());
 
         // データディレクトリを一度だけ決定し、エディタ履歴と BlackBox の両方で共有する。
-        // data_dir() 失敗時は ~/.jarvish にフォールバックし、
-        // reedline 履歴と BlackBox（Blob 含む）が同じ状態を共有できるようにする。
-        let data_dir = BlackBox::data_dir().unwrap_or_else(|e| {
-            warn!("Failed to determine data directory: {e}, using fallback");
-            std::env::var("HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .join(".jarvish")
-        });
+        let data_dir = BlackBox::data_dir();
 
         let db_path = data_dir.join("history.db");
         let reedline = editor::build_editor(Arc::clone(&classifier), db_path);

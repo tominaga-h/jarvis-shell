@@ -114,13 +114,7 @@ fn clear_history() -> CommandResult {
 
 /// BlackBox の history.db への接続を開く。
 fn open_history_db() -> Result<Connection, CommandResult> {
-    let data_dir = BlackBox::data_dir().map_err(|e| {
-        let msg = format!("jarvish: history: failed to determine data directory: {e}\n");
-        eprint!("{msg}");
-        CommandResult::error(msg, 1)
-    })?;
-
-    let db_path = data_dir.join("history.db");
+    let db_path = BlackBox::data_dir().join("history.db");
 
     let conn = Connection::open(&db_path).map_err(|e| {
         let msg = format!("jarvish: history: failed to open database: {e}\n");

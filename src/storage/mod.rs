@@ -213,12 +213,22 @@ impl BlackBox {
     }
 
     /// データディレクトリのパスを返す。
+    ///
     /// `directories` クレートを使用してプラットフォームに応じたパスを決定する。
-    /// BlackBoxHistory からも使用するため `pub(crate)` にしている。
-    pub(crate) fn data_dir() -> Result<PathBuf> {
-        let proj_dirs =
-            ProjectDirs::from("", "", "jarvish").context("failed to determine data directory")?;
-        Ok(proj_dirs.data_dir().to_path_buf())
+    /// - macOS: `~/Library/Application Support/jarvish/`
+    /// - Linux: `~/.local/share/jarvish/`
+    ///
+    /// `ProjectDirs` の取得に失敗した場合は `~/.jarvish` にフォールバックする。
+    pub(crate) fn data_dir() -> PathBuf {
+        ProjectDirs::from("", "", "jarvish")
+            .map(|p| p.data_dir().to_path_buf())
+            .unwrap_or_else(|| {
+                eprintln!("jarvish: warning: failed to determine data directory, using fallback");
+                std::env::var("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(".jarvish")
+            })
     }
 
     /// DB スキーマのマイグレーションを実行する。

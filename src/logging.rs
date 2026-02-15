@@ -1,7 +1,8 @@
 //! ログ初期化モジュール
 //!
 //! `tracing` + `tracing-subscriber` を使用して、デバッグログを外部ファイルに出力する。
-//! ログファイルは `var/logs/` ディレクトリに日次ローテーション（JST基準）で保存される。
+//! ログファイルは XDG_DATA_HOME 準拠のシステムディレクトリ
+//! (`~/.local/share/jarvish/logs/`) に日次ローテーション（JST基準）で保存される。
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -91,24 +92,16 @@ impl Write for JstRollingAppender {
 // ---------------------------------------------------------------------------
 
 /// ログの出力先ディレクトリを決定する。
-/// `CARGO_MANIFEST_DIR`（開発時）またはカレントディレクトリからの相対パス `var/logs/` を使用する。
+///
+/// `BlackBox::data_dir()` で決定されたデータディレクトリ配下の `logs/` を返す。
 fn log_dir() -> PathBuf {
-    // 開発時: CARGO_MANIFEST_DIR が設定されていればそれを使用
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        return PathBuf::from(manifest_dir).join("var").join("logs");
-    }
-
-    // 実行時: カレントディレクトリからの相対パス
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("var")
-        .join("logs")
+    crate::storage::BlackBox::data_dir().join("logs")
 }
 
 /// ログシステムを初期化する。
 ///
 /// - ログレベルは `JARVISH_LOG` 環境変数で制御（デフォルト: `debug`）
-/// - ログファイルは `var/logs/jarvish_YYYY-MM-DD.log` に日次ローテーション（JST基準）で出力
+/// - ログファイルは `XDG_DATA_HOME/jarvish/logs/jarvish_YYYY-MM-DD.log` に日次ローテーション（JST基準）で出力
 /// - タイムスタンプは JST (UTC+09:00) で記録
 /// - フォーマット: タイムスタンプ + レベル + ターゲット + メッセージ
 ///
