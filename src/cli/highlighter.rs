@@ -65,13 +65,27 @@ impl Highlighter for JarvisHighlighter {
                 }
                 current_word.push(c);
                 in_quote = Some(c);
-            } else if c == '|' {
-                // パイプ演算子：直前の単語を確定し、次の単語をコマンドとして扱う
+            } else if c == '&' && chars.peek() == Some(&'&') {
+                // && 演算子：直前の単語を確定し、次の単語をコマンドとして扱う
                 if !current_word.is_empty() {
                     style_word(&mut styled, &current_word, &mut is_command);
                     current_word.clear();
                 }
-                styled.push((Style::new().fg(Color::Cyan).bold(), c.to_string()));
+                chars.next(); // 2つ目の '&' を消費
+                styled.push((Style::new().fg(Color::Cyan).bold(), "&&".to_string()));
+                is_command = true;
+            } else if c == '|' {
+                // パイプ / || 演算子：直前の単語を確定し、次の単語をコマンドとして扱う
+                if !current_word.is_empty() {
+                    style_word(&mut styled, &current_word, &mut is_command);
+                    current_word.clear();
+                }
+                if chars.peek() == Some(&'|') {
+                    chars.next(); // 2つ目の '|' を消費
+                    styled.push((Style::new().fg(Color::Cyan).bold(), "||".to_string()));
+                } else {
+                    styled.push((Style::new().fg(Color::Cyan).bold(), c.to_string()));
+                }
                 is_command = true;
             } else if c == '>' || c == '<' {
                 // リダイレクト演算子：直前の単語を確定し、次の単語のハイライトをやめる
@@ -88,6 +102,13 @@ impl Highlighter for JarvisHighlighter {
                 styled.push((Style::new().fg(Color::Cyan).bold(), op));
                 is_command = false;
             } else if c == ';' {
+                // セミコロン演算子：直前の単語を確定し、次の単語をコマンドとして扱う
+                if !current_word.is_empty() {
+                    style_word(&mut styled, &current_word, &mut is_command);
+                    current_word.clear();
+                }
+                styled.push((Style::new().fg(Color::Cyan).bold(), c.to_string()));
+                is_command = true;
             } else if c.is_whitespace() {
                 // 空白（単語の区切り）
                 if !current_word.is_empty() {
@@ -408,6 +429,139 @@ mod tests {
         // Jarvis トリガーはハイライトされない
         let segs = highlight_segments("jarvis, help me");
         assert_eq!(segs, vec![(Style::default(), "jarvis, help me".into())]);
+    }
+
+    // ── && 演算子 ──
+
+    #[test]
+    fn test_and_operator() {
+        let segs = highlight_segments("make build && echo done");
+        assert_eq!(
+            segs,
+            vec![
+                (cmd_style(), "make".into()),
+                (ws(), " ".into()),
+                (arg_style(), "build".into()),
+                (ws(), " ".into()),
+                (pipe_style(), "&&".into()),
+                (ws(), " ".into()),
+                (cmd_style(), "echo".into()),
+                (ws(), " ".into()),
+                (arg_style(), "done".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_and_without_spaces() {
+        let segs = highlight_segments("true&&echo ok");
+        assert_eq!(
+            segs,
+            vec![
+                (cmd_style(), "true".into()),
+                (pipe_style(), "&&".into()),
+                (cmd_style(), "echo".into()),
+                (ws(), " ".into()),
+                (arg_style(), "ok".into()),
+            ]
+        );
+    }
+
+    // ── || 演算子 ──
+
+    #[test]
+    fn test_or_operator() {
+        let segs = highlight_segments("false || echo fallback");
+        assert_eq!(
+            segs,
+            vec![
+                (cmd_style(), "false".into()),
+                (ws(), " ".into()),
+                (pipe_style(), "||".into()),
+                (ws(), " ".into()),
+                (cmd_style(), "echo".into()),
+                (ws(), " ".into()),
+                (arg_style(), "fallback".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_or_without_spaces() {
+        let segs = highlight_segments("false||echo ok");
+        assert_eq!(
+            segs,
+            vec![
+                (cmd_style(), "false".into()),
+                (pipe_style(), "||".into()),
+                (cmd_style(), "echo".into()),
+                (ws(), " ".into()),
+                (arg_style(), "ok".into()),
+            ]
+        );
+    }
+
+    // ── ; 演算子 ──
+
+    #[test]
+    fn test_semi_operator() {
+        let segs = highlight_segments("echo a ; echo b");
+        assert_eq!(
+            segs,
+            vec![
+                (cmd_style(), "echo".into()),
+                (ws(), " ".into()),
+                (arg_style(), "a".into()),
+                (ws(), " ".into()),
+                (pipe_style(), ";".into()),
+                (ws(), " ".into()),
+                (cmd_style(), "echo".into()),
+                (ws(), " ".into()),
+                (arg_style(), "b".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_semi_without_spaces() {
+        let segs = highlight_segments("echo a;echo b");
+        assert_eq!(
+            segs,
+            vec![
+                (cmd_style(), "echo".into()),
+                (ws(), " ".into()),
+                (arg_style(), "a".into()),
+                (pipe_style(), ";".into()),
+                (cmd_style(), "echo".into()),
+                (ws(), " ".into()),
+                (arg_style(), "b".into()),
+            ]
+        );
+    }
+
+    // ── 混合 ──
+
+    #[test]
+    fn test_mixed_operators() {
+        let segs = highlight_segments("cmd1 && cmd2 || cmd3 ; cmd4");
+        assert_eq!(
+            segs,
+            vec![
+                (cmd_style(), "cmd1".into()),
+                (ws(), " ".into()),
+                (pipe_style(), "&&".into()),
+                (ws(), " ".into()),
+                (cmd_style(), "cmd2".into()),
+                (ws(), " ".into()),
+                (pipe_style(), "||".into()),
+                (ws(), " ".into()),
+                (cmd_style(), "cmd3".into()),
+                (ws(), " ".into()),
+                (pipe_style(), ";".into()),
+                (ws(), " ".into()),
+                (cmd_style(), "cmd4".into()),
+            ]
+        );
     }
 
     #[test]

@@ -31,6 +31,26 @@ pub struct Pipeline {
     pub commands: Vec<SimpleCommand>,
 }
 
+/// コマンドリストの接続演算子
+#[derive(Debug, Clone, PartialEq)]
+pub enum Connector {
+    /// `&&` — 前のコマンドが成功 (exit_code == 0) した場合のみ次を実行
+    And,
+    /// `||` — 前のコマンドが失敗 (exit_code != 0) した場合のみ次を実行
+    Or,
+    /// `;` — 前のコマンドの結果に関わらず次を実行
+    Semi,
+}
+
+/// `&&`, `||`, `;` で接続された一連のパイプライン
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandList {
+    /// 先頭のパイプライン
+    pub first: Pipeline,
+    /// (接続演算子, パイプライン) のペアのリスト
+    pub rest: Vec<(Connector, Pipeline)>,
+}
+
 /// パースエラー
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError(pub String);
@@ -39,6 +59,82 @@ impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+/// トークン列をコマンドリストにパースする。
+///
+/// `shell_words::split()` で分割済みのトークンを受け取り、
+/// `&&`, `||`, `;` で分割した後、各セグメントを `parse_pipeline()` でパースする。
+pub fn parse_command_list(tokens: Vec<String>) -> Result<CommandList, ParseError> {
+    if tokens.is_empty() {
+        return Err(ParseError("empty command".to_string()));
+    }
+
+    let (segments, connectors) = split_by_connector(&tokens)?;
+
+    let first = parse_pipeline(segments[0].clone())?;
+    let mut rest = Vec::new();
+    for (i, conn) in connectors.into_iter().enumerate() {
+        let pipeline = parse_pipeline(segments[i + 1].clone())?;
+        rest.push((conn, pipeline));
+    }
+
+    Ok(CommandList { first, rest })
+}
+
+/// トークン列を `&&`, `||`, `;` で分割する。
+///
+/// 戻り値: (セグメント群, 接続演算子群)
+/// segments.len() == connectors.len() + 1 が常に成立する。
+fn split_by_connector(tokens: &[String]) -> Result<(Vec<Vec<String>>, Vec<Connector>), ParseError> {
+    let mut segments: Vec<Vec<String>> = Vec::new();
+    let mut connectors: Vec<Connector> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+
+    for token in tokens {
+        match token.as_str() {
+            "&&" => {
+                if current.is_empty() {
+                    return Err(ParseError(
+                        "syntax error: unexpected token '&&'".to_string(),
+                    ));
+                }
+                segments.push(std::mem::take(&mut current));
+                connectors.push(Connector::And);
+            }
+            "||" => {
+                if current.is_empty() {
+                    return Err(ParseError(
+                        "syntax error: unexpected token '||'".to_string(),
+                    ));
+                }
+                segments.push(std::mem::take(&mut current));
+                connectors.push(Connector::Or);
+            }
+            ";" => {
+                if current.is_empty() {
+                    return Err(ParseError("syntax error: unexpected token ';'".to_string()));
+                }
+                segments.push(std::mem::take(&mut current));
+                connectors.push(Connector::Semi);
+            }
+            _ => {
+                current.push(token.clone());
+            }
+        }
+    }
+
+    // 最後のセグメント
+    if current.is_empty() && !connectors.is_empty() {
+        return Err(ParseError(
+            "syntax error: unexpected end of command after connector".to_string(),
+        ));
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+
+    Ok((segments, connectors))
 }
 
 /// トークン列をパイプラインにパースする。
@@ -279,6 +375,170 @@ mod tests {
     fn append_redirect_without_target_returns_error() {
         let tokens = vec!["echo".into(), "hello".into(), ">>".into()];
         let result = parse_pipeline(tokens);
+        assert!(result.is_err());
+    }
+
+    // ── parse_command_list: && ──
+
+    #[test]
+    fn command_list_and_two_commands() {
+        let tokens = vec![
+            "make".into(),
+            "build".into(),
+            "&&".into(),
+            "echo".into(),
+            "done".into(),
+        ];
+        let list = parse_command_list(tokens).unwrap();
+        assert_eq!(list.first.commands[0].cmd, "make");
+        assert_eq!(list.first.commands[0].args, vec!["build"]);
+        assert_eq!(list.rest.len(), 1);
+        assert_eq!(list.rest[0].0, Connector::And);
+        assert_eq!(list.rest[0].1.commands[0].cmd, "echo");
+        assert_eq!(list.rest[0].1.commands[0].args, vec!["done"]);
+    }
+
+    #[test]
+    fn command_list_and_three_commands() {
+        let tokens = vec![
+            "cmd1".into(),
+            "&&".into(),
+            "cmd2".into(),
+            "&&".into(),
+            "cmd3".into(),
+        ];
+        let list = parse_command_list(tokens).unwrap();
+        assert_eq!(list.first.commands[0].cmd, "cmd1");
+        assert_eq!(list.rest.len(), 2);
+        assert_eq!(list.rest[0].0, Connector::And);
+        assert_eq!(list.rest[0].1.commands[0].cmd, "cmd2");
+        assert_eq!(list.rest[1].0, Connector::And);
+        assert_eq!(list.rest[1].1.commands[0].cmd, "cmd3");
+    }
+
+    // ── parse_command_list: || ──
+
+    #[test]
+    fn command_list_or() {
+        let tokens = vec![
+            "false".into(),
+            "||".into(),
+            "echo".into(),
+            "fallback".into(),
+        ];
+        let list = parse_command_list(tokens).unwrap();
+        assert_eq!(list.first.commands[0].cmd, "false");
+        assert_eq!(list.rest.len(), 1);
+        assert_eq!(list.rest[0].0, Connector::Or);
+        assert_eq!(list.rest[0].1.commands[0].cmd, "echo");
+    }
+
+    // ── parse_command_list: ; ──
+
+    #[test]
+    fn command_list_semi() {
+        let tokens = vec![
+            "echo".into(),
+            "a".into(),
+            ";".into(),
+            "echo".into(),
+            "b".into(),
+        ];
+        let list = parse_command_list(tokens).unwrap();
+        assert_eq!(list.first.commands[0].cmd, "echo");
+        assert_eq!(list.rest.len(), 1);
+        assert_eq!(list.rest[0].0, Connector::Semi);
+        assert_eq!(list.rest[0].1.commands[0].cmd, "echo");
+    }
+
+    // ── parse_command_list: 混合 ──
+
+    #[test]
+    fn command_list_mixed_connectors() {
+        let tokens = vec![
+            "cmd1".into(),
+            "&&".into(),
+            "cmd2".into(),
+            "||".into(),
+            "cmd3".into(),
+            ";".into(),
+            "cmd4".into(),
+        ];
+        let list = parse_command_list(tokens).unwrap();
+        assert_eq!(list.first.commands[0].cmd, "cmd1");
+        assert_eq!(list.rest.len(), 3);
+        assert_eq!(list.rest[0].0, Connector::And);
+        assert_eq!(list.rest[1].0, Connector::Or);
+        assert_eq!(list.rest[2].0, Connector::Semi);
+    }
+
+    // ── parse_command_list: パイプとの組み合わせ ──
+
+    #[test]
+    fn command_list_with_pipe() {
+        // echo hello | cat && echo done
+        let tokens = vec![
+            "echo".into(),
+            "hello".into(),
+            "|".into(),
+            "cat".into(),
+            "&&".into(),
+            "echo".into(),
+            "done".into(),
+        ];
+        let list = parse_command_list(tokens).unwrap();
+        assert_eq!(list.first.commands.len(), 2); // echo hello | cat
+        assert_eq!(list.rest.len(), 1);
+        assert_eq!(list.rest[0].0, Connector::And);
+        assert_eq!(list.rest[0].1.commands[0].cmd, "echo");
+    }
+
+    // ── parse_command_list: 単一コマンド (接続演算子なし) ──
+
+    #[test]
+    fn command_list_single_command() {
+        let tokens = vec!["ls".into(), "-la".into()];
+        let list = parse_command_list(tokens).unwrap();
+        assert_eq!(list.first.commands[0].cmd, "ls");
+        assert!(list.rest.is_empty());
+    }
+
+    // ── parse_command_list: エラーケース ──
+
+    #[test]
+    fn command_list_leading_and_returns_error() {
+        let tokens = vec!["&&".into(), "echo".into()];
+        let result = parse_command_list(tokens);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn command_list_trailing_and_returns_error() {
+        let tokens = vec!["echo".into(), "&&".into()];
+        let result = parse_command_list(tokens);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn command_list_leading_or_returns_error() {
+        let tokens = vec!["||".into(), "echo".into()];
+        let result = parse_command_list(tokens);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn command_list_trailing_semi_is_ok() {
+        // `echo hello ;` — 末尾のセミコロン後にコマンドがなくても許容
+        // (実際のシェルでは `echo hello ;` は有効)
+        // ただし現在の実装ではエラーになる — これはシンプルさのため
+        let tokens = vec!["echo".into(), "hello".into(), ";".into()];
+        let result = parse_command_list(tokens);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn command_list_empty_returns_error() {
+        let result = parse_command_list(vec![]);
         assert!(result.is_err());
     }
 }

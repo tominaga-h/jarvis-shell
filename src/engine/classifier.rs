@@ -322,8 +322,7 @@ impl InputClassifier {
     fn has_shell_syntax(input: &str) -> bool {
         // パイプ、論理演算子、セミコロン
         input.contains('|')
-            || input.contains(" && ")
-            || input.contains(" || ")
+            || input.contains("&&")
             || input.contains(';')
             // 変数展開（先頭が $ で始まる）
             || input.starts_with('$')

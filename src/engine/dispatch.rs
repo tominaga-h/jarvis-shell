@@ -45,15 +45,15 @@ pub fn try_builtin(input: &str) -> Option<CommandResult> {
         return Some(CommandResult::success(String::new()));
     }
 
-    // パイプ/リダイレクト演算子を含む場合は None を返す。
-    // → execute() 側でパイプライン処理される。
+    // パイプ/リダイレクト/接続演算子を含む場合は None を返す。
+    // → execute() 側でコマンドリスト処理される。
     if tokens
         .iter()
-        .any(|t| matches!(t.as_str(), "|" | ">" | ">>" | "<"))
+        .any(|t| matches!(t.as_str(), "|" | ">" | ">>" | "<" | "&&" | "||" | ";"))
     {
         debug!(
             command = %first_word,
-            "try_builtin: contains pipe/redirect, deferring to execute()"
+            "try_builtin: contains pipe/redirect/connector, deferring to execute()"
         );
         return None;
     }
@@ -103,7 +103,7 @@ pub fn execute(input: &str) -> CommandResult {
     let expanded: Vec<String> = tokens
         .into_iter()
         .map(|t| {
-            if t == "|" || t == ">" || t == ">>" || t == "<" {
+            if matches!(t.as_str(), "|" | ">" | ">>" | "<" | "&&" | "||" | ";") {
                 t
             } else {
                 expand::expand_token(&t)
@@ -111,9 +111,9 @@ pub fn execute(input: &str) -> CommandResult {
         })
         .collect();
 
-    // 3. パイプラインにパース
-    let pipeline = match parser::parse_pipeline(expanded) {
-        Ok(p) => p,
+    // 3. コマンドリストにパース
+    let command_list = match parser::parse_command_list(expanded) {
+        Ok(cl) => cl,
         Err(e) => {
             let msg = format!("jarvish: {e}\n");
             eprint!("{msg}");
@@ -122,12 +122,25 @@ pub fn execute(input: &str) -> CommandResult {
     };
 
     debug!(
-        pipeline_length = pipeline.commands.len(),
-        first_cmd = %pipeline.commands[0].cmd,
-        "execute() parsed pipeline"
+        pipeline_count = command_list.rest.len() + 1,
+        first_cmd = %command_list.first.commands[0].cmd,
+        "execute() parsed command list"
     );
 
-    // 4. 単一コマンドの場合はビルトインを試行
+    // 4. 単一パイプラインの場合（接続演算子なし）は従来のビルトイン最適化パスを使用
+    if command_list.rest.is_empty() {
+        let pipeline = &command_list.first;
+        return execute_pipeline(pipeline);
+    }
+
+    // 5. 複数パイプライン: run_command_list() で実行
+    //    各パイプラインのビルトインも処理するため、ディスパッチ付きで実行
+    run_command_list_with_builtins(&command_list)
+}
+
+/// 単一パイプラインを実行する（ビルトイン最適化パス付き）。
+fn execute_pipeline(pipeline: &parser::Pipeline) -> CommandResult {
+    // 単一コマンドの場合はビルトインを試行
     if pipeline.commands.len() == 1 && pipeline.commands[0].redirects.is_empty() {
         let simple = &pipeline.commands[0];
         let args: Vec<&str> = simple.args.iter().map(|s| s.as_str()).collect();
@@ -137,7 +150,7 @@ pub fn execute(input: &str) -> CommandResult {
         }
     }
 
-    // 5. パイプラインの先頭がビルトインの場合、実行して出力を後続に渡す
+    // パイプラインの先頭がビルトインの場合、実行して出力を後続に渡す
     if pipeline.commands.len() > 1 {
         let first = &pipeline.commands[0];
         let args: Vec<&str> = first.args.iter().map(|s| s.as_str()).collect();
@@ -164,8 +177,46 @@ pub fn execute(input: &str) -> CommandResult {
         }
     }
 
-    // 6. 外部コマンドまたはパイプラインを実行
-    exec::run_pipeline(&pipeline)
+    // 外部コマンドまたはパイプラインを実行
+    exec::run_pipeline(pipeline)
+}
+
+/// コマンドリストをビルトイン対応で実行する。
+///
+/// `exec::run_command_list()` と異なり、各パイプラインの実行時に
+/// ビルトインコマンドの最適化パスを適用する。
+fn run_command_list_with_builtins(list: &parser::CommandList) -> CommandResult {
+    use super::LoopAction;
+    use parser::Connector;
+
+    let mut result = execute_pipeline(&list.first);
+
+    if result.action == LoopAction::Exit {
+        return result;
+    }
+
+    for (connector, pipeline) in &list.rest {
+        let should_run = match connector {
+            Connector::And => result.exit_code == 0,
+            Connector::Or => result.exit_code != 0,
+            Connector::Semi => true,
+        };
+
+        if should_run {
+            let next = execute_pipeline(pipeline);
+            result.stdout.push_str(&next.stdout);
+            result.stderr.push_str(&next.stderr);
+            result.exit_code = next.exit_code;
+            result.used_alt_screen = result.used_alt_screen || next.used_alt_screen;
+
+            if next.action == LoopAction::Exit {
+                result.action = LoopAction::Exit;
+                return result;
+            }
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -332,6 +383,7 @@ mod tests {
     #[test]
     #[serial]
     fn execute_builtin_pipe_to_cat() {
+        let _guard = CwdGuard::new();
         // cwd | cat → 現在のディレクトリが出力される
         let expected = env::current_dir().unwrap();
         let result = execute("cwd | cat");
@@ -350,5 +402,95 @@ mod tests {
             "expected stdout to contain PATH, got: {}",
             result.stdout
         );
+    }
+
+    // ── execute: && 演算子 ──
+
+    #[test]
+    fn execute_and_both_succeed() {
+        let result = execute("echo hello && echo world");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("hello"));
+        assert!(result.stdout.contains("world"));
+    }
+
+    #[test]
+    fn execute_and_first_fails() {
+        let result = execute("false && echo skipped");
+        assert_eq!(result.exit_code, 1);
+        assert!(!result.stdout.contains("skipped"));
+    }
+
+    #[test]
+    fn execute_and_three_commands() {
+        let result = execute("echo a && echo b && echo c");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("a"));
+        assert!(result.stdout.contains("b"));
+        assert!(result.stdout.contains("c"));
+    }
+
+    // ── execute: || 演算子 ──
+
+    #[test]
+    fn execute_or_first_fails() {
+        let result = execute("false || echo fallback");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("fallback"));
+    }
+
+    #[test]
+    fn execute_or_first_succeeds() {
+        let result = execute("true || echo skipped");
+        assert_eq!(result.exit_code, 0);
+        assert!(!result.stdout.contains("skipped"));
+    }
+
+    // ── execute: ; 演算子 ──
+
+    #[test]
+    fn execute_semi_always_runs() {
+        let result = execute("false ; echo always");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("always"));
+    }
+
+    // ── execute: 混合 ──
+
+    #[test]
+    fn execute_and_then_or() {
+        // false && echo skip || echo rescue
+        let result = execute("false && echo skip || echo rescue");
+        assert_eq!(result.exit_code, 0);
+        assert!(!result.stdout.contains("skip"));
+        assert!(result.stdout.contains("rescue"));
+    }
+
+    // ── try_builtin: 接続演算子を含む場合は None ──
+
+    #[test]
+    fn try_builtin_with_and_returns_none() {
+        assert!(try_builtin("cd /tmp && echo done").is_none());
+    }
+
+    #[test]
+    fn try_builtin_with_or_returns_none() {
+        assert!(try_builtin("cd /nonexistent || echo fail").is_none());
+    }
+
+    #[test]
+    fn try_builtin_with_semi_returns_none() {
+        assert!(try_builtin("cd /tmp ; echo done").is_none());
+    }
+
+    // ── execute: ビルトイン + && ──
+
+    #[test]
+    #[serial]
+    fn execute_builtin_and_command() {
+        let _guard = CwdGuard::new();
+        let result = execute("cd /tmp && echo done");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("done"));
     }
 }
