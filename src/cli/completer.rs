@@ -6,13 +6,13 @@
 //! `InputClassifier` の PATH キャッシュを共有参照し、
 //! `export PATH=...` 等による動的変更を即座に反映する。
 
-use std::env;
 use std::fs;
 use std::sync::Arc;
 
 use reedline::{Completer, Span, Suggestion};
 
 use crate::engine::classifier::InputClassifier;
+use crate::engine::expand;
 
 /// ビルトインコマンド名（補完候補に常に含める）
 const BUILTIN_COMMANDS: &[&str] = &["cd", "cwd", "exit", "export", "unset", "help", "history"];
@@ -67,8 +67,10 @@ impl JarvishCompleter {
     }
 
     /// ファイル / ディレクトリパス補完（第 2 トークン以降）
-    fn complete_path(&self, partial: &str, span: Span) -> Vec<Suggestion> {
-        let (search_dir, prefix) = Self::split_path_prefix(partial);
+    ///
+    /// `dirs_only` が true の場合はディレクトリのみを候補に含める（`cd` 用）。
+    fn complete_path(&self, partial: &str, span: Span, dirs_only: bool) -> Vec<Suggestion> {
+        let (search_dir, prefix, original_dir) = Self::split_path_prefix(partial);
 
         let entries = match fs::read_dir(&search_dir) {
             Ok(e) => e,
@@ -91,13 +93,17 @@ impl JarvishCompleter {
 
                 let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
 
-                // 補完値: ディレクトリ部分を保持し、ディレクトリには `/` を付与
-                let value = if let Some(idx) = partial.rfind('/') {
-                    let dir_part = &partial[..=idx];
+                // cd ではディレクトリのみ補完
+                if dirs_only && !is_dir {
+                    return None;
+                }
+
+                // 補完値: オリジナルのディレクトリ部分を保持し、ディレクトリには `/` を付与
+                let value = if !original_dir.is_empty() {
                     if is_dir {
-                        format!("{dir_part}{name}/")
+                        format!("{original_dir}{name}/")
                     } else {
-                        format!("{dir_part}{name}")
+                        format!("{original_dir}{name}")
                     }
                 } else if is_dir {
                     format!("{name}/")
@@ -123,31 +129,44 @@ impl JarvishCompleter {
 
     // ========== ヘルパー ==========
 
-    /// 部分パス文字列を「検索ディレクトリ」と「ファイル名プレフィックス」に分割する。
+    /// 部分パス文字列を「検索ディレクトリ」「ファイル名プレフィックス」「オリジナル dir 部分」に分割する。
+    ///
+    /// `expand::expand_token` でチルダ (`~`) と環境変数 (`$HOME` 等) を展開した上で
+    /// ディレクトリ読み取り用パスを返す。補完候補の表示値にはオリジナル（展開前）の
+    /// ディレクトリ部分を使う。
+    ///
+    /// 戻り値: `(search_dir, file_prefix, original_dir)`
     ///
     /// 例:
-    /// - `"src/ma"` → (`"src/"`, `"ma"`)
-    /// - `"file"` → (`"."`, `"file"`)
-    /// - `"~/do"` → (`"$HOME/"`, `"do"`)
-    fn split_path_prefix(partial: &str) -> (String, String) {
-        if let Some(idx) = partial.rfind('/') {
-            let dir_part = &partial[..=idx];
-            let file_part = &partial[idx + 1..];
+    /// - `"src/ma"`    → (`"src/"`,    `"ma"`,  `"src/"`)
+    /// - `"file"`      → (`"."`,       `"file"`, `""`)
+    /// - `"~/do"`      → (`"$HOME/"`,  `"do"`,  `"~/"`)
+    /// - `"~"`         → (`"$HOME/"`,  `""`,    `"~/"`)
+    /// - `"$HOME/do"`  → (`"$HOME/"`,  `"do"`,  `"$HOME/"`)
+    fn split_path_prefix(partial: &str) -> (String, String, String) {
+        // `~` 単体はホームディレクトリそのものを指すため `~/` として扱う
+        let effective = if partial == "~" { "~/" } else { partial };
 
-            // チルダ展開
-            let expanded = if dir_part.starts_with("~/") {
-                if let Some(home) = env::var_os("HOME") {
-                    format!("{}{}", home.to_string_lossy(), &dir_part[1..])
-                } else {
-                    dir_part.to_string()
-                }
+        // チルダ・環境変数を展開
+        let expanded = expand::expand_token(effective);
+
+        if let Some(idx) = expanded.rfind('/') {
+            let search_dir = expanded[..=idx].to_string();
+            let file_part = expanded[idx + 1..].to_string();
+
+            // オリジナル（展開前）のディレクトリ部分を計算
+            // 補完候補の value に使い、ユーザーの入力形式を保持する
+            let original_dir = if let Some(orig_idx) = partial.rfind('/') {
+                partial[..=orig_idx].to_string()
             } else {
-                dir_part.to_string()
+                // `~` のみなど、展開前にはスラッシュがないケース → `~/` を使用
+                format!("{}/", partial)
             };
 
-            (expanded, file_part.to_string())
+            (search_dir, file_part, original_dir)
         } else {
-            (".".to_string(), partial.to_string())
+            // 展開後もスラッシュがない → カレントディレクトリで検索
+            (".".to_string(), partial.to_string(), String::new())
         }
     }
 
@@ -172,7 +191,273 @@ impl Completer for JarvishCompleter {
         if Self::is_first_token(line, pos) {
             self.complete_command(partial, span)
         } else {
-            self.complete_path(partial, span)
+            // cd コマンドではディレクトリのみ補完する
+            let first_token = line.split_whitespace().next().unwrap_or("");
+            let dirs_only = first_token == "cd";
+            self.complete_path(partial, span, dirs_only)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::env;
+    use std::fs;
+
+    /// テスト用の completer を作成するヘルパー
+    fn test_completer() -> JarvishCompleter {
+        JarvishCompleter::new(Arc::new(InputClassifier::new()))
+    }
+
+    /// テスト用ディレクトリ構造を作成するヘルパー
+    /// 返り値: (tmpdir, 作成したディレクトリのパス文字列)
+    fn create_test_tree() -> (tempfile::TempDir, String) {
+        let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
+        let base = tmpdir.path();
+
+        // ディレクトリを作成
+        fs::create_dir(base.join("Documents")).unwrap();
+        fs::create_dir(base.join("Desktop")).unwrap();
+        fs::create_dir(base.join("Downloads")).unwrap();
+        fs::create_dir(base.join(".hidden_dir")).unwrap();
+
+        // ファイルを作成
+        fs::write(base.join("readme.txt"), "").unwrap();
+        fs::write(base.join(".dotfile"), "").unwrap();
+
+        let path = base.to_str().unwrap().to_string();
+        (tmpdir, path)
+    }
+
+    // ── split_path_prefix テスト ──
+
+    #[test]
+    fn split_relative_path() {
+        let (search_dir, prefix, original_dir) = JarvishCompleter::split_path_prefix("src/ma");
+        assert_eq!(search_dir, "src/");
+        assert_eq!(prefix, "ma");
+        assert_eq!(original_dir, "src/");
+    }
+
+    #[test]
+    fn split_bare_filename() {
+        let (search_dir, prefix, original_dir) = JarvishCompleter::split_path_prefix("file");
+        assert_eq!(search_dir, ".");
+        assert_eq!(prefix, "file");
+        assert_eq!(original_dir, "");
+    }
+
+    #[test]
+    #[serial]
+    fn split_tilde_with_slash() {
+        let home = env::var("HOME").unwrap();
+        let (search_dir, prefix, original_dir) = JarvishCompleter::split_path_prefix("~/Do");
+        assert_eq!(search_dir, format!("{home}/"));
+        assert_eq!(prefix, "Do");
+        assert_eq!(original_dir, "~/");
+    }
+
+    #[test]
+    #[serial]
+    fn split_tilde_alone() {
+        let home = env::var("HOME").unwrap();
+        let (search_dir, prefix, original_dir) = JarvishCompleter::split_path_prefix("~");
+        // `~` → `~/` として扱われ、HOME の中身を一覧する形になる
+        assert_eq!(search_dir, format!("{home}/"));
+        assert_eq!(prefix, "");
+        assert_eq!(original_dir, "~/");
+    }
+
+    #[test]
+    #[serial]
+    fn split_tilde_trailing_slash() {
+        let home = env::var("HOME").unwrap();
+        let (search_dir, prefix, original_dir) = JarvishCompleter::split_path_prefix("~/");
+        assert_eq!(search_dir, format!("{home}/"));
+        assert_eq!(prefix, "");
+        assert_eq!(original_dir, "~/");
+    }
+
+    #[test]
+    fn split_absolute_path() {
+        let (search_dir, prefix, original_dir) = JarvishCompleter::split_path_prefix("/tmp/te");
+        assert_eq!(search_dir, "/tmp/");
+        assert_eq!(prefix, "te");
+        assert_eq!(original_dir, "/tmp/");
+    }
+
+    // ── complete_path テスト ──
+
+    #[test]
+    fn complete_path_absolute_with_trailing_slash() {
+        let (_tmpdir, path) = create_test_tree();
+        let completer = test_completer();
+        let partial = format!("{path}/");
+        let span = Span::new(3, 3 + partial.len());
+
+        let suggestions = completer.complete_path(&partial, span, false);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(values.contains(&format!("{path}/Documents/").as_str()));
+        assert!(values.contains(&format!("{path}/Desktop/").as_str()));
+        assert!(values.contains(&format!("{path}/readme.txt").as_str()));
+        // ドットファイルはプレフィックスが `.` で始まらない限り含まれない
+        assert!(!values.iter().any(|v| v.contains(".hidden_dir")));
+        assert!(!values.iter().any(|v| v.contains(".dotfile")));
+    }
+
+    #[test]
+    fn complete_path_absolute_with_prefix() {
+        let (_tmpdir, path) = create_test_tree();
+        let completer = test_completer();
+        let partial = format!("{path}/Do");
+        let span = Span::new(3, 3 + partial.len());
+
+        let suggestions = completer.complete_path(&partial, span, false);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        // "Do" にマッチするのは Documents と Downloads（Desktop は "De" で始まる）
+        assert!(values.contains(&format!("{path}/Documents/").as_str()));
+        assert!(values.contains(&format!("{path}/Downloads/").as_str()));
+        assert!(!values.iter().any(|v| v.contains("Desktop")));
+        assert!(!values.iter().any(|v| v.contains("readme")));
+    }
+
+    #[test]
+    fn complete_path_dirs_only() {
+        let (_tmpdir, path) = create_test_tree();
+        let completer = test_completer();
+        let partial = format!("{path}/");
+        let span = Span::new(3, 3 + partial.len());
+
+        let suggestions = completer.complete_path(&partial, span, true);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        // ディレクトリは含まれる
+        assert!(values.contains(&format!("{path}/Documents/").as_str()));
+        assert!(values.contains(&format!("{path}/Desktop/").as_str()));
+        // ファイルは含まれない
+        assert!(!values.iter().any(|v| v.contains("readme.txt")));
+    }
+
+    #[test]
+    fn complete_path_dot_prefix_shows_hidden() {
+        let (_tmpdir, path) = create_test_tree();
+        let completer = test_completer();
+        let partial = format!("{path}/.");
+        let span = Span::new(3, 3 + partial.len());
+
+        let suggestions = completer.complete_path(&partial, span, false);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(values.contains(&format!("{path}/.hidden_dir/").as_str()));
+        assert!(values.contains(&format!("{path}/.dotfile").as_str()));
+    }
+
+    // ── complete (Completer trait) テスト ──
+
+    #[test]
+    fn complete_cd_dirs_only_via_trait() {
+        let (_tmpdir, path) = create_test_tree();
+        let mut completer = test_completer();
+        let line = format!("cd {path}/");
+        let pos = line.len();
+
+        let suggestions = completer.complete(&line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        // ディレクトリは含まれる
+        assert!(values.contains(&format!("{path}/Documents/").as_str()));
+        // ファイルは含まれない
+        assert!(!values.iter().any(|v| v.contains("readme.txt")));
+    }
+
+    #[test]
+    fn complete_ls_shows_files_and_dirs() {
+        let (_tmpdir, path) = create_test_tree();
+        let mut completer = test_completer();
+        let line = format!("ls {path}/");
+        let pos = line.len();
+
+        let suggestions = completer.complete(&line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        // ディレクトリもファイルも含まれる
+        assert!(values.contains(&format!("{path}/Documents/").as_str()));
+        assert!(values.contains(&format!("{path}/readme.txt").as_str()));
+    }
+
+    #[test]
+    #[serial]
+    fn complete_tilde_alone_expands_home() {
+        let mut completer = test_completer();
+        let line = "cd ~";
+        let pos = line.len();
+
+        let suggestions = completer.complete(line, pos);
+
+        // ~ が展開されて HOME ディレクトリの中身が補完候補になる
+        assert!(!suggestions.is_empty(), "cd ~ should produce suggestions");
+        // 全ての候補が ~/ で始まること
+        for s in &suggestions {
+            assert!(
+                s.value.starts_with("~/"),
+                "suggestion '{}' should start with ~/",
+                s.value
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn complete_tilde_slash_expands_home() {
+        let mut completer = test_completer();
+        let line = "cd ~/";
+        let pos = line.len();
+
+        let suggestions = completer.complete(line, pos);
+
+        assert!(!suggestions.is_empty(), "cd ~/ should produce suggestions");
+        for s in &suggestions {
+            assert!(
+                s.value.starts_with("~/"),
+                "suggestion '{}' should start with ~/",
+                s.value
+            );
+        }
+    }
+
+    #[test]
+    fn complete_nonexistent_dir_returns_empty() {
+        let completer = test_completer();
+        let partial = "/nonexistent_dir_12345/";
+        let span = Span::new(3, 3 + partial.len());
+
+        let suggestions = completer.complete_path(partial, span, false);
+        assert!(suggestions.is_empty());
+    }
+
+    // ── ヘルパーメソッドテスト ──
+
+    #[test]
+    fn token_start_no_space() {
+        assert_eq!(JarvishCompleter::token_start("ls", 2), 0);
+    }
+
+    #[test]
+    fn token_start_after_command() {
+        assert_eq!(JarvishCompleter::token_start("cd /tmp", 7), 3);
+    }
+
+    #[test]
+    fn is_first_token_true() {
+        assert!(JarvishCompleter::is_first_token("ls", 2));
+    }
+
+    #[test]
+    fn is_first_token_false() {
+        assert!(!JarvishCompleter::is_first_token("cd /tmp", 7));
     }
 }
