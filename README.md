@@ -1,7 +1,7 @@
 # 🤵 Jarvis Shell (jarvish)
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-![version](https://img.shields.io/badge/version-UNDER_DEVELOPMENT-red)
+![version](https://img.shields.io/badge/version-1.0.0-blue)
 
 > 🌐 [日本語版 README はこちら](docs/README_JA.md)
 
@@ -14,8 +14,6 @@
 **Jarvish** is a **Next Generation AI Integrated Shell** written in Rust, inspired by **J.A.R.V.I.S.** from Marvel's Iron Man. It natively embeds AI intelligence into your everyday shell experience — no more copy-pasting errors into a browser. Just ask Jarvis.
 
 ![jarvish](images/jarvish.png)
-
-⚠️ **Note:** Jarvish is still **UNDER ACTIVE DEVELOPMENT**. Issues are [there](https://github.com/tominaga-h/jarvis-shell/issues?q=is%3Aissue%20state%3Aopen%20milestone%3A%22Version%201.0.0%22).
 
 ---
 
@@ -48,7 +46,7 @@
 
 ---
 
-## 🚀 Getting Started
+## 📦 Install
 
 ### Prerequisites
 
@@ -58,26 +56,32 @@
 | 🔑 **OpenAI API Key** | Required for AI features        |
 | 💻 **OS**             | macOS / Linux                   |
 
-### Build
+### Install via Cargo
+
+```bash
+cargo install jarvish
+```
+
+### Build from Source
 
 ```bash
 git clone https://github.com/tominaga-h/jarvis-shell.git
 cd jarvis-shell
-cargo build --release
+cargo install --path .
 ```
 
-### Configuration
+### Setup
 
-Create a `.env` file in the project root (see `.env.example`):
+Set your OpenAI API key as an environment variable:
 
 ```bash
-OPENAI_API_KEY=your_openai_api_key
+export OPENAI_API_KEY="sk-..."
 ```
 
 ### Run
 
 ```bash
-./target/release/jarvish
+jarvish
 ```
 
 ---

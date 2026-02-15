@@ -1,8 +1,17 @@
 [package]
 name = "jarvish"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
-description = "Next Generation AI Integrated Shell"
+rust-version = "1.75"
+description = "Next Generation AI Integrated Shell inspired by J.A.R.V.I.S. on Marvel's Iron Man"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tominaga-h/jarvis-shell"
+homepage = "https://github.com/tominaga-h/jarvis-shell"
+readme = "README.md"
+keywords = ["shell", "ai", "terminal", "cli", "jarvis"]
+categories = ["command-line-utilities"]
+authors = ["tominaga-h"]
+exclude = [".env*", "images/", ".github/", "githooks/"]
 
 [[bin]]
 name = "jarvish"

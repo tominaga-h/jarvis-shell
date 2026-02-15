@@ -1,7 +1,7 @@
 # 🤵 Jarvis Shell (jarvish)
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-![version](https://img.shields.io/badge/version-UNDER_DEVELOPMENT-red)
+![version](https://img.shields.io/badge/version-1.0.0-blue)
 
 > 🌐 [English README](../README.md)
 
@@ -14,8 +14,6 @@
 **Jarvish** は、Marvel の Iron Man に登場する **J.A.R.V.I.S.** にインスパイアされた、Rust 製の **次世代 AI 統合シェル (Next Generation AI Integrated Shell)** です。日常のシェル体験に AI の知性をネイティブに組み込みます。エラーをブラウザにコピペする必要はもうありません。Jarvis に聞くだけです。
 
 ![jarvish](../images/jarvish.png)
-
-⚠️ **注意:** Jarvish はまだ**開発中**です。 Issueは[こちら](https://github.com/tominaga-h/jarvis-shell/issues?q=is%3Aissue%20state%3Aopen%20milestone%3A%22Version%201.0.0%22)
 
 ---
 
@@ -48,7 +46,7 @@
 
 ---
 
-## 🚀 はじめに
+## 📦 インストール
 
 ### 前提条件
 
@@ -58,26 +56,32 @@
 | 🔑 **OpenAI API キー** | AI 機能に必要                         |
 | 💻 **OS**              | macOS / Linux                         |
 
-### ビルド
+### Cargo でインストール
+
+```bash
+cargo install jarvish
+```
+
+### ソースからビルド
 
 ```bash
 git clone https://github.com/tominaga-h/jarvis-shell.git
 cd jarvis-shell
-cargo build --release
+cargo install --path .
 ```
 
-### 設定
+### セットアップ
 
-プロジェクトルートに `.env` ファイルを作成してください（`.env.example` を参照）：
+OpenAI API キーを環境変数に設定してください：
 
 ```bash
-OPENAI_API_KEY=your_openai_api_key
+export OPENAI_API_KEY="sk-..."
 ```
 
 ### 起動
 
 ```bash
-./target/release/jarvish
+jarvish
 ```
 
 ---

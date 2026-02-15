@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+" # 例: v1.0.0 のようなタグがPushされた時のみ発火
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create ${{ github.ref_name }} --draft --generate-notes
+
+  build-release:
+    name: Build & Upload Release Asset
+    needs: ["create-release"]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # Jarvishは Unix 依存(nixクレート等)が強いため、Mac と Linux を対象にします
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 非常に便利なRustバイナリアップロード用Action
+      - name: Build and upload
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: jarvish
+          target: ${{ matrix.target }}
+          tar: unix # tar.gz形式で圧縮
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
