@@ -42,14 +42,18 @@ impl Shell {
         // ハイライターと REPL ループの両方で共有するため Arc で包む
         let classifier = Arc::new(InputClassifier::new());
 
-        // 履歴 DB のパスを決定（BlackBox と同じ history.db を共有）
-        let db_path = BlackBox::data_dir()
-            .map(|dir| dir.join("history.db"))
-            .unwrap_or_else(|_| {
-                warn!("Failed to determine data directory for history, using fallback");
-                std::path::PathBuf::from(".jarvish_history.db")
-            });
+        // データディレクトリを一度だけ決定し、エディタ履歴と BlackBox の両方で共有する。
+        // data_dir() 失敗時は ~/.jarvish にフォールバックし、
+        // reedline 履歴と BlackBox（Blob 含む）が同じ状態を共有できるようにする。
+        let data_dir = BlackBox::data_dir().unwrap_or_else(|e| {
+            warn!("Failed to determine data directory: {e}, using fallback");
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(".jarvish")
+        });
 
+        let db_path = data_dir.join("history.db");
         let reedline = editor::build_editor(Arc::clone(&classifier), db_path);
 
         // 直前コマンドの終了コードを共有するアトミック変数
@@ -59,7 +63,8 @@ impl Shell {
         let prompt = JarvisPrompt::new(Arc::clone(&last_exit_code));
 
         // Black Box（履歴永続化）の初期化
-        let black_box = match BlackBox::open() {
+        // BlackBox::open() ではなく open_at() を使い、フォールバック時も同じパスを使用する
+        let black_box = match BlackBox::open_at(data_dir) {
             Ok(bb) => {
                 info!("BlackBox initialized successfully");
                 Some(bb)

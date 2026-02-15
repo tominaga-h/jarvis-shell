@@ -34,13 +34,7 @@ pub struct BlackBox {
 }
 
 impl BlackBox {
-    /// データディレクトリを決定し、DB と BlobStore を初期化する。
-    pub fn open() -> Result<Self> {
-        let data_dir = Self::data_dir()?;
-        Self::open_at(data_dir)
-    }
-
-    /// 指定されたディレクトリで BlackBox を初期化する（テスト用にも使用）。
+    /// 指定されたディレクトリで BlackBox を初期化する。
     pub fn open_at(data_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("failed to create data directory: {}", data_dir.display()))?;
