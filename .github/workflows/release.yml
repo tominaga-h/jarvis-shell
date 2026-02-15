@@ -26,11 +26,10 @@ jobs:
     strategy:
       matrix:
         # Jarvishは Unix 依存(nixクレート等)が強いため、Mac と Linux を対象にします
+        # NOTE: x86_64-apple-darwin は GitHub Actions の Intel Mac ランナー廃止により除外
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-          - target: x86_64-apple-darwin
-            os: macos-13
           - target: aarch64-apple-darwin
             os: macos-latest
 
