@@ -5,6 +5,9 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+" # 例: v1.0.0 のようなタグがPushされた時のみ発火
 
+permissions:
+  contents: write
+
 jobs:
   create-release:
     name: Create Release
