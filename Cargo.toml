@@ -43,6 +43,8 @@ which = "8"
 nix = { version = "0.31", features = ["term", "fs", "poll"] }
 libc = "0.2"
 clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"

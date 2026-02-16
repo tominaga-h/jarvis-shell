@@ -1,9 +1,4 @@
-//! システムプロンプトと定数
-
-pub const MODEL: &str = "gpt-4o";
-
-/// エージェントループの最大ラウンド数（無限ループ防止）
-pub const MAX_AGENT_ROUNDS: usize = 10;
+//! システムプロンプト定数
 
 pub const SYSTEM_PROMPT: &str = r#"You are J.A.R.V.I.S., an AI assistant integrated into the terminal shell "jarvish".
 You serve as the user's intelligent shell companion, like Tony Stark's AI butler.

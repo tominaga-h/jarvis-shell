@@ -20,19 +20,26 @@ use tracing::{debug, info, warn};
 
 use crate::engine::CommandResult;
 
-use super::prompts::{ERROR_INVESTIGATION_PROMPT, MAX_AGENT_ROUNDS, MODEL, SYSTEM_PROMPT};
+use super::prompts::{ERROR_INVESTIGATION_PROMPT, SYSTEM_PROMPT};
 use super::stream::process_stream;
 use super::tools;
 use super::types::{AiResponse, ConversationResult, ConversationState};
+use crate::config::AiConfig;
 
 /// J.A.R.V.I.S. AI クライアント
 pub struct JarvisAI {
     client: Client<OpenAIConfig>,
+    /// 使用する AI モデル名
+    model: String,
+    /// エージェントループの最大ラウンド数
+    max_rounds: usize,
 }
 
 impl JarvisAI {
     /// OPENAI_API_KEY 環境変数から AI クライアントを初期化する。
-    pub fn new() -> Result<Self> {
+    ///
+    /// `ai_config` で使用するモデル名やエージェントループの最大ラウンド数を指定する。
+    pub fn new(ai_config: &AiConfig) -> Result<Self> {
         // async-openai は OPENAI_API_KEY 環境変数を自動で読み取る
         let api_key = std::env::var("OPENAI_API_KEY")
             .context("OPENAI_API_KEY is not set. AI features are disabled.")?;
@@ -43,7 +50,11 @@ impl JarvisAI {
 
         let config = OpenAIConfig::new().with_api_key(&api_key);
         let client = Client::with_config(config);
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            model: ai_config.model.clone(),
+            max_rounds: ai_config.max_rounds,
+        })
     }
 
     /// ユーザー入力を AI に送信し、コマンドか自然言語かを判定する。
@@ -185,7 +196,7 @@ impl JarvisAI {
     ) -> Result<AiResponse> {
         let tool_defs = tools::build_tools();
 
-        for round in 0..MAX_AGENT_ROUNDS {
+        for round in 0..self.max_rounds {
             debug!(
                 round = round,
                 messages_count = messages.len(),
@@ -193,7 +204,7 @@ impl JarvisAI {
             );
 
             let request = CreateChatCompletionRequest {
-                model: MODEL.to_string(),
+                model: self.model.clone(),
                 messages: messages.clone(),
                 tools: Some(tool_defs.clone()),
                 stream: Some(true),
@@ -201,7 +212,7 @@ impl JarvisAI {
             };
 
             debug!(
-                model = MODEL,
+                model = %self.model,
                 message_count = messages.len(),
                 tools_count = tool_defs.len(),
                 stream = true,
@@ -331,7 +342,10 @@ impl JarvisAI {
         }
 
         // ラウンド上限に達した場合
-        warn!("Agent loop reached maximum rounds ({MAX_AGENT_ROUNDS})");
+        warn!(
+            max_rounds = self.max_rounds,
+            "Agent loop reached maximum rounds"
+        );
         Ok(AiResponse::NaturalLanguage(
             "I apologize, sir. I've reached the maximum number of processing steps.".to_string(),
         ))
@@ -348,7 +362,7 @@ mod tests {
         let original = std::env::var("OPENAI_API_KEY").ok();
         std::env::remove_var("OPENAI_API_KEY");
 
-        let result = JarvisAI::new();
+        let result = JarvisAI::new(&AiConfig::default());
         assert!(result.is_err());
 
         // 元に戻す

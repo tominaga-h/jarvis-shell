@@ -8,6 +8,7 @@ mod editor;
 mod input;
 mod investigate;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
@@ -16,7 +17,9 @@ use tracing::{info, warn};
 
 use crate::ai::{ConversationState, JarvisAI};
 use crate::cli::prompt::{JarvisPrompt, EXIT_CODE_NONE};
+use crate::config::JarvishConfig;
 use crate::engine::classifier::InputClassifier;
+use crate::engine::expand;
 use crate::storage::BlackBox;
 
 /// Jarvis Shell の状態を管理する構造体。
@@ -29,6 +32,8 @@ pub struct Shell {
     conversation_state: Option<ConversationState>,
     last_exit_code: Arc<AtomicI32>,
     classifier: Arc<InputClassifier>,
+    /// 設定ファイルで定義されたコマンドエイリアス
+    aliases: HashMap<String, String>,
     /// Farewell メッセージが既に表示済みかどうか（AI goodbye 等で表示済みの場合 true）
     farewell_shown: bool,
 }
@@ -36,10 +41,17 @@ pub struct Shell {
 impl Shell {
     /// 新しい Shell インスタンスを作成する。
     ///
-    /// 入力分類器、エディタ、プロンプト、BlackBox、AI クライアントを初期化する。
+    /// 設定ファイル、入力分類器、エディタ、プロンプト、BlackBox、AI クライアントを初期化する。
     pub fn new() -> Self {
+        // 設定ファイルの読み込み
+        let config = JarvishConfig::load();
+
+        // [export] セクションの環境変数を設定
+        Self::apply_exports(&config);
+
         // 入力分類器の初期化（PATH キャッシュを構築）
         // ハイライターと REPL ループの両方で共有するため Arc で包む
+        // NOTE: apply_exports() の後に初期化し、config の PATH 設定を反映する
         let classifier = Arc::new(InputClassifier::new());
 
         // データディレクトリを一度だけ決定し、エディタ履歴と BlackBox の両方で共有する。
@@ -68,8 +80,8 @@ impl Shell {
             }
         };
 
-        // AI クライアントの初期化
-        let ai_client = match JarvisAI::new() {
+        // AI クライアントの初期化（設定ファイルの [ai] セクションを反映）
+        let ai_client = match JarvisAI::new(&config.ai) {
             Ok(ai) => {
                 info!("AI client initialized successfully");
                 Some(ai)
@@ -89,7 +101,22 @@ impl Shell {
             conversation_state: None,
             last_exit_code,
             classifier,
+            aliases: config.alias,
             farewell_shown: false,
+        }
+    }
+
+    /// 設定ファイルの `[export]` セクションを環境変数に適用する。
+    ///
+    /// 値に含まれる環境変数参照（`$PATH` 等）は展開してから設定する。
+    fn apply_exports(config: &JarvishConfig) {
+        for (key, value) in &config.export {
+            let expanded = expand::expand_token(value);
+            info!(key = %key, value = %expanded, "Applying export from config");
+            // SAFETY: シェル起動時のシングルスレッド初期化で呼ばれるため安全
+            unsafe {
+                std::env::set_var(key, &expanded);
+            }
         }
     }
 

@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 use reedline::HistoryItem;
 
 use crate::engine::classifier::{is_ai_goodbye_response, InputType};
+use crate::engine::expand;
 use crate::engine::{execute, try_builtin, CommandResult, LoopAction};
 
 use super::Shell;
@@ -26,6 +27,14 @@ impl Shell {
         if line.is_empty() {
             return true;
         }
+
+        // 0. エイリアス展開（先頭トークンがエイリアスに一致すれば置換）
+        let line = if let Some(expanded) = expand::expand_alias(&line, &self.aliases) {
+            debug!(original = %line, expanded = %expanded, "Alias expanded");
+            expanded
+        } else {
+            line
+        };
 
         debug!(input = %line, "User input received");
 
