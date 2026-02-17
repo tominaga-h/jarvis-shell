@@ -98,7 +98,7 @@ fn format_git_status() -> String {
         parts.push(red(&format!(" {deleted}")));
     }
 
-    format!("{}", parts.join(" "))
+    parts.join(" ")
 }
 
 /// ホームディレクトリを取得する。
@@ -140,11 +140,7 @@ impl Prompt for JarvisPrompt {
         let git_part = match current_git_branch() {
             Some(branch) => {
                 let status = format_git_status();
-                format!(
-                    "on {} {}",
-                    cyan(&format!(" {branch}")),
-                    status,
-                )
+                format!("on {} {}", cyan(&format!(" {branch}")), status,)
             }
             None => String::new(),
         };
