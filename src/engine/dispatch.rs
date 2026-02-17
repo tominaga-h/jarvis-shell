@@ -263,6 +263,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn try_builtin_cd_still_works() {
         let _guard = CwdGuard::new();
         let result = try_builtin("cd /tmp");
