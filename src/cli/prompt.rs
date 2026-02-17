@@ -39,6 +39,68 @@ fn current_git_branch() -> Option<String> {
     head.shorthand().map(|s| s.to_string())
 }
 
+/// Git リポジトリ内のファイルステータスを集計する。
+///
+/// 戻り値: `(added, modified, deleted)` のタプル。
+/// - added: 新規ファイル数（ステージ済み + untracked）
+/// - modified: 変更ファイル数（ステージ済み + ワーキングツリー）
+/// - deleted: 削除ファイル数（ステージ済み + ワーキングツリー）
+fn git_file_status_counts() -> Option<(usize, usize, usize)> {
+    let cwd = env::current_dir().ok()?;
+    let repo = git2::Repository::discover(cwd).ok()?;
+    let statuses = repo.statuses(None).ok()?;
+
+    let mut added = 0usize;
+    let mut modified = 0usize;
+    let mut deleted = 0usize;
+
+    for entry in statuses.iter() {
+        let s = entry.status();
+        if s.intersects(git2::Status::INDEX_NEW | git2::Status::WT_NEW) {
+            added += 1;
+        }
+        if s.intersects(git2::Status::INDEX_MODIFIED | git2::Status::WT_MODIFIED) {
+            modified += 1;
+        }
+        if s.intersects(git2::Status::INDEX_DELETED | git2::Status::WT_DELETED) {
+            deleted += 1;
+        }
+    }
+
+    Some((added, modified, deleted))
+}
+
+/// Git ステータスのカウントを色付き文字列にフォーマットする。
+///
+/// - `+N` (緑): 追加ファイル
+/// - `~N` (黄): 変更ファイル
+/// - `-N` (赤): 削除ファイル
+///
+/// 全て 0 の場合は空文字列を返す。
+fn format_git_status() -> String {
+    let (added, modified, deleted) = match git_file_status_counts() {
+        Some(counts) => counts,
+        None => return String::new(),
+    };
+
+    if added == 0 && modified == 0 && deleted == 0 {
+        return String::new();
+    }
+
+    let mut parts = Vec::new();
+    if modified > 0 {
+        parts.push(yellow(&format!(" {modified}")));
+    }
+    if added > 0 {
+        parts.push(green(&format!(" {added}")));
+    }
+    if deleted > 0 {
+        parts.push(red(&format!(" {deleted}")));
+    }
+
+    format!("{}", parts.join(" "))
+}
+
 /// ホームディレクトリを取得する。
 fn dirs_home() -> Option<std::path::PathBuf> {
     env::var_os("HOME").map(std::path::PathBuf::from)
@@ -76,7 +138,14 @@ impl Prompt for JarvisPrompt {
             .unwrap_or_else(|_| "?".to_string());
 
         let git_part = match current_git_branch() {
-            Some(branch) => format!(" {} {}", white("on"), cyan(&format!("\u{e0a0} {branch}"))),
+            Some(branch) => {
+                let status = format_git_status();
+                format!(
+                    "on {} {}",
+                    cyan(&format!(" {branch}")),
+                    status,
+                )
+            }
             None => String::new(),
         };
 
@@ -96,9 +165,8 @@ impl Prompt for JarvisPrompt {
         };
 
         Cow::Owned(format!(
-            "{label} {} {}{git_part}\n",
-            white("in"),
-            yellow(&cwd),
+            "{label} in {} {git_part}\n",
+            &yellow(&format!(" {}", &cwd)),
         ))
     }
 
