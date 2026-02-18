@@ -17,6 +17,19 @@ use crate::engine::expand;
 /// ビルトインコマンド名（補完候補に常に含める）
 const BUILTIN_COMMANDS: &[&str] = &["cd", "cwd", "exit", "export", "unset", "help", "history"];
 
+/// ブランチ名補完を提供する git サブコマンド
+const GIT_BRANCH_SUBCOMMANDS: &[&str] = &[
+    "checkout",
+    "switch",
+    "merge",
+    "rebase",
+    "branch",
+    "diff",
+    "log",
+    "cherry-pick",
+    "reset",
+];
+
 /// Jarvish 用の補完エンジン
 ///
 /// `InputClassifier` の PATH キャッシュを `Arc` で共有し、
@@ -127,6 +140,42 @@ impl JarvishCompleter {
         suggestions
     }
 
+    /// Git ブランチ名補完
+    ///
+    /// `git branch --format=%(refname:short)` を実行してローカルブランチ一覧を取得し、
+    /// `partial` に前方一致するものを候補として返す。
+    /// git リポジトリ外など実行失敗時は空ベクタを返す。
+    fn complete_git_branch(&self, partial: &str, span: Span) -> Vec<Suggestion> {
+        let output = match std::process::Command::new("git")
+            .args(["branch", "--format=%(refname:short)"])
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            _ => return vec![],
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        let mut branches: Vec<&str> = stdout.lines().filter(|b| b.starts_with(partial)).collect();
+
+        branches.sort_unstable();
+        branches.dedup();
+
+        branches
+            .into_iter()
+            .map(|branch| Suggestion {
+                value: branch.to_string(),
+                description: None,
+                style: None,
+                extra: None,
+                span,
+                append_whitespace: true,
+                match_indices: None,
+            })
+            .collect()
+    }
+
     // ========== ヘルパー ==========
 
     /// 部分パス文字列を「検索ディレクトリ」「ファイル名プレフィックス」「オリジナル dir 部分」に分割する。
@@ -191,10 +240,18 @@ impl Completer for JarvishCompleter {
         if Self::is_first_token(line, pos) {
             self.complete_command(partial, span)
         } else {
-            // cd コマンドではディレクトリのみ補完する
-            let first_token = line.split_whitespace().next().unwrap_or("");
-            let dirs_only = first_token == "cd";
-            self.complete_path(partial, span, dirs_only)
+            let tokens: Vec<&str> = line[..pos].split_whitespace().collect();
+            let first_token = tokens.first().copied().unwrap_or("");
+
+            if first_token == "git"
+                && tokens.len() >= 2
+                && GIT_BRANCH_SUBCOMMANDS.contains(&tokens[1])
+            {
+                self.complete_git_branch(partial, span)
+            } else {
+                let dirs_only = first_token == "cd";
+                self.complete_path(partial, span, dirs_only)
+            }
         }
     }
 }
@@ -459,5 +516,74 @@ mod tests {
     #[test]
     fn is_first_token_false() {
         assert!(!JarvishCompleter::is_first_token("cd /tmp", 7));
+    }
+
+    // ── Git ブランチ補完テスト ──
+
+    #[test]
+    fn complete_git_branch_returns_candidates() {
+        let completer = test_completer();
+        let span = Span::new(0, 0);
+
+        let suggestions = completer.complete_git_branch("", span);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&"main"),
+            "main branch should be in suggestions: {values:?}"
+        );
+    }
+
+    #[test]
+    fn complete_git_branch_filters_by_prefix() {
+        let completer = test_completer();
+        let span = Span::new(0, 4);
+
+        let suggestions = completer.complete_git_branch("main", span);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(values.contains(&"main"));
+        for v in &values {
+            assert!(v.starts_with("main"), "'{v}' should start with 'main'");
+        }
+    }
+
+    #[test]
+    fn complete_git_branch_nonexistent_prefix_returns_empty() {
+        let completer = test_completer();
+        let span = Span::new(0, 0);
+
+        let suggestions = completer.complete_git_branch("zzz_no_such_branch_", span);
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn complete_git_checkout_includes_branches() {
+        let mut completer = test_completer();
+        let line = "git checkout m";
+        let pos = line.len();
+
+        let suggestions = completer.complete(line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&"main"),
+            "git checkout should suggest 'main': {values:?}"
+        );
+    }
+
+    #[test]
+    fn complete_git_non_branch_subcommand_no_branches() {
+        let mut completer = test_completer();
+        let line = "git add m";
+        let pos = line.len();
+
+        let suggestions = completer.complete(line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            !values.contains(&"main"),
+            "git add should not suggest branches: {values:?}"
+        );
     }
 }
