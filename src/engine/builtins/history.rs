@@ -14,6 +14,10 @@ struct HistoryArgs {
     /// 表示する件数 (デフォルト: 50)
     #[arg(short = 'n', long, default_value = "50")]
     count: usize,
+
+    /// ディレクトリ付きで表示する
+    #[arg(short = 'd', long = "dirs")]
+    dirs: bool,
 }
 
 #[derive(Subcommand)]
@@ -34,27 +38,42 @@ pub(super) fn execute(args: &[&str]) -> CommandResult {
 
     match parsed.command {
         Some(HistoryCommand::Clear) => clear_history(),
-        None => list_history(parsed.count),
+        None => list_history(parsed.count, parsed.dirs),
     }
 }
 
 /// 直近 N 件の履歴を表示する。
-fn list_history(count: usize) -> CommandResult {
+/// `dirs` が true の場合、各エントリに実行ディレクトリを付加する。
+fn list_history(count: usize, dirs: bool) -> CommandResult {
     let conn = match open_history_db() {
         Ok(c) => c,
         Err(result) => return result,
     };
 
-    let mut stmt =
-        match conn.prepare("SELECT id, command FROM command_history ORDER BY id DESC LIMIT ?1") {
-            Ok(s) => s,
-            Err(e) => {
-                let msg = format!("jarvish: history: failed to query: {e}\n");
-                eprint!("{msg}");
-                return CommandResult::error(msg, 1);
-            }
-        };
+    let sql = if dirs {
+        "SELECT id, command, cwd FROM command_history ORDER BY id DESC LIMIT ?1"
+    } else {
+        "SELECT id, command FROM command_history ORDER BY id DESC LIMIT ?1"
+    };
 
+    let mut stmt = match conn.prepare(sql) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!("jarvish: history: failed to query: {e}\n");
+            eprint!("{msg}");
+            return CommandResult::error(msg, 1);
+        }
+    };
+
+    if dirs {
+        list_history_with_dirs(&mut stmt, count)
+    } else {
+        list_history_simple(&mut stmt, count)
+    }
+}
+
+/// ディレクトリなしの通常表示
+fn list_history_simple(stmt: &mut rusqlite::Statement, count: usize) -> CommandResult {
     let rows = match stmt.query_map(rusqlite::params![count as i64], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
     }) {
@@ -78,12 +97,52 @@ fn list_history(count: usize) -> CommandResult {
         }
     }
 
-    // 古い順に表示（DESC で取得したので逆順に）
     entries.reverse();
 
     let mut output = String::new();
     for (id, command) in &entries {
         let line = format!("{id:>6}  {command}\n");
+        output.push_str(&line);
+    }
+    print!("{output}");
+
+    CommandResult::success(output)
+}
+
+/// ディレクトリ付きの表示
+fn list_history_with_dirs(stmt: &mut rusqlite::Statement, count: usize) -> CommandResult {
+    let rows = match stmt.query_map(rusqlite::params![count as i64], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = format!("jarvish: history: failed to query: {e}\n");
+            eprint!("{msg}");
+            return CommandResult::error(msg, 1);
+        }
+    };
+
+    let mut entries: Vec<(i64, String, String)> = Vec::new();
+    for row in rows {
+        match row {
+            Ok(entry) => entries.push(entry),
+            Err(e) => {
+                let msg = format!("jarvish: history: failed to read row: {e}\n");
+                eprint!("{msg}");
+                return CommandResult::error(msg, 1);
+            }
+        }
+    }
+
+    entries.reverse();
+
+    let mut output = String::new();
+    for (id, command, cwd) in &entries {
+        let line = format!("{id:>6}  {cwd}  {command}\n");
         output.push_str(&line);
     }
     print!("{output}");
@@ -208,10 +267,21 @@ mod tests {
 
     #[test]
     fn history_clap_parses_count() {
-        // clap のパースだけテスト
         let args = HistoryArgs::try_parse_from(["history", "-n", "100"]).unwrap();
         assert_eq!(args.count, 100);
+        assert!(!args.dirs);
         assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn history_clap_parses_dirs() {
+        let args = HistoryArgs::try_parse_from(["history", "--dirs"]).unwrap();
+        assert!(args.dirs);
+        assert_eq!(args.count, 50);
+
+        let args = HistoryArgs::try_parse_from(["history", "-d", "-n", "20"]).unwrap();
+        assert!(args.dirs);
+        assert_eq!(args.count, 20);
     }
 
     #[test]
