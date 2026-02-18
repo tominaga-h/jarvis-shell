@@ -101,15 +101,19 @@ fn log_dir() -> PathBuf {
 /// ログシステムを初期化する。
 ///
 /// - ログレベルは `JARVISH_LOG` 環境変数で制御（デフォルト: `debug`）
-/// - ログファイルは `XDG_DATA_HOME/jarvish/logs/jarvish_YYYY-MM-DD.log` に日次ローテーション（JST基準）で出力
+/// - ログファイルは日次ローテーション（JST基準）で出力
+/// - `log_dir_override` が `Some` の場合はそのパスに、`None` の場合は
+///   `XDG_DATA_HOME/jarvish/logs/` に出力
 /// - タイムスタンプは JST (UTC+09:00) で記録
 /// - フォーマット: タイムスタンプ + レベル + ターゲット + メッセージ
 ///
 /// # Returns
 /// `tracing_appender::non_blocking::WorkerGuard` を返す。
 /// このガードは `main()` で保持し続ける必要がある（ドロップするとログ出力が停止する）。
-pub fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
-    let log_dir = log_dir();
+pub fn init_logging(
+    log_dir_override: Option<PathBuf>,
+) -> tracing_appender::non_blocking::WorkerGuard {
+    let log_dir = log_dir_override.unwrap_or_else(log_dir);
 
     // ログディレクトリが存在しない場合は作成
     if let Err(e) = std::fs::create_dir_all(&log_dir) {

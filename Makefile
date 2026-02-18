@@ -14,3 +14,6 @@ uninstall-hooks: ## Remove git hooks
 
 check: ## Run pre-push checks
 	bash githooks/pre-push.sh --no-hook --fix
+
+release: ## Rease build
+	cargo run --release
