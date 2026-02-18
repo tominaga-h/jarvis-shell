@@ -520,31 +520,80 @@ mod tests {
 
     // ── Git ブランチ補完テスト ──
 
+    /// テスト用の git リポジトリを一時ディレクトリに作成する。
+    /// デフォルトブランチ + `test-feature` ブランチを持つ。
+    fn create_test_git_repo() -> tempfile::TempDir {
+        use std::process::Command;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["branch", "test-feature"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+
+        tmpdir
+    }
+
     #[test]
+    #[serial]
     fn complete_git_branch_returns_candidates() {
+        let tmpdir = create_test_git_repo();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
         let completer = test_completer();
         let span = Span::new(0, 0);
-
         let suggestions = completer.complete_git_branch("", span);
+
+        env::set_current_dir(&original_dir).unwrap();
 
         let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
         assert!(
-            values.contains(&"main"),
-            "main branch should be in suggestions: {values:?}"
+            values.contains(&"test-feature"),
+            "test-feature branch should be in suggestions: {values:?}"
         );
     }
 
     #[test]
+    #[serial]
     fn complete_git_branch_filters_by_prefix() {
-        let completer = test_completer();
-        let span = Span::new(0, 4);
+        let tmpdir = create_test_git_repo();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
 
-        let suggestions = completer.complete_git_branch("main", span);
+        let completer = test_completer();
+        let span = Span::new(0, 5);
+        let suggestions = completer.complete_git_branch("test-", span);
+
+        env::set_current_dir(&original_dir).unwrap();
 
         let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
-        assert!(values.contains(&"main"));
+        assert!(values.contains(&"test-feature"));
         for v in &values {
-            assert!(v.starts_with("main"), "'{v}' should start with 'main'");
+            assert!(v.starts_with("test-"), "'{v}' should start with 'test-'");
         }
     }
 
@@ -558,32 +607,36 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn complete_git_checkout_includes_branches() {
-        let mut completer = test_completer();
-        let line = "git checkout m";
-        let pos = line.len();
+        let tmpdir = create_test_git_repo();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
 
+        let mut completer = test_completer();
+        let line = "git checkout test-";
+        let pos = line.len();
         let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
 
         let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
         assert!(
-            values.contains(&"main"),
-            "git checkout should suggest 'main': {values:?}"
+            values.contains(&"test-feature"),
+            "git checkout should suggest 'test-feature': {values:?}"
         );
     }
 
     #[test]
     fn complete_git_non_branch_subcommand_no_branches() {
         let mut completer = test_completer();
-        let line = "git add m";
+        let line = "git add zzz_no_such_";
         let pos = line.len();
 
         let suggestions = completer.complete(line, pos);
-
-        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
         assert!(
-            !values.contains(&"main"),
-            "git add should not suggest branches: {values:?}"
+            suggestions.is_empty(),
+            "git add should not suggest anything for nonexistent prefix: {suggestions:?}"
         );
     }
 }
