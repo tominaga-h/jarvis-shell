@@ -17,7 +17,7 @@
 
 **Jarvish** is a **Next Generation AI Integrated Shell** written in Rust, inspired by **J.A.R.V.I.S.** from Marvel's Iron Man. It natively embeds AI intelligence into your everyday shell experience — no more copy-pasting errors into a browser. Just ask Jarvis.
 
-![jarvish](images/jarvish.png)
+![jarvish](images/jarvish-demo.gif)
 
 ---
 
