@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="../images/logo.png" alt="Jarvish Logo" width="200" />
+  <img src="../images/logo.png" alt="Jarvish Logo" width="500" />
 </p>
 
 # 🤵 Jarvis Shell (jarvish)
