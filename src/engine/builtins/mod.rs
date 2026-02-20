@@ -1,9 +1,11 @@
+pub(crate) mod alias;
 mod cd;
 mod cwd;
 mod exit;
 mod export;
 mod help;
 mod history;
+pub(crate) mod unalias;
 mod unset;
 
 use super::CommandResult;
@@ -30,7 +32,7 @@ fn parse_args<T: clap::Parser>(cmd: &str, args: &[&str]) -> Result<T, CommandRes
 pub fn is_builtin(cmd: &str) -> bool {
     matches!(
         cmd,
-        "cd" | "cwd" | "exit" | "export" | "help" | "unset" | "history"
+        "alias" | "cd" | "cwd" | "exit" | "export" | "help" | "unalias" | "unset" | "history"
     )
 }
 
@@ -38,11 +40,19 @@ pub fn is_builtin(cmd: &str) -> bool {
 /// ビルトインでない場合は `None` を返し、呼び出し元が外部コマンドとして実行する。
 pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
     match cmd {
+        "alias" => Some(alias::execute_with_aliases(
+            args,
+            &mut std::collections::HashMap::new(),
+        )),
         "cd" => Some(cd::execute(args)),
         "cwd" => Some(cwd::execute(args)),
         "exit" => Some(exit::execute(args)),
         "export" => Some(export::execute(args)),
         "help" => Some(help::execute(args)),
+        "unalias" => Some(unalias::execute_with_aliases(
+            args,
+            &mut std::collections::HashMap::new(),
+        )),
         "unset" => Some(unset::execute(args)),
         "history" => Some(history::execute(args)),
         _ => None,
@@ -136,8 +146,10 @@ mod tests {
 
     #[test]
     fn new_builtins_are_registered() {
+        assert!(is_builtin("alias"));
         assert!(is_builtin("export"));
         assert!(is_builtin("help"));
+        assert!(is_builtin("unalias"));
         assert!(is_builtin("unset"));
         assert!(is_builtin("history"));
     }

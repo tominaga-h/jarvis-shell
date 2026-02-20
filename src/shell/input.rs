@@ -9,6 +9,7 @@ use tracing::{debug, info, warn};
 
 use reedline::HistoryItem;
 
+use crate::engine::builtins::{alias, unalias};
 use crate::engine::classifier::{is_ai_goodbye_response, InputType};
 use crate::engine::expand;
 use crate::engine::{execute, try_builtin, CommandResult, LoopAction};
@@ -37,6 +38,12 @@ impl Shell {
         };
 
         debug!(input = %line, "User input received");
+
+        // 0.5. alias / unalias は self.aliases を操作するため Shell 側でインターセプト
+        if let Some(result) = self.try_alias_builtins(&line) {
+            let path_before = std::env::var("PATH").ok();
+            return self.handle_builtin(&line, result, path_before);
+        }
 
         // 1. ビルトインコマンドをチェック（cd, cwd, exit, export 等は AI を介さず直接実行）
         //    PATH 変更を検出するため、ビルトイン実行前の PATH を保存する
@@ -153,6 +160,59 @@ impl Shell {
                 false
             }
         }
+    }
+
+    /// alias / unalias コマンドをインターセプトする。
+    ///
+    /// 先頭ワードが "alias" または "unalias" であり、かつパイプ・リダイレクト等を
+    /// 含まない単純なコマンドの場合に `Some(CommandResult)` を返す。
+    /// それ以外は `None` を返し、通常の実行パスに委ねる。
+    fn try_alias_builtins(&mut self, input: &str) -> Option<CommandResult> {
+        let first_word = input.split_whitespace().next().unwrap_or("");
+        if first_word != "alias" && first_word != "unalias" {
+            return None;
+        }
+
+        let tokens = match shell_words::split(input) {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = format!("jarvish: parse error: {e}\n");
+                eprint!("{msg}");
+                return Some(CommandResult::error(msg, 1));
+            }
+        };
+
+        if tokens.is_empty() {
+            return Some(CommandResult::success(String::new()));
+        }
+
+        // パイプ・リダイレクト・接続演算子を含む場合は通常パスに委ねる
+        if tokens
+            .iter()
+            .any(|t| matches!(t.as_str(), "|" | ">" | ">>" | "<" | "&&" | "||" | ";"))
+        {
+            return None;
+        }
+
+        let expanded: Vec<String> = tokens
+            .into_iter()
+            .map(|t| expand::expand_token(&t))
+            .collect();
+        let args: Vec<&str> = expanded[1..].iter().map(|s| s.as_str()).collect();
+
+        let result = match first_word {
+            "alias" => alias::execute_with_aliases(&args, &mut self.aliases),
+            "unalias" => unalias::execute_with_aliases(&args, &mut self.aliases),
+            _ => unreachable!(),
+        };
+
+        debug!(
+            command = %first_word,
+            exit_code = result.exit_code,
+            "alias/unalias builtin executed"
+        );
+
+        Some(result)
     }
 
     /// 履歴を BlackBox に記録する。
