@@ -7,9 +7,9 @@ use crate::engine::CommandResult;
 
 /// cd: カレントディレクトリを変更する。
 #[derive(Parser)]
-#[command(name = "cd", about = "カレントディレクトリを変更する")]
+#[command(name = "cd", about = "Change the current directory")]
 struct CdArgs {
-    /// 移動先のパス (省略時は $HOME)
+    /// Target path (defaults to $HOME)
     path: Option<String>,
 }
 

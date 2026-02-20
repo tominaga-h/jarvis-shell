@@ -6,23 +6,23 @@ use crate::storage::BlackBox;
 
 /// history: コマンド履歴を表示・管理する。
 #[derive(Parser)]
-#[command(name = "history", about = "コマンド履歴を表示・管理する")]
+#[command(name = "history", about = "Display or manage command history")]
 struct HistoryArgs {
     #[command(subcommand)]
     command: Option<HistoryCommand>,
 
-    /// 表示する件数 (デフォルト: 50)
+    /// Number of entries to display (default: 50)
     #[arg(short = 'n', long, default_value = "50")]
     count: usize,
 
-    /// ディレクトリ付きで表示する
+    /// Show working directory for each entry
     #[arg(short = 'd', long = "dirs")]
     dirs: bool,
 }
 
 #[derive(Subcommand)]
 enum HistoryCommand {
-    /// 全履歴をクリアする
+    /// Clear all history
     Clear,
 }
 

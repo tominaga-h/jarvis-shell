@@ -6,9 +6,9 @@ use crate::engine::CommandResult;
 
 /// alias: エイリアスを設定・表示する。
 #[derive(Parser)]
-#[command(name = "alias", about = "エイリアスを設定・表示する")]
+#[command(name = "alias", about = "Set or display aliases")]
 struct AliasArgs {
-    /// NAME=VALUE 形式のエイリアス定義、または表示するエイリアス名
+    /// Alias definition in NAME=VALUE format, or alias name to display
     assignments: Vec<String>,
 }
 

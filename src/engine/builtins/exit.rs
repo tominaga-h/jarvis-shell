@@ -4,9 +4,9 @@ use crate::engine::CommandResult;
 
 /// exit: REPL ループを終了する。
 #[derive(Parser)]
-#[command(name = "exit", about = "シェルを終了する")]
+#[command(name = "exit", about = "Exit the shell")]
 struct ExitArgs {
-    /// 終了コード (0-255, デフォルト: 0)
+    /// Exit code (0-255, default: 0)
     #[arg(allow_hyphen_values = true)]
     code: Option<String>,
 }

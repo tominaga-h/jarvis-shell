@@ -6,13 +6,13 @@ use crate::engine::CommandResult;
 
 /// unalias: エイリアスを削除する。
 #[derive(Parser)]
-#[command(name = "unalias", about = "エイリアスを削除する")]
+#[command(name = "unalias", about = "Remove aliases")]
 struct UnaliasArgs {
-    /// 全エイリアスを削除する
+    /// Remove all aliases
     #[arg(short = 'a', long = "all")]
     all: bool,
 
-    /// 削除するエイリアス名
+    /// Alias names to remove
     names: Vec<String>,
 }
 

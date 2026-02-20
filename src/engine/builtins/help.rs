@@ -4,23 +4,23 @@ use crate::engine::CommandResult;
 
 /// ビルトインコマンドの名前と説明の一覧（アルファベット順）。
 const BUILTIN_COMMANDS: &[(&str, &str)] = &[
-    ("alias", "エイリアスを設定・表示する"),
-    ("cd", "カレントディレクトリを変更する"),
-    ("cwd", "現在のカレントディレクトリを表示する"),
-    ("exit", "シェルを終了する"),
-    ("export", "環境変数を設定・表示する"),
-    ("help", "ビルトインコマンドのヘルプを表示する"),
-    ("history", "コマンド履歴を表示・管理する"),
-    ("source", "設定ファイル(TOML)を読み込む"),
-    ("unalias", "エイリアスを削除する"),
-    ("unset", "環境変数を削除する"),
+    ("alias", "Set or display aliases"),
+    ("cd", "Change the current directory"),
+    ("cwd", "Print the current working directory"),
+    ("exit", "Exit the shell"),
+    ("export", "Set or display environment variables"),
+    ("help", "Display help for builtin commands"),
+    ("history", "Display or manage command history"),
+    ("source", "Load a configuration file (TOML)"),
+    ("unalias", "Remove aliases"),
+    ("unset", "Remove environment variables"),
 ];
 
 /// help: ビルトインコマンドのヘルプを表示する。
 #[derive(Parser)]
-#[command(name = "help", about = "ビルトインコマンドのヘルプを表示する")]
+#[command(name = "help", about = "Display help for builtin commands")]
 struct HelpArgs {
-    /// ヘルプを表示するコマンド名
+    /// Command name to show help for
     command: Option<String>,
 }
 

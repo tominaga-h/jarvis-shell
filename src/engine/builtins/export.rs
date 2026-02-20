@@ -6,9 +6,9 @@ use crate::engine::CommandResult;
 
 /// export: 環境変数を設定・表示する。
 #[derive(Parser)]
-#[command(name = "export", about = "環境変数を設定・表示する")]
+#[command(name = "export", about = "Set or display environment variables")]
 struct ExportArgs {
-    /// KEY=VALUE 形式の変数代入、または表示する変数名
+    /// Variable assignment in KEY=VALUE format, or variable name to display
     assignments: Vec<String>,
 }
 

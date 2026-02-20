@@ -6,7 +6,7 @@ use crate::engine::CommandResult;
 
 /// cwd: 現在のカレントディレクトリを表示する。
 #[derive(Parser)]
-#[command(name = "cwd", about = "現在のカレントディレクトリを表示する")]
+#[command(name = "cwd", about = "Print the current working directory")]
 struct CwdArgs {}
 
 /// cwd: 現在のカレントディレクトリを出力する。

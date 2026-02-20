@@ -4,9 +4,9 @@ use crate::engine::CommandResult;
 
 /// source: 設定ファイル(TOML)を読み込む。
 #[derive(Parser)]
-#[command(name = "source", about = "設定ファイル(TOML)を読み込む")]
+#[command(name = "source", about = "Load a configuration file (TOML)")]
 struct SourceArgs {
-    /// 読み込む TOML ファイルのパス
+    /// Path to the TOML file to load
     #[arg(required = true)]
     path: String,
 }

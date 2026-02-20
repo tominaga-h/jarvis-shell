@@ -6,9 +6,9 @@ use crate::engine::CommandResult;
 
 /// unset: 環境変数を削除する。
 #[derive(Parser)]
-#[command(name = "unset", about = "環境変数を削除する")]
+#[command(name = "unset", about = "Remove environment variables")]
 struct UnsetArgs {
-    /// 削除する変数名 (1つ以上必須)
+    /// Variable names to remove (one or more required)
     #[arg(required = true)]
     names: Vec<String>,
 }
