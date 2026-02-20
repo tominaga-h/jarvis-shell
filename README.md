@@ -50,11 +50,12 @@
 
 ### Prerequisites
 
-| Requirement           | Details                         |
-| --------------------- | ------------------------------- |
-| 🦀 **Rust**           | Stable toolchain (Edition 2021) |
-| 🔑 **OpenAI API Key** | Required for AI features        |
-| 💻 **OS**             | macOS / Linux                   |
+| Requirement           | Details                                                   |
+| --------------------- | --------------------------------------------------------- |
+| 🦀 **Rust**           | Stable toolchain (Edition 2021)                           |
+| 🔑 **OpenAI API Key** | Required for AI features                                  |
+| 💻 **OS**             | macOS / Linux                                             |
+| 🔤 **NerdFont**       | Recommended for prompt icons (can be disabled via config) |
 
 ### Install via Cargo
 
@@ -77,6 +78,39 @@ Set your OpenAI API key as an environment variable:
 ```bash
 export OPENAI_API_KEY="sk-..."
 ```
+
+### Configuration
+
+Jarvish uses a TOML configuration file located at `~/.config/jarvish/config.toml`.
+A default config file is automatically generated on first launch.
+
+```toml
+[ai]
+model = "gpt-4o"        # AI model to use
+max_rounds = 10          # Max agent loop rounds
+
+[alias]
+g = "git"                # Command aliases
+ll = "ls -la"
+
+[export]
+PATH = "/usr/local/bin:$PATH"   # Environment variables set on startup
+
+[prompt]
+nerd_font = true         # Set to false if NerdFont is not installed
+```
+
+| Section    | Description                                                            |
+| ---------- | ---------------------------------------------------------------------- |
+| `[ai]`     | AI model name and agent loop limit                                     |
+| `[alias]`  | Command aliases (also manageable via `alias` / `unalias` builtins)     |
+| `[export]` | Environment variables applied on startup (supports `$VAR` expansion)   |
+| `[prompt]` | Prompt display settings (`nerd_font = false` disables NerdFont icons)  |
+
+> **Tip**: You can reload the config at runtime with the `source` builtin command:
+> ```bash
+> source ~/.config/jarvish/config.toml
+> ```
 
 ### Run
 
