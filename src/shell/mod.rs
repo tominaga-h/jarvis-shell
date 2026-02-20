@@ -120,6 +120,56 @@ impl Shell {
         }
     }
 
+    /// 指定されたパスから設定ファイルを再読み込みし、Shell の状態に反映する。
+    ///
+    /// `source` ビルトインコマンドから呼び出される。
+    /// `[alias]`、`[export]`、`[ai]` セクションを反映し、
+    /// PATH が変更されていれば分類器のキャッシュをリロードする。
+    pub(super) fn reload_config(&mut self, path: &std::path::Path) -> crate::engine::CommandResult {
+        use crate::engine::CommandResult;
+
+        let config = match JarvishConfig::load_from(path) {
+            Ok(c) => c,
+            Err(msg) => {
+                let err = format!("jarvish: source: {msg}\n");
+                eprint!("{err}");
+                return CommandResult::error(err, 1);
+            }
+        };
+
+        let path_before = std::env::var("PATH").ok();
+
+        // [alias] を反映
+        self.aliases = config.alias.clone();
+
+        // [export] を反映
+        Self::apply_exports(&config);
+
+        // [ai] を反映
+        if let Some(ref mut ai) = self.ai_client {
+            ai.update_config(&config.ai);
+        }
+
+        // PATH 変更検出
+        let path_after = std::env::var("PATH").ok();
+        if path_before != path_after {
+            info!("PATH changed via source, reloading classifier cache");
+            self.classifier.reload_path_cache();
+        }
+
+        // サマリー出力
+        let summary = format!(
+            "Loaded {} (alias: {}, export: {}, ai.model: {})\n",
+            path.display(),
+            config.alias.len(),
+            config.export.len(),
+            config.ai.model,
+        );
+        print!("{summary}");
+
+        CommandResult::success(summary)
+    }
+
     /// REPL ループを実行する。
     ///
     /// ユーザー入力を受け取り、ビルトイン/コマンド/自然言語を処理する。

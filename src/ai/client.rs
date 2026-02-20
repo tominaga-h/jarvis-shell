@@ -57,6 +57,19 @@ impl JarvisAI {
         })
     }
 
+    /// AI 設定（モデル名・最大ラウンド数）を更新する。
+    ///
+    /// `source` コマンドによる設定再読み込み時に使用する。
+    pub fn update_config(&mut self, ai_config: &AiConfig) {
+        self.model = ai_config.model.clone();
+        self.max_rounds = ai_config.max_rounds;
+        info!(
+            model = %self.model,
+            max_rounds = self.max_rounds,
+            "AI config updated"
+        );
+    }
+
     /// ユーザー入力を AI に送信し、コマンドか自然言語かを判定する。
     /// エージェントループにより、複数ステップのツール呼び出し（read_file → write_file 等）を処理する。
     /// 自然言語の場合はストリーミングでターミナルに表示しつつ、全文を返す。

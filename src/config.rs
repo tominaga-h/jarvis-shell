@@ -97,6 +97,25 @@ impl JarvishConfig {
         }
     }
 
+    /// 指定されたパスから設定ファイルを読み込む。
+    ///
+    /// `source` ビルトインコマンド用。任意の TOML ファイルパスを受け取り、
+    /// パース結果を返す。ファイル読み込みエラーやパースエラーは `Err` で返す。
+    pub fn load_from(path: &std::path::Path) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        let config = toml::from_str::<JarvishConfig>(&content)
+            .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+        info!(
+            path = %path.display(),
+            model = %config.ai.model,
+            alias_count = config.alias.len(),
+            export_count = config.export.len(),
+            "Config loaded from file"
+        );
+        Ok(config)
+    }
+
     /// 設定ファイルのパスを返す。
     ///
     /// macOS / Linux 共通で `~/.config/jarvish/config.toml` を使用する。
@@ -229,6 +248,46 @@ g = "git"
         // ファイルがあってもなくても、少なくともデフォルト値は持つ
         assert!(!config.ai.model.is_empty());
         assert!(config.ai.max_rounds > 0);
+    }
+
+    #[test]
+    fn load_from_valid_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("test.toml");
+        std::fs::write(
+            &path,
+            r#"
+[alias]
+g = "git"
+
+[export]
+EDITOR = "vim"
+"#,
+        )
+        .unwrap();
+
+        let config = JarvishConfig::load_from(&path).unwrap();
+        assert_eq!(config.alias.get("g").unwrap(), "git");
+        assert_eq!(config.export.get("EDITOR").unwrap(), "vim");
+        assert_eq!(config.ai.model, "gpt-4o"); // デフォルト
+    }
+
+    #[test]
+    fn load_from_nonexistent_file_returns_error() {
+        let result = JarvishConfig::load_from(std::path::Path::new("/nonexistent/config.toml"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("failed to read"));
+    }
+
+    #[test]
+    fn load_from_invalid_toml_returns_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("bad.toml");
+        std::fs::write(&path, "this is not valid toml [[[").unwrap();
+
+        let result = JarvishConfig::load_from(&path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("failed to parse"));
     }
 
     #[test]

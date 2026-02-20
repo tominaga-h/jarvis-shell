@@ -9,7 +9,9 @@ use tracing::{debug, info, warn};
 
 use reedline::HistoryItem;
 
-use crate::engine::builtins::{alias, unalias};
+use std::path::PathBuf;
+
+use crate::engine::builtins::{alias, source, unalias};
 use crate::engine::classifier::{is_ai_goodbye_response, InputType};
 use crate::engine::expand;
 use crate::engine::{execute, try_builtin, CommandResult, LoopAction};
@@ -39,8 +41,8 @@ impl Shell {
 
         debug!(input = %line, "User input received");
 
-        // 0.5. alias / unalias は self.aliases を操作するため Shell 側でインターセプト
-        if let Some(result) = self.try_alias_builtins(&line) {
+        // 0.5. alias / unalias / source は Shell 状態を操作するためインターセプト
+        if let Some(result) = self.try_shell_builtins(&line) {
             let path_before = std::env::var("PATH").ok();
             return self.handle_builtin(&line, result, path_before);
         }
@@ -162,14 +164,14 @@ impl Shell {
         }
     }
 
-    /// alias / unalias コマンドをインターセプトする。
+    /// Shell 状態を操作するビルトイン（alias / unalias / source）をインターセプトする。
     ///
-    /// 先頭ワードが "alias" または "unalias" であり、かつパイプ・リダイレクト等を
+    /// 先頭ワードが対象コマンドであり、かつパイプ・リダイレクト等を
     /// 含まない単純なコマンドの場合に `Some(CommandResult)` を返す。
     /// それ以外は `None` を返し、通常の実行パスに委ねる。
-    fn try_alias_builtins(&mut self, input: &str) -> Option<CommandResult> {
+    fn try_shell_builtins(&mut self, input: &str) -> Option<CommandResult> {
         let first_word = input.split_whitespace().next().unwrap_or("");
-        if first_word != "alias" && first_word != "unalias" {
+        if !matches!(first_word, "alias" | "unalias" | "source") {
             return None;
         }
 
@@ -203,13 +205,22 @@ impl Shell {
         let result = match first_word {
             "alias" => alias::execute_with_aliases(&args, &mut self.aliases),
             "unalias" => unalias::execute_with_aliases(&args, &mut self.aliases),
+            "source" => {
+                // clap で引数パース（--help やエラーはここで処理される）
+                let path_str = match source::parse(&args) {
+                    Ok(p) => p,
+                    Err(cmd_result) => return Some(cmd_result),
+                };
+                let path = PathBuf::from(&path_str);
+                self.reload_config(&path)
+            }
             _ => unreachable!(),
         };
 
         debug!(
             command = %first_word,
             exit_code = result.exit_code,
-            "alias/unalias builtin executed"
+            "shell builtin executed"
         );
 
         Some(result)

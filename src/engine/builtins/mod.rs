@@ -5,6 +5,7 @@ mod exit;
 mod export;
 mod help;
 mod history;
+pub(crate) mod source;
 pub(crate) mod unalias;
 mod unset;
 
@@ -32,7 +33,16 @@ fn parse_args<T: clap::Parser>(cmd: &str, args: &[&str]) -> Result<T, CommandRes
 pub fn is_builtin(cmd: &str) -> bool {
     matches!(
         cmd,
-        "alias" | "cd" | "cwd" | "exit" | "export" | "help" | "unalias" | "unset" | "history"
+        "alias"
+            | "cd"
+            | "cwd"
+            | "exit"
+            | "export"
+            | "help"
+            | "source"
+            | "unalias"
+            | "unset"
+            | "history"
     )
 }
 
@@ -53,6 +63,9 @@ pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
             args,
             &mut std::collections::HashMap::new(),
         )),
+        "source" => {
+            Some(source::parse(args).map_or_else(|e| e, |_| CommandResult::success(String::new())))
+        }
         "unset" => Some(unset::execute(args)),
         "history" => Some(history::execute(args)),
         _ => None,
@@ -149,6 +162,7 @@ mod tests {
         assert!(is_builtin("alias"));
         assert!(is_builtin("export"));
         assert!(is_builtin("help"));
+        assert!(is_builtin("source"));
         assert!(is_builtin("unalias"));
         assert!(is_builtin("unset"));
         assert!(is_builtin("history"));
