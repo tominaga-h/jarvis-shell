@@ -16,6 +16,9 @@
 //!
 //! [export]
 //! PATH = "/usr/local/bin:$PATH"
+//!
+//! [prompt]
+//! nerd_font = true
 //! ```
 
 use std::collections::HashMap;
@@ -34,6 +37,8 @@ pub struct JarvishConfig {
     pub alias: HashMap<String, String>,
     /// 起動時に設定する環境変数（キー: 変数名、値: 値）
     pub export: HashMap<String, String>,
+    /// プロンプト表示設定
+    pub prompt: PromptConfig,
 }
 
 /// AI 関連の設定
@@ -52,6 +57,20 @@ impl Default for AiConfig {
             model: "gpt-4o".to_string(),
             max_rounds: 10,
         }
+    }
+}
+
+/// プロンプト表示の設定
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PromptConfig {
+    /// NerdFont アイコンを使用するか（false の場合は ASCII/Unicode フォールバック）
+    pub nerd_font: bool,
+}
+
+impl Default for PromptConfig {
+    fn default() -> Self {
+        Self { nerd_font: true }
     }
 }
 
@@ -79,6 +98,7 @@ impl JarvishConfig {
                         max_rounds = config.ai.max_rounds,
                         alias_count = config.alias.len(),
                         export_count = config.export.len(),
+                        nerd_font = config.prompt.nerd_font,
                         "Config loaded successfully"
                     );
                     config
@@ -147,6 +167,9 @@ impl JarvishConfig {
 
 [export]
 # PATH = "/usr/local/bin:$PATH"
+
+[prompt]
+# nerd_font = true  # false にすると NerdFont アイコンを使わない
 "#;
 
         if let Some(parent) = path.parent() {
@@ -185,6 +208,7 @@ mod tests {
         assert_eq!(config.ai.max_rounds, 10);
         assert!(config.alias.is_empty());
         assert!(config.export.is_empty());
+        assert!(config.prompt.nerd_font);
     }
 
     #[test]
@@ -200,6 +224,9 @@ ll = "ls -la"
 
 [export]
 EDITOR = "vim"
+
+[prompt]
+nerd_font = false
 "#;
         let config = load_from_str(toml);
         assert_eq!(config.ai.model, "gpt-4o-mini");
@@ -207,6 +234,7 @@ EDITOR = "vim"
         assert_eq!(config.alias.get("g").unwrap(), "git");
         assert_eq!(config.alias.get("ll").unwrap(), "ls -la");
         assert_eq!(config.export.get("EDITOR").unwrap(), "vim");
+        assert!(!config.prompt.nerd_font);
     }
 
     #[test]
@@ -216,9 +244,10 @@ EDITOR = "vim"
 g = "git"
 "#;
         let config = load_from_str(toml);
-        // ai セクションが省略されていてもデフォルト値が使われる
+        // 省略されたセクションはデフォルト値が使われる
         assert_eq!(config.ai.model, "gpt-4o");
         assert_eq!(config.ai.max_rounds, 10);
+        assert!(config.prompt.nerd_font);
         assert_eq!(config.alias.get("g").unwrap(), "git");
         assert!(config.export.is_empty());
     }

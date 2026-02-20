@@ -64,7 +64,7 @@ impl Shell {
         // 初期値は EXIT_CODE_NONE（未設定）。コマンド実行時に実際の終了コードで上書きされる。
         let last_exit_code = Arc::new(AtomicI32::new(EXIT_CODE_NONE));
 
-        let prompt = JarvisPrompt::new(Arc::clone(&last_exit_code));
+        let prompt = JarvisPrompt::new(Arc::clone(&last_exit_code), config.prompt.clone());
 
         // Black Box（履歴永続化）の初期化
         // BlackBox::open() ではなく open_at() を使い、フォールバック時も同じパスを使用する
@@ -150,6 +150,9 @@ impl Shell {
             ai.update_config(&config.ai);
         }
 
+        // [prompt] を反映
+        self.prompt.update_config(config.prompt.clone());
+
         // PATH 変更検出
         let path_after = std::env::var("PATH").ok();
         if path_before != path_after {
@@ -159,11 +162,12 @@ impl Shell {
 
         // サマリー出力
         let summary = format!(
-            "Loaded {} (alias: {}, export: {}, ai.model: {})\n",
+            "Loaded {} (alias: {}, export: {}, ai.model: {}, nerd_font: {})\n",
             path.display(),
             config.alias.len(),
             config.export.len(),
             config.ai.model,
+            config.prompt.nerd_font,
         );
         print!("{summary}");
 

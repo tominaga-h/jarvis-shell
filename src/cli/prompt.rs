@@ -8,6 +8,7 @@ use chrono::Local;
 use reedline::{Color, Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
 
 use super::color::{cyan, green, red, white, yellow};
+use crate::config::PromptConfig;
 
 /// `last_exit_code` が未設定（コマンド未実行）であることを示すセンチネル値。
 /// `AtomicI32` は `Option<i32>` を直接保持できないため、
@@ -77,7 +78,8 @@ fn git_file_status_counts() -> Option<(usize, usize, usize)> {
 /// - `-N` (赤): 削除ファイル
 ///
 /// 全て 0 の場合は空文字列を返す。
-fn format_git_status() -> String {
+/// `nerd_font` が false の場合、NerdFont アイコンの代わりに ASCII 記号を使用する。
+fn format_git_status(nerd_font: bool) -> String {
     let (added, modified, deleted) = match git_file_status_counts() {
         Some(counts) => counts,
         None => return String::new(),
@@ -87,15 +89,21 @@ fn format_git_status() -> String {
         return String::new();
     }
 
+    let (modified_prefix, added_prefix, deleted_prefix) = if nerd_font {
+        ("\u{ea73} ", "\u{f067} ", "\u{f068} ") // ファイル、プラス、マイナスアイコン
+    } else {
+        ("~", "+", "-")
+    };
+
     let mut parts = Vec::new();
     if modified > 0 {
-        parts.push(yellow(&format!(" {modified}")));
+        parts.push(yellow(&format!("{modified_prefix}{modified}")));
     }
     if added > 0 {
-        parts.push(green(&format!(" {added}")));
+        parts.push(green(&format!("{added_prefix}{added}")));
     }
     if deleted > 0 {
-        parts.push(red(&format!(" {deleted}")));
+        parts.push(red(&format!("{deleted_prefix}{deleted}")));
     }
 
     parts.join(" ")
@@ -108,26 +116,35 @@ fn dirs_home() -> Option<std::path::PathBuf> {
 
 /// Jarvis Shell のカスタムプロンプト。
 ///
-/// 表示形式（通常モード・成功時）:
+/// NerdFont あり（デフォルト）:
 /// ```text
-/// ✔︎ jarvis in ~/dev/project on  main
+/// ✔︎ jarvis in [icon] ~/dev/project on [icon] main
 /// ❯
 /// ```
 ///
-/// 表示形式（通常モード・異常終了時）:
+/// NerdFont なし:
 /// ```text
-/// ✗ jarvis in ~/dev/project on  main
+/// ✔︎ jarvis in ~/dev/project on main
 /// ❯
 /// ```
-///
 pub struct JarvisPrompt {
     /// 直前コマンドの終了コード。メインループから共有される。
     last_exit_code: Arc<AtomicI32>,
+    /// プロンプト表示設定
+    config: PromptConfig,
 }
 
 impl JarvisPrompt {
-    pub fn new(last_exit_code: Arc<AtomicI32>) -> Self {
-        Self { last_exit_code }
+    pub fn new(last_exit_code: Arc<AtomicI32>, config: PromptConfig) -> Self {
+        Self {
+            last_exit_code,
+            config,
+        }
+    }
+
+    /// プロンプト設定を更新する（`source` コマンドによる設定再読み込み用）。
+    pub fn update_config(&mut self, config: PromptConfig) {
+        self.config = config;
     }
 }
 
@@ -139,31 +156,34 @@ impl Prompt for JarvisPrompt {
 
         let git_part = match current_git_branch() {
             Some(branch) => {
-                let status = format_git_status();
-                format!("on {} {}", cyan(&format!(" {branch}")), status,)
+                let status = format_git_status(self.config.nerd_font);
+                let branch_label = if self.config.nerd_font {
+                    cyan(&format!("\u{e725} {branch}")) // gitアイコン
+                } else {
+                    cyan(&branch)
+                };
+                format!("on {branch_label} {status}")
             }
             None => String::new(),
         };
 
         let code = self.last_exit_code.load(Ordering::Relaxed);
 
-        // 判定: エラー > 成功 > 初期状態
-        // エラー時（code != 0 かつ未設定でない）: ✗ jarvis
-        // コマンド成功（code == 0）:              ✔︎ jarvis
-        // 初期状態（コマンド未実行）:              jarvis
         let label = if code != 0 && code != EXIT_CODE_NONE {
-            red("✗ jarvis")
+            red("\u{2717} jarvis") // ×マーク
         } else if code == 0 {
-            cyan("✔︎ jarvis")
+            cyan("\u{2714}\u{fe0e} jarvis") // ✓マーク
         } else {
-            // EXIT_CODE_NONE → 初期状態
             cyan("jarvis")
         };
 
-        Cow::Owned(format!(
-            "{label} in {} {git_part}\n",
-            &yellow(&format!(" {}", &cwd)),
-        ))
+        let cwd_label = if self.config.nerd_font {
+            yellow(&format!("\u{f4d3} {cwd}")) // フォルダアイコン
+        } else {
+            yellow(&cwd)
+        };
+
+        Cow::Owned(format!("{label} in {cwd_label} {git_part}\n"))
     }
 
     fn get_prompt_color(&self) -> Color {
@@ -176,7 +196,7 @@ impl Prompt for JarvisPrompt {
     }
 
     fn render_prompt_indicator(&self, _edit_mode: PromptEditMode) -> Cow<'_, str> {
-        Cow::Owned(green("❯ "))
+        Cow::Owned(green("\u{276f} "))
     }
 
     fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
