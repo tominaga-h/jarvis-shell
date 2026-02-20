@@ -3,6 +3,34 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.0.1](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.0.1) - 2026-02-20
+
+### Added
+
+- 設定ファイル `config.toml` の読み書き対応 ([#17](https://github.com/tominaga-h/jarvis-shell/issues/17))
+- Git ブランチ補完の実装 ([#36](https://github.com/tominaga-h/jarvis-shell/issues/36))
+- プロンプトに Git 情報を表示 ([#38](https://github.com/tominaga-h/jarvis-shell/issues/38))
+- ディレクトリ付き履歴出力 ([#39](https://github.com/tominaga-h/jarvis-shell/issues/39))
+- `--debug` オプションによるローカルログ出力 ([#40](https://github.com/tominaga-h/jarvis-shell/issues/40))
+- NerdFont 設定の実装 ([#42](https://github.com/tominaga-h/jarvis-shell/issues/42))
+- `source` ビルトインコマンドの実装 ([#44](https://github.com/tominaga-h/jarvis-shell/issues/44))
+- `alias` / `unalias` ビルトインコマンドの実装 ([#45](https://github.com/tominaga-h/jarvis-shell/issues/45))
+
+### Changed
+
+- Help メッセージを英語化 ([#46](https://github.com/tominaga-h/jarvis-shell/issues/46))
+- README に追記・更新 ([#43](https://github.com/tominaga-h/jarvis-shell/issues/43))
+- ロゴを README に追加
+- CHANGELOG を作成
+
+### Fixed
+
+- `&&` が動かない問題を修正 ([#34](https://github.com/tominaga-h/jarvis-shell/issues/34))
+- `$HOME` 使用時に補完が効かない問題を修正 ([#35](https://github.com/tominaga-h/jarvis-shell/issues/35))
+- 並列テストでエラーが出る問題を修正
+- テストの失敗を修正
+- Clippy エラーを修正
+
 ## [v1.0.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.0.0) - 2026-02-15
 
 Jarvis Shell の最初の正式リリース。Phase 1 (REPL & 実行エンジン)、Phase 2 (永続化)、Phase 3 (AI統合) を実装。
