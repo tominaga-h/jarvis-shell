@@ -4,8 +4,6 @@
 //! テキスト応答と Tool Call を分離して返す。
 //! Ctrl-C (SIGINT) による中断にも対応する。
 
-use std::io::{self, Write};
-
 use anyhow::{Context, Result};
 use async_openai::{config::OpenAIConfig, types::CreateChatCompletionRequest, Client};
 use futures_util::StreamExt;
@@ -13,9 +11,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tracing::{debug, info, warn};
 
 use crate::cli::color::red;
-use crate::cli::jarvis::{
-    jarvis_print_chunk, jarvis_print_end, jarvis_print_prefix, jarvis_spinner,
-};
+use crate::cli::jarvis::{jarvis_render_markdown, jarvis_spinner};
 
 use super::tools::call::{accumulate_tool_call, ToolCallAccumulator};
 
@@ -76,7 +72,6 @@ pub async fn process_stream(
     let mut full_text = String::new();
     let mut tool_calls: Vec<ToolCallAccumulator> = Vec::new();
     let mut started_text = false;
-    let mut spinner_cleared = false;
     let mut chunk_count: u32 = 0;
     let mut interrupted = false;
 
@@ -99,12 +94,7 @@ pub async fn process_stream(
                             text_so_far_len = full_text.len(),
                             "Stream error occurred"
                         );
-                        if !spinner_cleared {
-                            spinner.finish_and_clear();
-                        }
-                        if started_text {
-                            jarvis_print_end();
-                        }
+                        spinner.finish_and_clear();
                         anyhow::bail!("Stream error: {e}");
                     }
                 };
@@ -112,7 +102,7 @@ pub async fn process_stream(
                 for choice in &response.choices {
                     let delta = &choice.delta;
 
-                    // テキスト応答の処理
+                    // テキスト応答の処理（バッファリング）
                     if let Some(ref content) = delta.content {
                         debug!(
                             chunk = chunk_count,
@@ -121,25 +111,15 @@ pub async fn process_stream(
                             content = %content,
                             "Received text chunk"
                         );
-                        if !started_text {
-                            if !spinner_cleared {
-                                spinner.finish_and_clear();
-                                spinner_cleared = true;
-                            }
-                            jarvis_print_prefix();
-                            started_text = true;
-                        }
-                        jarvis_print_chunk(content);
-                        let _ = io::stdout().flush();
                         full_text.push_str(content);
+                        started_text = true;
+                        spinner.set_message(
+                            format!("Buffering stream... {} bytes", full_text.len()),
+                        );
                     }
 
                     // Tool Call の処理
                     if let Some(ref tc_chunks) = delta.tool_calls {
-                        if !spinner_cleared {
-                            spinner.finish_and_clear();
-                            spinner_cleared = true;
-                        }
                         debug!(
                             chunk = chunk_count,
                             tool_call_chunks = tc_chunks.len(),
@@ -172,18 +152,19 @@ pub async fn process_stream(
         }
     }
 
-    // ストリーム完了 or 中断: スピナーがまだ残っていればクリア
-    if !spinner_cleared {
-        spinner.finish_and_clear();
+    // ストリーム完了 or 中断: Markdown レンダリングして表示
+    if started_text {
+        spinner.set_message("Rendering...");
     }
+    spinner.finish_and_clear();
 
     if started_text {
         if interrupted {
-            // 中断時は末尾に [中断] を表示
-            jarvis_print_chunk(&red(" [interrupted]"));
-            let _ = io::stdout().flush();
+            let display_text = format!("{}\n\n{}", full_text, red("[interrupted]"));
+            jarvis_render_markdown(&display_text);
+        } else {
+            jarvis_render_markdown(&full_text);
         }
-        jarvis_print_end();
     }
 
     debug!(

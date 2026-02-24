@@ -2,6 +2,8 @@ use std::io::{self, Write};
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressStyle};
+use termimad::crossterm::style::Attribute;
+use termimad::{rgb, CompoundStyle, MadSkin, StyledChar};
 
 use super::color::{red, white};
 
@@ -37,31 +39,69 @@ pub fn jarvis_write_file(path: &str) -> ProgressBar {
 }
 
 /// AI 処理中に表示するスピナーを生成・開始する。
-/// メッセージなしのシンプルなスピナーを表示する。
+/// `{msg}` を含むテンプレートにより、進捗メッセージを動的に更新できる。
 pub fn jarvis_spinner() -> ProgressBar {
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
         ProgressStyle::default_spinner()
-            .template("🤵 {spinner}")
+            .template("🤵 {spinner} {msg}")
             .expect("Invalid spinner template"),
     );
+    spinner.set_message("Thinking...");
     spinner.enable_steady_tick(Duration::from_millis(80));
     spinner
 }
 
-/// ストリーミング開始時のプレフィックスを表示する（改行なし）。
-pub fn jarvis_print_prefix() {
+/// Jarvish 専用の Markdown スキンを構築する。
+///
+/// Iron Man の赤と金をベースにした配色:
+/// - 見出し: ゴールド系グラデーション
+/// - 太字: クリムゾンレッド
+/// - イタリック: ソフトレッド
+/// - コード: ウォームゴールド文字 on ダークレッド背景
+/// - 引用/弾丸: クリムゾン/ゴールド
+fn jarvish_skin() -> MadSkin {
+    let gold = rgb(255, 184, 0);
+    let light_gold = rgb(255, 210, 100);
+    let warm_gold = rgb(220, 180, 100);
+    let crimson = rgb(220, 50, 50);
+    let soft_red = rgb(230, 130, 120);
+    let code_fg = rgb(240, 210, 170);
+    let code_bg = rgb(40, 20, 20);
+    let dark_red = rgb(140, 40, 40);
+    let deep_gold = rgb(180, 140, 50);
+
+    let mut skin = MadSkin::default_dark();
+
+    skin.headers[0].set_fg(gold);
+    skin.headers[0].add_attr(Attribute::Bold);
+    skin.headers[1].set_fg(light_gold);
+    skin.headers[2].set_fg(warm_gold);
+
+    skin.bold.set_fg(crimson);
+    skin.bold.add_attr(Attribute::Bold);
+
+    skin.italic.set_fg(soft_red);
+
+    skin.inline_code.set_fgbg(code_fg, code_bg);
+    skin.code_block.set_fgbg(code_fg, code_bg);
+
+    skin.bullet = StyledChar::new(CompoundStyle::with_fg(gold), '•');
+    skin.quote_mark = StyledChar::new(
+        CompoundStyle::new(Some(crimson), None, Attribute::Bold.into()),
+        '▐',
+    );
+    skin.horizontal_rule = StyledChar::new(CompoundStyle::with_fg(dark_red), '―');
+    skin.table.set_fg(deep_gold);
+
+    skin
+}
+
+/// termimad を使って Markdown テキストをレンダリングし、ターミナルに表示する。
+pub fn jarvis_render_markdown(text: &str) {
     print!("🤵 ");
-}
-
-/// ストリーミング中のテキスト片を表示する（改行なし）。
-pub fn jarvis_print_chunk(chunk: &str) {
-    print!("{}", white(chunk));
-}
-
-/// ストリーミング終了時の改行を出力する。
-pub fn jarvis_print_end() {
-    println!();
+    let skin = jarvish_skin();
+    skin.print_text(text);
 }
 
 /// コマンド異常終了時にユーザーへ調査の可否を確認する。
