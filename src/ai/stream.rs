@@ -11,7 +11,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tracing::{debug, info, warn};
 
 use crate::cli::color::red;
-use crate::cli::jarvis::{jarvis_render_markdown, jarvis_spinner};
+use crate::cli::jarvis::{jarvis_print_plain, jarvis_render_markdown, jarvis_spinner};
 
 use super::tools::call::{accumulate_tool_call, ToolCallAccumulator};
 
@@ -33,6 +33,7 @@ pub async fn process_stream(
     client: &Client<OpenAIConfig>,
     request: CreateChatCompletionRequest,
     is_first_round: bool,
+    markdown_rendering: bool,
 ) -> Result<StreamResult> {
     // SIGINT (Ctrl-C) リスナーを作成。
     // tokio::signal::unix::signal() は作成時点以降のシグナルのみ受け取るため、
@@ -159,11 +160,16 @@ pub async fn process_stream(
     spinner.finish_and_clear();
 
     if started_text {
+        let render = if markdown_rendering {
+            jarvis_render_markdown
+        } else {
+            jarvis_print_plain
+        };
         if interrupted {
             let display_text = format!("{}\n\n{}", full_text, red("[interrupted]"));
-            jarvis_render_markdown(&display_text);
+            render(&display_text);
         } else {
-            jarvis_render_markdown(&full_text);
+            render(&full_text);
         }
     }
 

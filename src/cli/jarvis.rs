@@ -104,6 +104,11 @@ pub fn jarvis_render_markdown(text: &str) {
     skin.print_text(text);
 }
 
+/// Markdown をレンダリングせず、プレーンテキストとしてそのまま表示する。
+pub fn jarvis_print_plain(text: &str) {
+    println!("🤵 {text}");
+}
+
 /// コマンド異常終了時にユーザーへ調査の可否を確認する。
 ///
 /// 「調査しますか？ [Y/n]: 」と表示し、ユーザーが `Y`/`y`/空行（Enter）を

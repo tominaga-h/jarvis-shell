@@ -54,12 +54,12 @@
 
 ### 前提条件
 
-| 必要なもの             | 詳細                                                   |
-| ---------------------- | ------------------------------------------------------ |
-| 🦀 **Rust**            | Stable ツールチェイン（Edition 2021）                  |
-| 🔑 **OpenAI API キー** | AI 機能に必要                                          |
-| 💻 **OS**              | macOS / Linux                                          |
-| 🔤 **NerdFont**        | プロンプトアイコン表示に推奨（設定で無効化可能）       |
+| 必要なもの             | 詳細                                             |
+| ---------------------- | ------------------------------------------------ |
+| 🦀 **Rust**            | Stable ツールチェイン（Edition 2021）            |
+| 🔑 **OpenAI API キー** | AI 機能に必要                                    |
+| 💻 **OS**              | macOS / Linux                                    |
+| 🔤 **NerdFont**        | プロンプトアイコン表示に推奨（設定で無効化可能） |
 
 ### Cargo でインストール
 
@@ -90,28 +90,30 @@ Jarvish は `~/.config/jarvish/config.toml` に TOML 形式の設定ファイル
 
 ```toml
 [ai]
-model = "gpt-4o"        # 使用する AI モデル
-max_rounds = 10          # エージェントループの最大ラウンド数
+model = "gpt-4o" # 使用する AI モデル
+max_rounds = 10 # エージェントループの最大ラウンド数
+markdown_rendering = true # falseにするとMarkdownレンダリングをしない
 
 [alias]
-g = "git"                # コマンドエイリアス
+g = "git" # コマンドエイリアス
 ll = "ls -la"
 
 [export]
-PATH = "/usr/local/bin:$PATH"   # 起動時に設定する環境変数
+PATH = "/usr/local/bin:$PATH" # 起動時に設定する環境変数
 
 [prompt]
-nerd_font = true         # NerdFont 未インストールの場合は false に設定
+nerd_font = true # NerdFont 未インストールの場合は false に設定
 ```
 
-| セクション | 説明                                                                           |
-| ---------- | ------------------------------------------------------------------------------ |
-| `[ai]`     | AI モデル名とエージェントループ上限                                            |
-| `[alias]`  | コマンドエイリアス（`alias` / `unalias` ビルトインでも管理可能）               |
-| `[export]` | 起動時に適用する環境変数（`$VAR` 展開に対応）                                  |
-| `[prompt]` | プロンプト表示設定（`nerd_font = false` で NerdFont アイコンを無効化）         |
+| セクション | 説明                                                                   |
+| ---------- | ---------------------------------------------------------------------- |
+| `[ai]`     | AI モデル名、エージェントループ上限、Markdownレンダリング              |
+| `[alias]`  | コマンドエイリアス（`alias` / `unalias` ビルトインでも管理可能）       |
+| `[export]` | 起動時に適用する環境変数（`$VAR` 展開に対応）                          |
+| `[prompt]` | プロンプト表示設定（`nerd_font = false` で NerdFont アイコンを無効化） |
 
 > **ヒント**: `source` ビルトインコマンドで設定を実行中に再読み込みできます：
+>
 > ```bash
 > source ~/.config/jarvish/config.toml
 > ```

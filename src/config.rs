@@ -9,6 +9,7 @@
 //! [ai]
 //! model = "gpt-4o"
 //! max_rounds = 10
+//! markdown_rendering = true
 //!
 //! [alias]
 //! g = "git"
@@ -49,6 +50,8 @@ pub struct AiConfig {
     pub model: String,
     /// エージェントループの最大ラウンド数
     pub max_rounds: usize,
+    /// AI レスポンスを Markdown としてレンダリングするか
+    pub markdown_rendering: bool,
 }
 
 impl Default for AiConfig {
@@ -56,6 +59,7 @@ impl Default for AiConfig {
         Self {
             model: "gpt-4o".to_string(),
             max_rounds: 10,
+            markdown_rendering: true,
         }
     }
 }
@@ -96,6 +100,7 @@ impl JarvishConfig {
                         path = %path.display(),
                         model = %config.ai.model,
                         max_rounds = config.ai.max_rounds,
+                        markdown_rendering = config.ai.markdown_rendering,
                         alias_count = config.alias.len(),
                         export_count = config.export.len(),
                         nerd_font = config.prompt.nerd_font,
@@ -160,6 +165,7 @@ impl JarvishConfig {
 [ai]
 # model = "gpt-4o"
 # max_rounds = 10
+# markdown_rendering = true  # false にすると Markdown レンダリングを無効化
 
 [alias]
 # g = "git"
@@ -206,6 +212,7 @@ mod tests {
         let config = JarvishConfig::default();
         assert_eq!(config.ai.model, "gpt-4o");
         assert_eq!(config.ai.max_rounds, 10);
+        assert!(config.ai.markdown_rendering);
         assert!(config.alias.is_empty());
         assert!(config.export.is_empty());
         assert!(config.prompt.nerd_font);
@@ -217,6 +224,7 @@ mod tests {
 [ai]
 model = "gpt-4o-mini"
 max_rounds = 5
+markdown_rendering = false
 
 [alias]
 g = "git"
@@ -231,6 +239,7 @@ nerd_font = false
         let config = load_from_str(toml);
         assert_eq!(config.ai.model, "gpt-4o-mini");
         assert_eq!(config.ai.max_rounds, 5);
+        assert!(!config.ai.markdown_rendering);
         assert_eq!(config.alias.get("g").unwrap(), "git");
         assert_eq!(config.alias.get("ll").unwrap(), "ls -la");
         assert_eq!(config.export.get("EDITOR").unwrap(), "vim");
@@ -247,6 +256,7 @@ g = "git"
         // 省略されたセクションはデフォルト値が使われる
         assert_eq!(config.ai.model, "gpt-4o");
         assert_eq!(config.ai.max_rounds, 10);
+        assert!(config.ai.markdown_rendering);
         assert!(config.prompt.nerd_font);
         assert_eq!(config.alias.get("g").unwrap(), "git");
         assert!(config.export.is_empty());

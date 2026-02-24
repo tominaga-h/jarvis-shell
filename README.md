@@ -90,23 +90,24 @@ A default config file is automatically generated on first launch.
 
 ```toml
 [ai]
-model = "gpt-4o"        # AI model to use
-max_rounds = 10          # Max agent loop rounds
+model = "gpt-4o" # AI model to use
+max_rounds = 10 # Max agent loop rounds
+markdown_rendering = true # Set to false to disable Markdown rendering
 
 [alias]
-g = "git"                # Command aliases
+g = "git" # Command aliases
 ll = "ls -la"
 
 [export]
-PATH = "/usr/local/bin:$PATH"   # Environment variables set on startup
+PATH = "/usr/local/bin:$PATH" # Environment variables set on startup
 
 [prompt]
-nerd_font = true         # Set to false if NerdFont is not installed
+nerd_font = true # Set to false if NerdFont is not installed
 ```
 
 | Section    | Description                                                            |
 | ---------- | ---------------------------------------------------------------------- |
-| `[ai]`     | AI model name and agent loop limit                                     |
+| `[ai]`     | AI model name, agent loop limit, and Markdown rendering toggle         |
 | `[alias]`  | Command aliases (also manageable via `alias` / `unalias` builtins)     |
 | `[export]` | Environment variables applied on startup (supports `$VAR` expansion)   |
 | `[prompt]` | Prompt display settings (`nerd_font = false` disables NerdFont icons)  |

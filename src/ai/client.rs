@@ -33,6 +33,8 @@ pub struct JarvisAI {
     model: String,
     /// エージェントループの最大ラウンド数
     max_rounds: usize,
+    /// AI レスポンスを Markdown としてレンダリングするか
+    markdown_rendering: bool,
 }
 
 impl JarvisAI {
@@ -54,6 +56,7 @@ impl JarvisAI {
             client,
             model: ai_config.model.clone(),
             max_rounds: ai_config.max_rounds,
+            markdown_rendering: ai_config.markdown_rendering,
         })
     }
 
@@ -63,9 +66,11 @@ impl JarvisAI {
     pub fn update_config(&mut self, ai_config: &AiConfig) {
         self.model = ai_config.model.clone();
         self.max_rounds = ai_config.max_rounds;
+        self.markdown_rendering = ai_config.markdown_rendering;
         info!(
             model = %self.model,
             max_rounds = self.max_rounds,
+            markdown_rendering = self.markdown_rendering,
             "AI config updated"
         );
     }
@@ -234,7 +239,8 @@ impl JarvisAI {
             );
 
             // ストリーム処理
-            let stream_result = process_stream(&self.client, request, round == 0).await?;
+            let stream_result =
+                process_stream(&self.client, request, round == 0, self.markdown_rendering).await?;
 
             // Ctrl-C で中断された場合は、部分テキストをそのまま返す
             if stream_result.interrupted {
