@@ -189,7 +189,8 @@ impl Shell {
         let mut repl_error = false;
 
         loop {
-            match self.editor.read_line(&self.prompt) {
+            let signal = tokio::task::block_in_place(|| self.editor.read_line(&self.prompt));
+            match signal {
                 Ok(Signal::Success(line)) => {
                     if !self.handle_input(&line).await {
                         break;
