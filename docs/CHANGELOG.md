@@ -3,6 +3,20 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.1.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.1.0) - 2026-03-02
+
+### Added
+
+- AI パイプ機能 (`| ai "..."`) の実装 ([#58](https://github.com/tominaga-h/jarvis-shell/issues/58))
+- システムプロンプトに README の内容を注入 ([#59](https://github.com/tominaga-h/jarvis-shell/issues/59))
+- オフライン検知によるバナー表示の動的切り替え
+- AI 応答の Markdown 判定ロジックの追加
+- `git push` 時のブランチ補完対応
+
+### Fixed
+
+- push 時と PR 作成時に CI Workflow が同時実行される問題を修正
+
 ## [v1.0.2](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.0.2) - 2026-03-01
 
 ### Added
