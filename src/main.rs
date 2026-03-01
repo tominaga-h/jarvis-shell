@@ -8,7 +8,7 @@ mod storage;
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use tracing::info;
 
 /// Next Generation AI Integrated Shell
@@ -25,7 +25,18 @@ async fn main() {
     // .env ファイルから環境変数を読み込む
     dotenvy::dotenv().ok();
 
-    let args = Args::parse();
+    let args = Args::from_arg_matches(
+        &Args::command()
+            .disable_version_flag(true)
+            .arg(
+                clap::Arg::new("version")
+                    .short('v')
+                    .long("version")
+                    .action(clap::ArgAction::Version),
+            )
+            .get_matches(),
+    )
+    .expect("failed to parse args");
 
     let log_dir_override = if args.debug {
         Some(PathBuf::from("./var/logs"))
