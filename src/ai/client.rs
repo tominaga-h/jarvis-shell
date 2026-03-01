@@ -253,7 +253,7 @@ impl JarvisAI {
             ..Default::default()
         };
 
-        let raw = process_ai_pipe_stream(&self.client, request).await?;
+        let raw = process_ai_pipe_stream(&self.client, request, self.markdown_rendering).await?;
         Ok(sanitize_ai_pipe_output(&raw))
     }
 

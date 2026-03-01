@@ -14,8 +14,11 @@ use std::io::Write;
 use std::time::Instant;
 
 use crate::cli::color::red;
-use crate::cli::jarvis::{jarvis_print_plain, jarvis_render_markdown, jarvis_spinner};
+use crate::cli::jarvis::{
+    jarvis_print_plain, jarvis_render_markdown, jarvis_spinner, render_markdown,
+};
 
+use super::markdown::is_markdown;
 use super::tools::call::{accumulate_tool_call, ToolCallAccumulator};
 
 /// ストリーム処理の結果
@@ -167,7 +170,7 @@ pub async fn process_stream(
     spinner.finish_and_clear();
 
     if started_text {
-        let render = if markdown_rendering {
+        let render = if markdown_rendering && is_markdown(&full_text) {
             jarvis_render_markdown
         } else {
             jarvis_print_plain
@@ -200,15 +203,21 @@ pub async fn process_stream(
 /// AI パイプ用ストリーミングレスポンスを処理する。
 ///
 /// 通常の `process_stream()` とは異なり:
-/// - Markdown レンダリングなし（プレーンテキスト出力）
-/// - Jarvis ペルソナの装飾なし
-/// - ターミナルに直接表示しつつバッファに蓄積（tee パターン）
+/// - Jarvis ペルソナの装飾なし（🤵 プレフィックスなし）
 /// - Tool Call は無視（テキスト応答のみ）
+///
+/// `markdown_rendering` が `true` の場合:
+///   バッファリングモードで動作し、完了後に `is_markdown()` で判定。
+///   Markdown であれば `render_markdown()` でレンダリングする。
+///
+/// `markdown_rendering` が `false` の場合:
+///   従来通りチャンクを即時 stdout に流す（tee パターン）。
 ///
 /// 返却値: AI が出力したテキスト全文（`CommandResult.stdout` に格納用）
 pub async fn process_ai_pipe_stream(
     client: &Client<OpenAIConfig>,
     request: CreateChatCompletionRequest,
+    markdown_rendering: bool,
 ) -> Result<String> {
     let mut sigint =
         signal(SignalKind::interrupt()).context("Failed to register SIGINT handler")?;
@@ -238,6 +247,7 @@ pub async fn process_ai_pipe_stream(
     let mut full_text = String::new();
     let mut started = false;
     let mut interrupted = false;
+    let mut last_spinner_update = Instant::now();
 
     loop {
         tokio::select! {
@@ -259,13 +269,25 @@ pub async fn process_ai_pipe_stream(
                 for choice in &response.choices {
                     if let Some(ref content) = choice.delta.content {
                         if !started {
-                            spinner.finish_and_clear();
+                            if !markdown_rendering {
+                                spinner.finish_and_clear();
+                            }
                             started = true;
                         }
                         full_text.push_str(content);
-                        let mut out = std::io::stdout().lock();
-                        let _ = out.write_all(content.as_bytes());
-                        let _ = out.flush();
+
+                        if markdown_rendering {
+                            if last_spinner_update.elapsed().as_millis() > 100 {
+                                spinner.set_message(
+                                    format!("Buffering stream... {} bytes", full_text.len()),
+                                );
+                                last_spinner_update = Instant::now();
+                            }
+                        } else {
+                            let mut out = std::io::stdout().lock();
+                            let _ = out.write_all(content.as_bytes());
+                            let _ = out.flush();
+                        }
                     }
                 }
             }
@@ -277,25 +299,52 @@ pub async fn process_ai_pipe_stream(
         }
     }
 
-    if !started {
-        spinner.finish_and_clear();
-    }
-
-    if started {
-        let mut out = std::io::stdout().lock();
-        if !full_text.ends_with('\n') {
-            let _ = out.write_all(b"\n");
+    if markdown_rendering {
+        if started {
+            spinner.set_message("Rendering...");
         }
-        let _ = out.flush();
-    }
+        spinner.finish_and_clear();
 
-    if interrupted {
-        eprintln!("{}", red("[interrupted]"));
+        if started {
+            if is_markdown(&full_text) {
+                if interrupted {
+                    let display_text = format!("{}\n\n{}", full_text, red("[interrupted]"));
+                    render_markdown(&display_text);
+                } else {
+                    render_markdown(&full_text);
+                }
+            } else {
+                print!("{full_text}");
+                if !full_text.ends_with('\n') {
+                    println!();
+                }
+                if interrupted {
+                    eprintln!("{}", red("[interrupted]"));
+                }
+            }
+        }
+    } else {
+        if !started {
+            spinner.finish_and_clear();
+        }
+
+        if started {
+            let mut out = std::io::stdout().lock();
+            if !full_text.ends_with('\n') {
+                let _ = out.write_all(b"\n");
+            }
+            let _ = out.flush();
+        }
+
+        if interrupted {
+            eprintln!("{}", red("[interrupted]"));
+        }
     }
 
     debug!(
         full_text_length = full_text.len(),
         interrupted = interrupted,
+        markdown_rendering = markdown_rendering,
         "AI pipe stream processing completed"
     );
 

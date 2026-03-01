@@ -121,6 +121,13 @@ pub fn jarvis_print_plain(text: &str) {
     println!("🤵 {text}");
 }
 
+/// Jarvis ペルソナなしで Markdown テキストをレンダリングする。
+/// AI パイプなど、🤵 プレフィックスが不要な場面で使用する。
+pub fn render_markdown(text: &str) {
+    let skin = jarvish_skin();
+    skin.print_text(text);
+}
+
 /// コマンド異常終了時にユーザーへ調査の可否を確認する。
 ///
 /// 「調査しますか？ [Y/n]: 」と表示し、ユーザーが `Y`/`y`/空行（Enter）を
