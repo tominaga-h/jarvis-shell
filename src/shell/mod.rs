@@ -49,9 +49,8 @@ impl Shell {
         // [export] セクションの環境変数を設定
         Self::apply_exports(&config);
 
-        // 入力分類器の初期化（PATH キャッシュを構築）
+        // 入力分類器の初期化（キャッシュレス設計: which クレートでリアルタイム PATH 解決）
         // ハイライターと REPL ループの両方で共有するため Arc で包む
-        // NOTE: apply_exports() の後に初期化し、config の PATH 設定を反映する
         let classifier = Arc::new(InputClassifier::new());
 
         // データディレクトリを一度だけ決定し、エディタ履歴と BlackBox の両方で共有する。
@@ -123,8 +122,7 @@ impl Shell {
     /// 指定されたパスから設定ファイルを再読み込みし、Shell の状態に反映する。
     ///
     /// `source` ビルトインコマンドから呼び出される。
-    /// `[alias]`、`[export]`、`[ai]` セクションを反映し、
-    /// PATH が変更されていれば分類器のキャッシュをリロードする。
+    /// `[alias]`、`[export]`、`[ai]` セクションを反映する。
     pub(super) fn reload_config(&mut self, path: &std::path::Path) -> crate::engine::CommandResult {
         use crate::engine::CommandResult;
 
@@ -136,8 +134,6 @@ impl Shell {
                 return CommandResult::error(err, 1);
             }
         };
-
-        let path_before = std::env::var("PATH").ok();
 
         // [alias] を反映
         self.aliases = config.alias.clone();
@@ -152,13 +148,6 @@ impl Shell {
 
         // [prompt] を反映
         self.prompt.update_config(config.prompt.clone());
-
-        // PATH 変更検出
-        let path_after = std::env::var("PATH").ok();
-        if path_before != path_after {
-            info!("PATH changed via source, reloading classifier cache");
-            self.classifier.reload_path_cache();
-        }
 
         // サマリー出力
         let summary = format!(
