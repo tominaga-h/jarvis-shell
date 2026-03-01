@@ -3,15 +3,15 @@
 //! - 先頭トークン: PATH 内の実行可能コマンド + ビルトイン (cd, cwd, exit)
 //! - それ以降: カレントディレクトリ基準のファイル / ディレクトリ名
 //!
-//! `InputClassifier` の PATH キャッシュを共有参照し、
-//! `export PATH=...` 等による動的変更を即座に反映する。
+//! fish shell の設計思想に倣い、インメモリキャッシュを持たず、
+//! Tab 押下時にリアルタイムで `$PATH` を走査する（キャッシュレス設計）。
+//! `brew install` 等で新しいバイナリが追加された直後でも即座に補完候補に出現する。
 
 use std::fs;
-use std::sync::Arc;
+use std::os::unix::fs::PermissionsExt;
 
 use reedline::{Completer, Span, Suggestion};
 
-use crate::engine::classifier::InputClassifier;
 use crate::engine::expand;
 
 /// ビルトインコマンド名（補完候補に常に含める）
@@ -30,45 +30,38 @@ const GIT_BRANCH_SUBCOMMANDS: &[&str] = &[
     "reset",
 ];
 
-/// Jarvish 用の補完エンジン
+/// Jarvish 用の補完エンジン（キャッシュレス設計）
 ///
-/// `InputClassifier` の PATH キャッシュを `Arc` で共有し、
-/// PATH 変更時のリロードが自動的に補完候補にも反映される。
-pub struct JarvishCompleter {
-    /// PATH キャッシュの共有参照元
-    classifier: Arc<InputClassifier>,
-}
+/// インメモリキャッシュを持たず、補完要求のたびにリアルタイムで
+/// `$PATH` ディレクトリを走査する。OS の VFS キャッシュにより高速に動作する。
+pub struct JarvishCompleter;
 
 impl JarvishCompleter {
-    /// `InputClassifier` の PATH キャッシュを共有して初期化する。
-    pub fn new(classifier: Arc<InputClassifier>) -> Self {
-        Self { classifier }
+    pub fn new() -> Self {
+        Self
     }
 
     // ========== 補完ロジック ==========
 
     /// コマンド名補完（先頭トークン）
     ///
-    /// `InputClassifier` の PATH キャッシュ + ビルトインコマンドから候補を生成する。
+    /// `$PATH` をリアルタイム走査し、ビルトインコマンドと合わせて候補を生成する。
     fn complete_command(&self, partial: &str, span: Span) -> Vec<Suggestion> {
-        let path_commands = self.classifier.path_commands();
+        let mut matches = Self::scan_path_commands(partial);
 
-        // PATH コマンド + ビルトインからマッチするものを収集
-        let mut matches: Vec<&str> = path_commands
-            .iter()
-            .map(|s| s.as_str())
-            .chain(BUILTIN_COMMANDS.iter().copied())
-            .filter(|cmd| cmd.starts_with(partial))
-            .collect();
+        for cmd in BUILTIN_COMMANDS {
+            if cmd.starts_with(partial) {
+                matches.push(cmd.to_string());
+            }
+        }
 
-        // ソート & 重複除去
         matches.sort_unstable();
         matches.dedup();
 
         matches
             .into_iter()
             .map(|cmd| Suggestion {
-                value: cmd.to_string(),
+                value: cmd,
                 description: None,
                 style: None,
                 extra: None,
@@ -77,6 +70,38 @@ impl JarvishCompleter {
                 match_indices: None,
             })
             .collect()
+    }
+
+    /// `$PATH` 上の実行可能ファイルのうち、`prefix` に前方一致するものを収集する。
+    ///
+    /// 実行権限チェック (`mode & 0o111 != 0`) を行い、
+    /// README 等の非実行ファイルを除外する。
+    fn scan_path_commands(prefix: &str) -> Vec<String> {
+        let path_var = match std::env::var("PATH") {
+            Ok(p) => p,
+            Err(_) => return vec![],
+        };
+
+        let mut commands = Vec::new();
+        for dir in std::env::split_paths(&path_var) {
+            let entries = match fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if !name.starts_with(prefix) {
+                        continue;
+                    }
+                    if let Ok(metadata) = fs::metadata(entry.path()) {
+                        if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+                            commands.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        commands
     }
 
     /// ファイル / ディレクトリパス補完（第 2 トークン以降）
@@ -263,9 +288,8 @@ mod tests {
     use std::env;
     use std::fs;
 
-    /// テスト用の completer を作成するヘルパー
     fn test_completer() -> JarvishCompleter {
-        JarvishCompleter::new(Arc::new(InputClassifier::new()))
+        JarvishCompleter::new()
     }
 
     /// テスト用ディレクトリ構造を作成するヘルパー

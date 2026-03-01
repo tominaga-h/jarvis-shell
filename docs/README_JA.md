@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="../images/logo.png" alt="Jarvish Logo" width="500" />
-</p>
-
 # 🤵 Jarvis Shell (jarvish)
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)

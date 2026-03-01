@@ -1,13 +1,9 @@
-<p align="center">
-  <img src="images/logo.png" alt="Jarvish Logo" width="500" />
-</p>
-
 # 🤵 Jarvis Shell (jarvish)
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
 ![version](https://img.shields.io/badge/version-1.0.1-blue)
 
-> 🌐 [日本語版 README はこちら](docs/README_JA.md)
+> 🌐 [日本語版 README はこちら](docs/README_ja.md)
 
 ---
 
