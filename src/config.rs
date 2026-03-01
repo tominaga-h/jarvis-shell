@@ -10,6 +10,7 @@
 //! model = "gpt-4o"
 //! max_rounds = 10
 //! markdown_rendering = true
+//! ai_pipe_max_chars = 50000
 //!
 //! [alias]
 //! g = "git"
@@ -52,6 +53,8 @@ pub struct AiConfig {
     pub max_rounds: usize,
     /// AI レスポンスを Markdown としてレンダリングするか
     pub markdown_rendering: bool,
+    /// AI パイプ (`cmd | ai "..."`) の入力テキスト文字数上限
+    pub ai_pipe_max_chars: usize,
 }
 
 impl Default for AiConfig {
@@ -60,6 +63,7 @@ impl Default for AiConfig {
             model: "gpt-4o".to_string(),
             max_rounds: 10,
             markdown_rendering: true,
+            ai_pipe_max_chars: 50_000,
         }
     }
 }
@@ -166,6 +170,7 @@ impl JarvishConfig {
 # model = "gpt-4o"
 # max_rounds = 10
 # markdown_rendering = true  # false にすると Markdown レンダリングを無効化
+# ai_pipe_max_chars = 50000
 
 [alias]
 # g = "git"
