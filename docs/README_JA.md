@@ -1,11 +1,7 @@
-<p align="center">
-  <img src="../images/logo.png" alt="Jarvish Logo" width="200" />
-</p>
-
 # 🤵 Jarvis Shell (jarvish)
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-![version](https://img.shields.io/badge/version-1.0.1-blue)
+![version](https://img.shields.io/badge/version-1.0.2-blue)
 
 > 🌐 [English README](../README.md)
 
@@ -17,7 +13,7 @@
 
 **Jarvish** は、Marvel の Iron Man に登場する **J.A.R.V.I.S.** にインスパイアされた、Rust 製の **次世代 AI 統合シェル (Next Generation AI Integrated Shell)** です。日常のシェル体験に AI の知性をネイティブに組み込みます。エラーをブラウザにコピペする必要はもうありません。Jarvis に聞くだけです。
 
-![jarvish](../images/jarvish.png)
+![jarvish](../images/jarvish-demo.gif)
 
 ---
 
@@ -25,28 +21,28 @@
 
 ### 🧠 AI アシスタント
 
-- 💬 シェルプロンプトから直接、**自然言語**で Jarvis と会話
-- 🔍 コマンドが失敗すると、Jarvis が stdout/stderr のコンテキストを使って**自動的にエラーを調査**
-- 🛠️ Jarvis は AI エージェントとして**ファイルの読み書き**やコマンド実行が可能（ツールコール機能）
+- シェルプロンプトから直接、**自然言語**で Jarvis と会話
+- コマンドが失敗すると、Jarvis が stdout/stderr のコンテキストを使って**自動的にエラーを調査**
+- Jarvis は AI エージェントとして**ファイルの読み書き**やコマンド実行が可能（ツールコール機能）
 
 ### 🐟 Fish ライクな UX
 
-- 🎨 入力中の**リアルタイムシンタックスハイライト**
-- ⚡ コマンド（PATH バイナリ、ビルトイン）とファイルパスの**オートコンプリート**
-- 📜 `reedline` による履歴ベースのサジェスト
+- 入力中の**リアルタイムシンタックスハイライト**
+- コマンド（PATH バイナリ、ビルトイン）とファイルパスの**オートコンプリート**
+- `reedline` による履歴ベースのサジェスト
 
 ### 📦 The Black Box
 
-- 🗃️ すべてのコマンド実行が**永続化** — コマンド、タイムスタンプ、作業ディレクトリ、終了コード
-- 💾 stdout/stderr の出力は **Git ライクなコンテンツアドレッサブル Blob ストレージ**に保存（SHA-256 + zstd 圧縮）
-- 🔄 シェルを再起動しても、*「先週のエラー」*について Jarvis に相談可能
+- すべてのコマンド実行が**永続化** — コマンド、タイムスタンプ、作業ディレクトリ、終了コード
+- stdout/stderr の出力は **Git ライクなコンテンツアドレッサブル Blob ストレージ**に保存（SHA-256 + zstd 圧縮）
+- シェルを再起動しても、*「先週のエラー」*について Jarvis に相談可能
 
 ### 🔧 シェルの基本機能
 
-- 🔀 **パイプライン** (`cmd1 | cmd2 | cmd3`)
-- 📂 **リダイレクト** (`>`, `>>`, `<`)
-- 🏠 **チルダ・変数展開** (`~`, `$HOME`, `${VAR}`)
-- 📟 対話型プログラム（vim, top 等）のための完全な **PTY サポート**
+- **パイプライン** (`cmd1 | cmd2 | cmd3`)
+- **リダイレクト** (`>`, `>>`, `<`)
+- **チルダ・変数展開** (`~`, `$HOME`, `${VAR}`)
+- 対話型プログラム（vim, top 等）のための完全な **PTY サポート**
 
 ---
 
@@ -54,12 +50,12 @@
 
 ### 前提条件
 
-| 必要なもの             | 詳細                                                   |
-| ---------------------- | ------------------------------------------------------ |
-| 🦀 **Rust**            | Stable ツールチェイン（Edition 2021）                  |
-| 🔑 **OpenAI API キー** | AI 機能に必要                                          |
-| 💻 **OS**              | macOS / Linux                                          |
-| 🔤 **NerdFont**        | プロンプトアイコン表示に推奨（設定で無効化可能）       |
+| 必要なもの          | 詳細                                             |
+| ------------------- | ------------------------------------------------ |
+| **Rust**            | Stable ツールチェイン（Edition 2021）            |
+| **OpenAI API キー** | AI 機能に必要                                    |
+| **OS**              | macOS / Linux                                    |
+| **NerdFont**        | プロンプトアイコン表示に推奨（設定で無効化可能） |
 
 ### Cargo でインストール
 
@@ -90,28 +86,30 @@ Jarvish は `~/.config/jarvish/config.toml` に TOML 形式の設定ファイル
 
 ```toml
 [ai]
-model = "gpt-4o"        # 使用する AI モデル
-max_rounds = 10          # エージェントループの最大ラウンド数
+model = "gpt-4o" # 使用する AI モデル
+max_rounds = 10 # エージェントループの最大ラウンド数
+markdown_rendering = true # falseにするとMarkdownレンダリングをしない
 
 [alias]
-g = "git"                # コマンドエイリアス
+g = "git" # コマンドエイリアス
 ll = "ls -la"
 
 [export]
-PATH = "/usr/local/bin:$PATH"   # 起動時に設定する環境変数
+PATH = "/usr/local/bin:$PATH" # 起動時に設定する環境変数
 
 [prompt]
-nerd_font = true         # NerdFont 未インストールの場合は false に設定
+nerd_font = true # NerdFont 未インストールの場合は false に設定
 ```
 
-| セクション | 説明                                                                           |
-| ---------- | ------------------------------------------------------------------------------ |
-| `[ai]`     | AI モデル名とエージェントループ上限                                            |
-| `[alias]`  | コマンドエイリアス（`alias` / `unalias` ビルトインでも管理可能）               |
-| `[export]` | 起動時に適用する環境変数（`$VAR` 展開に対応）                                  |
-| `[prompt]` | プロンプト表示設定（`nerd_font = false` で NerdFont アイコンを無効化）         |
+| セクション | 説明                                                                   |
+| ---------- | ---------------------------------------------------------------------- |
+| `[ai]`     | AI モデル名、エージェントループ上限、Markdownレンダリング              |
+| `[alias]`  | コマンドエイリアス（`alias` / `unalias` ビルトインでも管理可能）       |
+| `[export]` | 起動時に適用する環境変数（`$VAR` 展開に対応）                          |
+| `[prompt]` | プロンプト表示設定（`nerd_font = false` で NerdFont アイコンを無効化） |
 
 > **ヒント**: `source` ビルトインコマンドで設定を実行中に再読み込みできます：
+>
 > ```bash
 > source ~/.config/jarvish/config.toml
 > ```
@@ -141,12 +139,12 @@ graph TB
     C --> C2[("blobs/ (SHA-256 + zstd)")]
 ```
 
-| コンポーネント          | 説明                                                                                         |
-| ----------------------- | -------------------------------------------------------------------------------------------- |
-| 🖊️ **Line Editor**      | `reedline` による REPL インターフェース。シンタックスハイライト、補完、履歴機能を提供        |
-| ⚙️ **Execution Engine** | 入力をビルトインコマンドまたは外部コマンドに振り分け、PTY テーイングで I/O をキャプチャ      |
-| 📦 **Black Box**        | すべての実行履歴と出力を永続化（SQLite インデックス + コンテンツアドレッサブル Blob ストア） |
-| 🧠 **AI Brain**         | 入力をコマンド/自然言語に分類し、OpenAI を通じてコンテキストを踏まえた AI アシスタンスを提供 |
+| コンポーネント       | 説明                                                                                         |
+| -------------------- | -------------------------------------------------------------------------------------------- |
+| **Line Editor**      | `reedline` による REPL インターフェース。シンタックスハイライト、補完、履歴機能を提供        |
+| **Execution Engine** | 入力をビルトインコマンドまたは外部コマンドに振り分け、PTY テーイングで I/O をキャプチャ      |
+| **Black Box**        | すべての実行履歴と出力を永続化（SQLite インデックス + コンテンツアドレッサブル Blob ストア） |
+| **AI Brain**         | 入力をコマンド/自然言語に分類し、OpenAI を通じてコンテキストを踏まえた AI アシスタンスを提供 |
 
 ---
 
@@ -186,9 +184,9 @@ make check  # format, clippy, check, test を一括実行
 
 すべての push と `main` への PR で CI が実行されます：
 
-| ジョブ    | コマンド                                    |
-| --------- | ------------------------------------------- |
-| ✅ Check  | `cargo check --all-targets`                 |
-| 🧪 Test   | `cargo test --all-targets`                  |
-| 📐 Format | `cargo fmt --all -- --check`                |
-| 📎 Clippy | `cargo clippy --all-targets -- -D warnings` |
+| ジョブ | コマンド                                    |
+| ------ | ------------------------------------------- |
+| Check  | `cargo check --all-targets`                 |
+| Test   | `cargo test --all-targets`                  |
+| Format | `cargo fmt --all -- --check`                |
+| Clippy | `cargo clippy --all-targets -- -D warnings` |

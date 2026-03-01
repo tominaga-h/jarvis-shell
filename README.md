@@ -1,13 +1,9 @@
-<p align="center">
-  <img src="images/logo.png" alt="Jarvish Logo" width="200" />
-</p>
-
 # 🤵 Jarvis Shell (jarvish)
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-![version](https://img.shields.io/badge/version-1.0.1-blue)
+![version](https://img.shields.io/badge/version-1.0.2-blue)
 
-> 🌐 [日本語版 README はこちら](docs/README_JA.md)
+> 🌐 [日本語版 README はこちら](docs/README_ja.md)
 
 ---
 
@@ -17,7 +13,7 @@
 
 **Jarvish** is a **Next Generation AI Integrated Shell** written in Rust, inspired by **J.A.R.V.I.S.** from Marvel's Iron Man. It natively embeds AI intelligence into your everyday shell experience — no more copy-pasting errors into a browser. Just ask Jarvis.
 
-![jarvish](images/jarvish.png)
+![jarvish](images/jarvish-demo.gif)
 
 ---
 
@@ -25,28 +21,28 @@
 
 ### 🧠 AI-Powered Assistance
 
-- 💬 Talk to Jarvis in **natural language** — right from your shell prompt
-- 🔍 When a command fails, Jarvis **automatically investigates** the error using stdout/stderr context
-- 🛠️ Jarvis can **read and write files**, execute commands as an AI agent with tool-calling capabilities
+- Talk to Jarvis in **natural language** — right from your shell prompt
+- When a command fails, Jarvis **automatically investigates** the error using stdout/stderr context
+- Jarvis can **read and write files**, execute commands as an AI agent with tool-calling capabilities
 
 ### 🐟 Fish-like UX
 
-- 🎨 **Real-time syntax highlighting** as you type
-- ⚡ **Auto-completion** for commands (PATH binaries, builtins) and file paths
-- 📜 History-based suggestions powered by `reedline`
+- **Real-time syntax highlighting** as you type
+- **Auto-completion** for commands (PATH binaries, builtins) and file paths
+- History-based suggestions powered by `reedline`
 
 ### 📦 The Black Box
 
-- 🗃️ Every command execution is **persisted** — command, timestamp, working directory, exit code
-- 💾 stdout/stderr outputs are stored in a **Git-like content-addressable blob storage** (SHA-256 + zstd compression)
-- 🔄 Ask Jarvis about _"last week's error"_ — even after restarting the shell
+- Every command execution is **persisted** — command, timestamp, working directory, exit code
+- stdout/stderr outputs are stored in a **Git-like content-addressable blob storage** (SHA-256 + zstd compression)
+- Ask Jarvis about _"last week's error"_ — even after restarting the shell
 
 ### 🔧 Shell Fundamentals
 
-- 🔀 **Pipelines** (`cmd1 | cmd2 | cmd3`)
-- 📂 **Redirects** (`>`, `>>`, `<`)
-- 🏠 **Tilde & variable expansion** (`~`, `$HOME`, `${VAR}`)
-- 📟 Full **PTY support** for interactive programs (vim, top, etc.)
+- **Pipelines** (`cmd1 | cmd2 | cmd3`)
+- **Redirects** (`>`, `>>`, `<`)
+- **Tilde & variable expansion** (`~`, `$HOME`, `${VAR}`)
+- Full **PTY support** for interactive programs (vim, top, etc.)
 
 ---
 
@@ -54,12 +50,12 @@
 
 ### Prerequisites
 
-| Requirement           | Details                                                   |
-| --------------------- | --------------------------------------------------------- |
-| 🦀 **Rust**           | Stable toolchain (Edition 2021)                           |
-| 🔑 **OpenAI API Key** | Required for AI features                                  |
-| 💻 **OS**             | macOS / Linux                                             |
-| 🔤 **NerdFont**       | Recommended for prompt icons (can be disabled via config) |
+| Requirement        | Details                                                   |
+| ------------------ | --------------------------------------------------------- |
+| **Rust**           | Stable toolchain (Edition 2021)                           |
+| **OpenAI API Key** | Required for AI features                                  |
+| **OS**             | macOS / Linux                                             |
+| **NerdFont**       | Recommended for prompt icons (can be disabled via config) |
 
 ### Install via Cargo
 
@@ -90,28 +86,30 @@ A default config file is automatically generated on first launch.
 
 ```toml
 [ai]
-model = "gpt-4o"        # AI model to use
-max_rounds = 10          # Max agent loop rounds
+model = "gpt-4o" # AI model to use
+max_rounds = 10 # Max agent loop rounds
+markdown_rendering = true # Set to false to disable Markdown rendering
 
 [alias]
-g = "git"                # Command aliases
+g = "git" # Command aliases
 ll = "ls -la"
 
 [export]
-PATH = "/usr/local/bin:$PATH"   # Environment variables set on startup
+PATH = "/usr/local/bin:$PATH" # Environment variables set on startup
 
 [prompt]
-nerd_font = true         # Set to false if NerdFont is not installed
+nerd_font = true # Set to false if NerdFont is not installed
 ```
 
-| Section    | Description                                                            |
-| ---------- | ---------------------------------------------------------------------- |
-| `[ai]`     | AI model name and agent loop limit                                     |
-| `[alias]`  | Command aliases (also manageable via `alias` / `unalias` builtins)     |
-| `[export]` | Environment variables applied on startup (supports `$VAR` expansion)   |
-| `[prompt]` | Prompt display settings (`nerd_font = false` disables NerdFont icons)  |
+| Section    | Description                                                           |
+| ---------- | --------------------------------------------------------------------- |
+| `[ai]`     | AI model name, agent loop limit, and Markdown rendering toggle        |
+| `[alias]`  | Command aliases (also manageable via `alias` / `unalias` builtins)    |
+| `[export]` | Environment variables applied on startup (supports `$VAR` expansion)  |
+| `[prompt]` | Prompt display settings (`nerd_font = false` disables NerdFont icons) |
 
 > **Tip**: You can reload the config at runtime with the `source` builtin command:
+>
 > ```bash
 > source ~/.config/jarvish/config.toml
 > ```
@@ -141,12 +139,12 @@ graph TB
     C --> C2[("blobs/ (SHA-256 + zstd)")]
 ```
 
-| Component               | Description                                                                                       |
-| ----------------------- | ------------------------------------------------------------------------------------------------- |
-| 🖊️ **Line Editor**      | REPL interface powered by `reedline` with syntax highlighting, completion, and history            |
-| ⚙️ **Execution Engine** | Routes input to builtins or external commands; captures I/O via PTY teeing                        |
-| 📦 **Black Box**        | Persists all execution history and outputs (SQLite index + content-addressable blob store)        |
-| 🧠 **AI Brain**         | Classifies input as command vs. natural language; provides context-aware AI assistance via OpenAI |
+| Component            | Description                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------------- |
+| **Line Editor**      | REPL interface powered by `reedline` with syntax highlighting, completion, and history            |
+| **Execution Engine** | Routes input to builtins or external commands; captures I/O via PTY teeing                        |
+| **Black Box**        | Persists all execution history and outputs (SQLite index + content-addressable blob store)        |
+| **AI Brain**         | Classifies input as command vs. natural language; provides context-aware AI assistance via OpenAI |
 
 ---
 
@@ -188,7 +186,7 @@ The CI runs on every push and PR to `main`:
 
 | Job       | Command                                     |
 | --------- | ------------------------------------------- |
-| ✅ Check  | `cargo check --all-targets`                 |
-| 🧪 Test   | `cargo test --all-targets`                  |
-| 📐 Format | `cargo fmt --all -- --check`                |
-| 📎 Clippy | `cargo clippy --all-targets -- -D warnings` |
+| Check  | `cargo check --all-targets`                 |
+| Test   | `cargo test --all-targets`                  |
+| Format | `cargo fmt --all -- --check`                |
+| Clippy | `cargo clippy --all-targets -- -D warnings` |

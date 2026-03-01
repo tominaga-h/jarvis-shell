@@ -3,15 +3,18 @@
 //! - 先頭トークン: PATH 内の実行可能コマンド + ビルトイン (cd, cwd, exit)
 //! - それ以降: カレントディレクトリ基準のファイル / ディレクトリ名
 //!
-//! `InputClassifier` の PATH キャッシュを共有参照し、
-//! `export PATH=...` 等による動的変更を即座に反映する。
+//! fish shell の設計思想に倣い、インメモリキャッシュを持たず、
+//! Tab 押下時にリアルタイムで `$PATH` を走査する（キャッシュレス設計）。
+//! `brew install` 等で新しいバイナリが追加された直後でも即座に補完候補に出現する。
 
+use std::collections::HashMap;
 use std::fs;
-use std::sync::Arc;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use std::sync::RwLock;
 
 use reedline::{Completer, Span, Suggestion};
 
-use crate::engine::classifier::InputClassifier;
 use crate::engine::expand;
 
 /// ビルトインコマンド名（補完候補に常に含める）
@@ -32,43 +35,41 @@ const GIT_BRANCH_SUBCOMMANDS: &[&str] = &[
 
 /// Jarvish 用の補完エンジン
 ///
-/// `InputClassifier` の PATH キャッシュを `Arc` で共有し、
-/// PATH 変更時のリロードが自動的に補完候補にも反映される。
+/// `$PATH` の走査はキャッシュレスだが、Git エイリアスの解決結果は
+/// CWD ごとにインメモリキャッシュする（`includeIf` 等のディレクトリ依存設定に対応）。
 pub struct JarvishCompleter {
-    /// PATH キャッシュの共有参照元
-    classifier: Arc<InputClassifier>,
+    /// CWD ごとの Git エイリアスマップ: `{ CWD: { "co": "checkout", "b": "branch", ... } }`
+    git_aliases_cache: RwLock<HashMap<PathBuf, HashMap<String, String>>>,
 }
 
 impl JarvishCompleter {
-    /// `InputClassifier` の PATH キャッシュを共有して初期化する。
-    pub fn new(classifier: Arc<InputClassifier>) -> Self {
-        Self { classifier }
+    pub fn new() -> Self {
+        Self {
+            git_aliases_cache: RwLock::new(HashMap::new()),
+        }
     }
 
     // ========== 補完ロジック ==========
 
     /// コマンド名補完（先頭トークン）
     ///
-    /// `InputClassifier` の PATH キャッシュ + ビルトインコマンドから候補を生成する。
+    /// `$PATH` をリアルタイム走査し、ビルトインコマンドと合わせて候補を生成する。
     fn complete_command(&self, partial: &str, span: Span) -> Vec<Suggestion> {
-        let path_commands = self.classifier.path_commands();
+        let mut matches = Self::scan_path_commands(partial);
 
-        // PATH コマンド + ビルトインからマッチするものを収集
-        let mut matches: Vec<&str> = path_commands
-            .iter()
-            .map(|s| s.as_str())
-            .chain(BUILTIN_COMMANDS.iter().copied())
-            .filter(|cmd| cmd.starts_with(partial))
-            .collect();
+        for cmd in BUILTIN_COMMANDS {
+            if cmd.starts_with(partial) {
+                matches.push(cmd.to_string());
+            }
+        }
 
-        // ソート & 重複除去
         matches.sort_unstable();
         matches.dedup();
 
         matches
             .into_iter()
             .map(|cmd| Suggestion {
-                value: cmd.to_string(),
+                value: cmd,
                 description: None,
                 style: None,
                 extra: None,
@@ -77,6 +78,38 @@ impl JarvishCompleter {
                 match_indices: None,
             })
             .collect()
+    }
+
+    /// `$PATH` 上の実行可能ファイルのうち、`prefix` に前方一致するものを収集する。
+    ///
+    /// 実行権限チェック (`mode & 0o111 != 0`) を行い、
+    /// README 等の非実行ファイルを除外する。
+    fn scan_path_commands(prefix: &str) -> Vec<String> {
+        let path_var = match std::env::var("PATH") {
+            Ok(p) => p,
+            Err(_) => return vec![],
+        };
+
+        let mut commands = Vec::new();
+        for dir in std::env::split_paths(&path_var) {
+            let entries = match fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if !name.starts_with(prefix) {
+                        continue;
+                    }
+                    if let Ok(metadata) = fs::metadata(entry.path()) {
+                        if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+                            commands.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        commands
     }
 
     /// ファイル / ディレクトリパス補完（第 2 トークン以降）
@@ -176,6 +209,64 @@ impl JarvishCompleter {
             .collect()
     }
 
+    /// Git エイリアスを解決する（CWD ごとの遅延評価キャッシュ付き）。
+    ///
+    /// `alias` に対応するエイリアス展開結果を返す。
+    /// 複数単語エイリアス（例: `checkout -b`）はそのまま返すため、
+    /// 呼び出し側で先頭語を取り出して使う。
+    fn resolve_git_alias(&self, alias: &str) -> Option<String> {
+        let cwd = std::env::current_dir().ok()?;
+
+        // キャッシュヒットを試みる（read lock）
+        if let Ok(cache) = self.git_aliases_cache.read() {
+            if let Some(aliases) = cache.get(&cwd) {
+                return aliases.get(alias).cloned();
+            }
+        }
+
+        // キャッシュミス: git config を実行してエイリアス一覧を取得
+        let aliases_map = Self::fetch_git_aliases();
+
+        let result = aliases_map.get(alias).cloned();
+
+        // キャッシュに格納（write lock）
+        if let Ok(mut cache) = self.git_aliases_cache.write() {
+            cache.insert(cwd, aliases_map);
+        }
+
+        result
+    }
+
+    /// `git config --get-regexp '^alias\.'` を実行し、エイリアスマップを構築する。
+    ///
+    /// 出力形式: `alias.co checkout\nalias.nb checkout -b\n`
+    /// git リポジトリ外など実行失敗時は空マップを返す。
+    fn fetch_git_aliases() -> HashMap<String, String> {
+        let output = match std::process::Command::new("git")
+            .args(["config", "--get-regexp", "^alias\\."])
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            _ => return HashMap::new(),
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut map = HashMap::new();
+
+        for line in stdout.lines() {
+            // "alias.co checkout" -> ("co", "checkout")
+            // "alias.nb checkout -b" -> ("nb", "checkout -b")
+            if let Some(rest) = line.strip_prefix("alias.") {
+                if let Some((name, value)) = rest.split_once(' ') {
+                    map.insert(name.to_string(), value.to_string());
+                }
+            }
+        }
+
+        map
+    }
+
     // ========== ヘルパー ==========
 
     /// 部分パス文字列を「検索ディレクトリ」「ファイル名プレフィックス」「オリジナル dir 部分」に分割する。
@@ -243,15 +334,23 @@ impl Completer for JarvishCompleter {
             let tokens: Vec<&str> = line[..pos].split_whitespace().collect();
             let first_token = tokens.first().copied().unwrap_or("");
 
-            if first_token == "git"
-                && tokens.len() >= 2
-                && GIT_BRANCH_SUBCOMMANDS.contains(&tokens[1])
-            {
-                self.complete_git_branch(partial, span)
-            } else {
-                let dirs_only = first_token == "cd";
-                self.complete_path(partial, span, dirs_only)
+            if first_token == "git" && tokens.len() >= 2 {
+                let subcmd = tokens[1];
+
+                if GIT_BRANCH_SUBCOMMANDS.contains(&subcmd) {
+                    return self.complete_git_branch(partial, span);
+                }
+
+                if let Some(resolved) = self.resolve_git_alias(subcmd) {
+                    let main_cmd = resolved.split_whitespace().next().unwrap_or("");
+                    if GIT_BRANCH_SUBCOMMANDS.contains(&main_cmd) {
+                        return self.complete_git_branch(partial, span);
+                    }
+                }
             }
+
+            let dirs_only = first_token == "cd";
+            self.complete_path(partial, span, dirs_only)
         }
     }
 }
@@ -263,9 +362,8 @@ mod tests {
     use std::env;
     use std::fs;
 
-    /// テスト用の completer を作成するヘルパー
     fn test_completer() -> JarvishCompleter {
-        JarvishCompleter::new(Arc::new(InputClassifier::new()))
+        JarvishCompleter::new()
     }
 
     /// テスト用ディレクトリ構造を作成するヘルパー
@@ -638,5 +736,147 @@ mod tests {
             suggestions.is_empty(),
             "git add should not suggest anything for nonexistent prefix: {suggestions:?}"
         );
+    }
+
+    // ── Git エイリアス解決テスト ──
+
+    /// エイリアス付きテスト用 git リポジトリを作成する。
+    /// - `co` -> `checkout`
+    /// - `nb` -> `checkout -b`（複数単語エイリアス）
+    fn create_test_git_repo_with_aliases() -> tempfile::TempDir {
+        use std::process::Command;
+
+        let tmpdir = create_test_git_repo();
+        let dir = tmpdir.path();
+
+        Command::new("git")
+            .args(["config", "alias.co", "checkout"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "alias.nb", "checkout -b"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+
+        tmpdir
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_git_alias_returns_target() {
+        let tmpdir = create_test_git_repo_with_aliases();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let completer = test_completer();
+        let result = completer.resolve_git_alias("co");
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        assert_eq!(result, Some("checkout".to_string()));
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_git_alias_nonexistent_returns_none() {
+        let tmpdir = create_test_git_repo_with_aliases();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let completer = test_completer();
+        let result = completer.resolve_git_alias("zzz_no_such_alias");
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_git_alias_multi_word() {
+        let tmpdir = create_test_git_repo_with_aliases();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let completer = test_completer();
+        let result = completer.resolve_git_alias("nb");
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        assert_eq!(result, Some("checkout -b".to_string()));
+    }
+
+    #[test]
+    #[serial]
+    fn complete_git_alias_triggers_branch_completion() {
+        let tmpdir = create_test_git_repo_with_aliases();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut completer = test_completer();
+        let line = "git co test-";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&"test-feature"),
+            "git co (alias for checkout) should suggest 'test-feature': {values:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn complete_git_multi_word_alias_triggers_branch_completion() {
+        let tmpdir = create_test_git_repo_with_aliases();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut completer = test_completer();
+        let line = "git nb test-";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&"test-feature"),
+            "git nb (alias for checkout -b) should suggest 'test-feature': {values:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn cache_is_populated_after_first_call() {
+        let tmpdir = create_test_git_repo_with_aliases();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        // シンボリックリンク解決後の正規パス（macOS: /tmp -> /private/tmp）
+        let canonical_cwd = env::current_dir().unwrap();
+
+        let completer = test_completer();
+
+        // キャッシュが空であることを確認
+        {
+            let cache = completer.git_aliases_cache.read().unwrap();
+            assert!(cache.is_empty(), "cache should be empty before first call");
+        }
+
+        // エイリアス解決を呼ぶとキャッシュが投入される
+        let _ = completer.resolve_git_alias("co");
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let cache = completer.git_aliases_cache.read().unwrap();
+        assert_eq!(cache.len(), 1, "cache should have one CWD entry");
+        let aliases = cache.get(&canonical_cwd).unwrap();
+        assert_eq!(aliases.get("co"), Some(&"checkout".to_string()));
+        assert_eq!(aliases.get("nb"), Some(&"checkout -b".to_string()));
     }
 }

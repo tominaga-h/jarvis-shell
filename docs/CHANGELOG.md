@@ -3,6 +3,25 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.0.2](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.0.2) - 2026-03-01
+
+### Added
+
+- AI 応答の Markdown レンダリング対応 ([#27](https://github.com/tominaga-h/jarvis-shell/issues/27))
+- Markdown レンダリングの設定オプション (`markdown_rendering`)
+- `--version` / `-v` オプションの追加 ([#52](https://github.com/tominaga-h/jarvis-shell/issues/52))
+- Git エイリアスでのブランチ補完対応 ([#54](https://github.com/tominaga-h/jarvis-shell/issues/54))
+
+### Changed
+
+- `source` コマンドの出力結果を改善・表示変更 ([#55](https://github.com/tominaga-h/jarvis-shell/issues/55))
+- README の整備（ロゴ削除、不要な絵文字の削除、デモ GIF 追加）
+
+### Fixed
+
+- CPU 使用率のバグを修正 ([#47](https://github.com/tominaga-h/jarvis-shell/issues/47))
+- PATH キャッシュ問題を Fish Shell 方式でキャッシュレス化して解決 ([#51](https://github.com/tominaga-h/jarvis-shell/issues/51))
+
 ## [v1.0.1](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.0.1) - 2026-02-20
 
 ### Added
