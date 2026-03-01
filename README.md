@@ -5,8 +5,6 @@
 
 > 🌐 [日本語版 README はこちら](docs/README_ja.md)
 
----
-
 ## 💡 About
 
 > _"I want J.A.R.V.I.S. as my companion — but inside my terminal."_
@@ -15,36 +13,33 @@
 
 ![jarvish](images/jarvish-demo.gif)
 
----
-
 ## ✨ Features
 
-### 🧠 AI-Powered Assistance
+### AI-Powered Assistance
 
 - Talk to Jarvis in **natural language** — right from your shell prompt
 - When a command fails, Jarvis **automatically investigates** the error using stdout/stderr context
 - Jarvis can **read and write files**, execute commands as an AI agent with tool-calling capabilities
+- **AI Pipe (`| ai "..."`)**: Filter, transform, or extract data from command outputs using natural language (e.g., `cat access.log | ai "extract only 500 errors"`)
 
-### 🐟 Fish-like UX
+### Fish-like UX
 
 - **Real-time syntax highlighting** as you type
 - **Auto-completion** for commands (PATH binaries, builtins) and file paths
 - History-based suggestions powered by `reedline`
 
-### 📦 The Black Box
+### The Black Box
 
 - Every command execution is **persisted** — command, timestamp, working directory, exit code
 - stdout/stderr outputs are stored in a **Git-like content-addressable blob storage** (SHA-256 + zstd compression)
 - Ask Jarvis about _"last week's error"_ — even after restarting the shell
 
-### 🔧 Shell Fundamentals
+### Shell Fundamentals
 
 - **Pipelines** (`cmd1 | cmd2 | cmd3`)
 - **Redirects** (`>`, `>>`, `<`)
 - **Tilde & variable expansion** (`~`, `$HOME`, `${VAR}`)
 - Full **PTY support** for interactive programs (vim, top, etc.)
-
----
 
 ## 📦 Install
 
@@ -89,6 +84,7 @@ A default config file is automatically generated on first launch.
 model = "gpt-4o" # AI model to use
 max_rounds = 10 # Max agent loop rounds
 markdown_rendering = true # Set to false to disable Markdown rendering
+ai_pipe_max_chars = 50000 # Max characters for AI Pipe input
 
 [alias]
 g = "git" # Command aliases
@@ -101,12 +97,12 @@ PATH = "/usr/local/bin:$PATH" # Environment variables set on startup
 nerd_font = true # Set to false if NerdFont is not installed
 ```
 
-| Section    | Description                                                           |
-| ---------- | --------------------------------------------------------------------- |
-| `[ai]`     | AI model name, agent loop limit, and Markdown rendering toggle        |
-| `[alias]`  | Command aliases (also manageable via `alias` / `unalias` builtins)    |
-| `[export]` | Environment variables applied on startup (supports `$VAR` expansion)  |
-| `[prompt]` | Prompt display settings (`nerd_font = false` disables NerdFont icons) |
+| Section    | Description                                                                         |
+| ---------- | ----------------------------------------------------------------------------------- |
+| `[ai]`     | AI model name, agent loop limit, Markdown rendering toggle, and AI Pipe input limit |
+| `[alias]`  | Command aliases (also manageable via `alias` / `unalias` builtins)                  |
+| `[export]` | Environment variables applied on startup (supports `$VAR` expansion)                |
+| `[prompt]` | Prompt display settings (`nerd_font = false` disables NerdFont icons)               |
 
 > **Tip**: You can reload the config at runtime with the `source` builtin command:
 >
@@ -119,8 +115,6 @@ nerd_font = true # Set to false if NerdFont is not installed
 ```bash
 jarvish
 ```
-
----
 
 ## 🏗️ Architecture
 
@@ -146,8 +140,6 @@ graph TB
 | **Black Box**        | Persists all execution history and outputs (SQLite index + content-addressable blob store)        |
 | **AI Brain**         | Classifies input as command vs. natural language; provides context-aware AI assistance via OpenAI |
 
----
-
 ## 🛠️ Tech Stack
 
 | Category    | Crate            | Purpose                                |
@@ -162,8 +154,6 @@ graph TB
 | Paths       | `directories`    | XDG-compliant path resolution          |
 | Terminal    | `nu-ansi-term`   | ANSI color styling                     |
 | Logging     | `tracing`        | Structured logging with daily rotation |
-
----
 
 ## 👩‍💻 Development
 
@@ -184,8 +174,8 @@ make check  # Run format, clippy, check, and test
 
 The CI runs on every push and PR to `main`:
 
-| Job       | Command                                     |
-| --------- | ------------------------------------------- |
+| Job    | Command                                     |
+| ------ | ------------------------------------------- |
 | Check  | `cargo check --all-targets`                 |
 | Test   | `cargo test --all-targets`                  |
 | Format | `cargo fmt --all -- --check`                |
