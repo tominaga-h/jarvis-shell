@@ -21,28 +21,28 @@
 
 ### 🧠 AI-Powered Assistance
 
-- 💬 Talk to Jarvis in **natural language** — right from your shell prompt
-- 🔍 When a command fails, Jarvis **automatically investigates** the error using stdout/stderr context
-- 🛠️ Jarvis can **read and write files**, execute commands as an AI agent with tool-calling capabilities
+- Talk to Jarvis in **natural language** — right from your shell prompt
+- When a command fails, Jarvis **automatically investigates** the error using stdout/stderr context
+- Jarvis can **read and write files**, execute commands as an AI agent with tool-calling capabilities
 
 ### 🐟 Fish-like UX
 
-- 🎨 **Real-time syntax highlighting** as you type
-- ⚡ **Auto-completion** for commands (PATH binaries, builtins) and file paths
-- 📜 History-based suggestions powered by `reedline`
+- **Real-time syntax highlighting** as you type
+- **Auto-completion** for commands (PATH binaries, builtins) and file paths
+- History-based suggestions powered by `reedline`
 
 ### 📦 The Black Box
 
-- 🗃️ Every command execution is **persisted** — command, timestamp, working directory, exit code
-- 💾 stdout/stderr outputs are stored in a **Git-like content-addressable blob storage** (SHA-256 + zstd compression)
-- 🔄 Ask Jarvis about _"last week's error"_ — even after restarting the shell
+- Every command execution is **persisted** — command, timestamp, working directory, exit code
+- stdout/stderr outputs are stored in a **Git-like content-addressable blob storage** (SHA-256 + zstd compression)
+- Ask Jarvis about _"last week's error"_ — even after restarting the shell
 
 ### 🔧 Shell Fundamentals
 
-- 🔀 **Pipelines** (`cmd1 | cmd2 | cmd3`)
-- 📂 **Redirects** (`>`, `>>`, `<`)
-- 🏠 **Tilde & variable expansion** (`~`, `$HOME`, `${VAR}`)
-- 📟 Full **PTY support** for interactive programs (vim, top, etc.)
+- **Pipelines** (`cmd1 | cmd2 | cmd3`)
+- **Redirects** (`>`, `>>`, `<`)
+- **Tilde & variable expansion** (`~`, `$HOME`, `${VAR}`)
+- Full **PTY support** for interactive programs (vim, top, etc.)
 
 ---
 
@@ -50,12 +50,12 @@
 
 ### Prerequisites
 
-| Requirement           | Details                                                   |
-| --------------------- | --------------------------------------------------------- |
-| 🦀 **Rust**           | Stable toolchain (Edition 2021)                           |
-| 🔑 **OpenAI API Key** | Required for AI features                                  |
-| 💻 **OS**             | macOS / Linux                                             |
-| 🔤 **NerdFont**       | Recommended for prompt icons (can be disabled via config) |
+| Requirement        | Details                                                   |
+| ------------------ | --------------------------------------------------------- |
+| **Rust**           | Stable toolchain (Edition 2021)                           |
+| **OpenAI API Key** | Required for AI features                                  |
+| **OS**             | macOS / Linux                                             |
+| **NerdFont**       | Recommended for prompt icons (can be disabled via config) |
 
 ### Install via Cargo
 
@@ -101,14 +101,15 @@ PATH = "/usr/local/bin:$PATH" # Environment variables set on startup
 nerd_font = true # Set to false if NerdFont is not installed
 ```
 
-| Section    | Description                                                            |
-| ---------- | ---------------------------------------------------------------------- |
-| `[ai]`     | AI model name, agent loop limit, and Markdown rendering toggle         |
-| `[alias]`  | Command aliases (also manageable via `alias` / `unalias` builtins)     |
-| `[export]` | Environment variables applied on startup (supports `$VAR` expansion)   |
-| `[prompt]` | Prompt display settings (`nerd_font = false` disables NerdFont icons)  |
+| Section    | Description                                                           |
+| ---------- | --------------------------------------------------------------------- |
+| `[ai]`     | AI model name, agent loop limit, and Markdown rendering toggle        |
+| `[alias]`  | Command aliases (also manageable via `alias` / `unalias` builtins)    |
+| `[export]` | Environment variables applied on startup (supports `$VAR` expansion)  |
+| `[prompt]` | Prompt display settings (`nerd_font = false` disables NerdFont icons) |
 
 > **Tip**: You can reload the config at runtime with the `source` builtin command:
+>
 > ```bash
 > source ~/.config/jarvish/config.toml
 > ```
@@ -138,12 +139,12 @@ graph TB
     C --> C2[("blobs/ (SHA-256 + zstd)")]
 ```
 
-| Component               | Description                                                                                       |
-| ----------------------- | ------------------------------------------------------------------------------------------------- |
-| 🖊️ **Line Editor**      | REPL interface powered by `reedline` with syntax highlighting, completion, and history            |
-| ⚙️ **Execution Engine** | Routes input to builtins or external commands; captures I/O via PTY teeing                        |
-| 📦 **Black Box**        | Persists all execution history and outputs (SQLite index + content-addressable blob store)        |
-| 🧠 **AI Brain**         | Classifies input as command vs. natural language; provides context-aware AI assistance via OpenAI |
+| Component            | Description                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------------- |
+| **Line Editor**      | REPL interface powered by `reedline` with syntax highlighting, completion, and history            |
+| **Execution Engine** | Routes input to builtins or external commands; captures I/O via PTY teeing                        |
+| **Black Box**        | Persists all execution history and outputs (SQLite index + content-addressable blob store)        |
+| **AI Brain**         | Classifies input as command vs. natural language; provides context-aware AI assistance via OpenAI |
 
 ---
 
@@ -185,7 +186,7 @@ The CI runs on every push and PR to `main`:
 
 | Job       | Command                                     |
 | --------- | ------------------------------------------- |
-| ✅ Check  | `cargo check --all-targets`                 |
-| 🧪 Test   | `cargo test --all-targets`                  |
-| 📐 Format | `cargo fmt --all -- --check`                |
-| 📎 Clippy | `cargo clippy --all-targets -- -D warnings` |
+| Check  | `cargo check --all-targets`                 |
+| Test   | `cargo test --all-targets`                  |
+| Format | `cargo fmt --all -- --check`                |
+| Clippy | `cargo clippy --all-targets -- -D warnings` |
