@@ -20,8 +20,8 @@ use tracing::{debug, info, warn};
 
 use crate::engine::CommandResult;
 
-use super::prompts::{AI_PIPE_PROMPT, ERROR_INVESTIGATION_PROMPT, SYSTEM_PROMPT};
-use super::stream::{process_ai_pipe_stream, process_stream};
+use super::prompts::{ERROR_INVESTIGATION_PROMPT, SYSTEM_PROMPT};
+use super::stream::process_stream;
 use super::tools;
 use super::types::{AiResponse, ConversationResult, ConversationState};
 use crate::config::AiConfig;
@@ -35,8 +35,6 @@ pub struct JarvisAI {
     max_rounds: usize,
     /// AI レスポンスを Markdown としてレンダリングするか
     markdown_rendering: bool,
-    /// AI パイプの入力テキスト文字数上限
-    ai_pipe_max_chars: usize,
 }
 
 impl JarvisAI {
@@ -59,7 +57,6 @@ impl JarvisAI {
             model: ai_config.model.clone(),
             max_rounds: ai_config.max_rounds,
             markdown_rendering: ai_config.markdown_rendering,
-            ai_pipe_max_chars: ai_config.ai_pipe_max_chars,
         })
     }
 
@@ -70,12 +67,10 @@ impl JarvisAI {
         self.model = ai_config.model.clone();
         self.max_rounds = ai_config.max_rounds;
         self.markdown_rendering = ai_config.markdown_rendering;
-        self.ai_pipe_max_chars = ai_config.ai_pipe_max_chars;
         info!(
             model = %self.model,
             max_rounds = self.max_rounds,
             markdown_rendering = self.markdown_rendering,
-            ai_pipe_max_chars = self.ai_pipe_max_chars,
             "AI config updated"
         );
     }
@@ -206,55 +201,6 @@ impl JarvisAI {
         ));
 
         self.run_agent_loop(&mut state.messages).await
-    }
-
-    /// AI パイプ (`cmd | ai "prompt"`) を処理する。
-    ///
-    /// 手前パイプラインの stdout（`stdin_text`）とユーザー指示（`prompt`）を
-    /// AI に送信し、フィルタリング結果をプレーンテキストで返す。
-    /// 入力テキストが文字数上限を超える場合は `Err` を返す。
-    pub async fn process_ai_pipe(&self, stdin_text: &str, prompt: &str) -> Result<String> {
-        let char_count = stdin_text.chars().count();
-        let limit = self.ai_pipe_max_chars;
-
-        debug!(
-            prompt = %prompt,
-            input_chars = char_count,
-            limit = limit,
-            "process_ai_pipe() called"
-        );
-
-        if char_count > limit {
-            anyhow::bail!(
-                "input text exceeds the {limit} chars limit ({char_count} chars). \
-                 Use 'head' or 'tail' to reduce input, or increase 'ai_pipe_max_chars' in config.toml."
-            );
-        }
-
-        let user_message = format!("[User Instruction]\n{prompt}\n\n[Input Text]\n{stdin_text}");
-
-        let messages: Vec<ChatCompletionRequestMessage> = vec![
-            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                content: ChatCompletionRequestSystemMessageContent::Text(
-                    AI_PIPE_PROMPT.to_string(),
-                ),
-                name: None,
-            }),
-            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(user_message),
-                name: None,
-            }),
-        ];
-
-        let request = CreateChatCompletionRequest {
-            model: self.model.clone(),
-            messages,
-            stream: Some(true),
-            ..Default::default()
-        };
-
-        let raw = process_ai_pipe_stream(&self.client, request).await?;
-        Ok(sanitize_ai_pipe_output(&raw))
     }
 
     /// エージェントループを実行する共通メソッド。
@@ -425,70 +371,22 @@ impl JarvisAI {
     }
 }
 
-/// AI パイプ出力のサニタイズ。
-///
-/// LLM が指示に反して Markdown コードフェンスを出力した場合に除去する。
-fn sanitize_ai_pipe_output(text: &str) -> String {
-    let trimmed = text.trim();
-
-    // ``` で始まり ``` で終わる場合、コードフェンスを除去
-    if trimmed.starts_with("```") && trimmed.ends_with("```") && trimmed.len() > 6 {
-        let inner = &trimmed[3..trimmed.len() - 3];
-        // 先頭行は言語識別子の可能性があるのでスキップ
-        if let Some(newline_pos) = inner.find('\n') {
-            return inner[newline_pos + 1..].trim().to_string();
-        }
-    }
-
-    trimmed.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn new_fails_without_api_key() {
+        // OPENAI_API_KEY が空の場合にエラーを返すことを確認
         let original = std::env::var("OPENAI_API_KEY").ok();
         std::env::remove_var("OPENAI_API_KEY");
 
         let result = JarvisAI::new(&AiConfig::default());
         assert!(result.is_err());
 
+        // 元に戻す
         if let Some(key) = original {
             std::env::set_var("OPENAI_API_KEY", key);
         }
-    }
-
-    // ── sanitize_ai_pipe_output テスト ──
-
-    #[test]
-    fn sanitize_strips_code_fence_with_language() {
-        let input = "```json\n{\"key\": \"value\"}\n```";
-        assert_eq!(sanitize_ai_pipe_output(input), "{\"key\": \"value\"}");
-    }
-
-    #[test]
-    fn sanitize_strips_code_fence_without_language() {
-        let input = "```\nhello world\n```";
-        assert_eq!(sanitize_ai_pipe_output(input), "hello world");
-    }
-
-    #[test]
-    fn sanitize_preserves_plain_text() {
-        let input = "hello world\nsecond line";
-        assert_eq!(sanitize_ai_pipe_output(input), "hello world\nsecond line");
-    }
-
-    #[test]
-    fn sanitize_trims_whitespace() {
-        let input = "  \n  hello world  \n  ";
-        assert_eq!(sanitize_ai_pipe_output(input), "hello world");
-    }
-
-    #[test]
-    fn sanitize_handles_empty_string() {
-        assert_eq!(sanitize_ai_pipe_output(""), "");
-        assert_eq!(sanitize_ai_pipe_output("  "), "");
     }
 }

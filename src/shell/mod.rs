@@ -152,7 +152,7 @@ impl Shell {
         // サマリー出力（config.toml のセクション順: ai, alias, export, prompt）
         let summary = format!(
             "Loaded {}\n\
-             \x20 [ai]      model: {}, max_rounds: {}, markdown_rendering: {}, ai_pipe_max_chars: {}\n\
+             \x20 [ai]      model: {}, max_rounds: {}, markdown_rendering: {}\n\
              \x20 [alias]   {} {}\n\
              \x20 [export]  {} {}\n\
              \x20 [prompt]  nerd_font: {}\n",
@@ -160,7 +160,6 @@ impl Shell {
             config.ai.model,
             config.ai.max_rounds,
             config.ai.markdown_rendering,
-            config.ai.ai_pipe_max_chars,
             config.alias.len(),
             if config.alias.len() == 1 {
                 "entry"
