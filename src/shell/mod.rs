@@ -149,13 +149,29 @@ impl Shell {
         // [prompt] を反映
         self.prompt.update_config(config.prompt.clone());
 
-        // サマリー出力
+        // サマリー出力（config.toml のセクション順: ai, alias, export, prompt）
         let summary = format!(
-            "Loaded {} (alias: {}, export: {}, ai.model: {}, nerd_font: {})\n",
+            "Loaded {}\n\
+             \x20 [ai]      model: {}, max_rounds: {}, markdown_rendering: {}\n\
+             \x20 [alias]   {} {}\n\
+             \x20 [export]  {} {}\n\
+             \x20 [prompt]  nerd_font: {}\n",
             path.display(),
-            config.alias.len(),
-            config.export.len(),
             config.ai.model,
+            config.ai.max_rounds,
+            config.ai.markdown_rendering,
+            config.alias.len(),
+            if config.alias.len() == 1 {
+                "entry"
+            } else {
+                "entries"
+            },
+            config.export.len(),
+            if config.export.len() == 1 {
+                "entry"
+            } else {
+                "entries"
+            },
             config.prompt.nerd_font,
         );
         print!("{summary}");
