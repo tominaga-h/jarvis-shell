@@ -97,7 +97,9 @@ impl Highlighter for JarvisHighlighter {
                 // `>>` の場合は2文字まとめてハイライト
                 let mut op = c.to_string();
                 if c == '>' && chars.peek() == Some(&'>') {
-                    op.push(chars.next().unwrap());
+                    if let Some(next_ch) = chars.next() {
+                        op.push(next_ch);
+                    }
                 }
                 styled.push((Style::new().fg(Color::Cyan).bold(), op));
                 is_command = false;

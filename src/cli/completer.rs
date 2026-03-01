@@ -31,6 +31,7 @@ const GIT_BRANCH_SUBCOMMANDS: &[&str] = &[
     "log",
     "cherry-pick",
     "reset",
+    "push",
 ];
 
 /// Jarvish 用の補完エンジン

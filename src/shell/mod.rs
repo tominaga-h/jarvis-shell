@@ -36,13 +36,17 @@ pub struct Shell {
     aliases: HashMap<String, String>,
     /// Farewell メッセージが既に表示済みかどうか（AI goodbye 等で表示済みの場合 true）
     farewell_shown: bool,
+    /// コマンド履歴（reedline 矢印キー・ヒンター）が利用可能か
+    history_available: bool,
+    /// ロギングシステムがファイルに書き込み可能か
+    logging_operational: bool,
 }
 
 impl Shell {
     /// 新しい Shell インスタンスを作成する。
     ///
     /// 設定ファイル、入力分類器、エディタ、プロンプト、BlackBox、AI クライアントを初期化する。
-    pub fn new() -> Self {
+    pub fn new(logging_operational: bool) -> Self {
         // 設定ファイルの読み込み
         let config = JarvishConfig::load();
 
@@ -57,7 +61,7 @@ impl Shell {
         let data_dir = BlackBox::data_dir();
 
         let db_path = data_dir.join("history.db");
-        let reedline = editor::build_editor(Arc::clone(&classifier), db_path);
+        let (reedline, history_available) = editor::build_editor(Arc::clone(&classifier), db_path);
 
         // 直前コマンドの終了コードを共有するアトミック変数
         // 初期値は EXIT_CODE_NONE（未設定）。コマンド実行時に実際の終了コードで上書きされる。
@@ -102,6 +106,8 @@ impl Shell {
             classifier,
             aliases: config.alias,
             farewell_shown: false,
+            history_available,
+            logging_operational,
         }
     }
 
@@ -152,7 +158,7 @@ impl Shell {
         // サマリー出力（config.toml のセクション順: ai, alias, export, prompt）
         let summary = format!(
             "Loaded {}\n\
-             \x20 [ai]      model: {}, max_rounds: {}, markdown_rendering: {}\n\
+             \x20 [ai]      model: {}, max_rounds: {}, markdown_rendering: {}, ai_pipe_max_chars: {}\n\
              \x20 [alias]   {} {}\n\
              \x20 [export]  {} {}\n\
              \x20 [prompt]  nerd_font: {}\n",
@@ -160,6 +166,7 @@ impl Shell {
             config.ai.model,
             config.ai.max_rounds,
             config.ai.markdown_rendering,
+            config.ai.ai_pipe_max_chars,
             config.alias.len(),
             if config.alias.len() == 1 {
                 "entry"
@@ -189,7 +196,20 @@ impl Shell {
     /// - `exit N`: 引数で指定された終了コード
     /// - REPL 内部エラー: `1`
     pub async fn run(&mut self) -> i32 {
-        crate::cli::banner::print_welcome();
+        let mut offline = Vec::new();
+        if !self.logging_operational {
+            offline.push("Logging offline");
+        }
+        if !self.history_available {
+            offline.push("Command History offline");
+        }
+        if self.black_box.is_none() {
+            offline.push("Black Box offline");
+        }
+        if self.ai_client.is_none() {
+            offline.push("AI module offline");
+        }
+        crate::cli::banner::print_welcome(&offline);
 
         let mut repl_error = false;
 

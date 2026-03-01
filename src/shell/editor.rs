@@ -21,20 +21,13 @@ use crate::storage::BlackBoxHistory;
 /// reedline エディタを構築する。
 ///
 /// `db_path` は BlackBox と共有する `history.db` へのパス。
-pub fn build_editor(classifier: Arc<InputClassifier>, db_path: PathBuf) -> Reedline {
+///
+/// # Returns
+/// `(Reedline, bool)` — `bool` はコマンド履歴の読み込みに成功したかどうか。
+/// `false` の場合、矢印キー履歴とオートサジェスト（ヒンター）は無効。
+pub fn build_editor(classifier: Arc<InputClassifier>, db_path: PathBuf) -> (Reedline, bool) {
     let completer = Box::new(JarvishCompleter::new());
     let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
-
-    // コマンド履歴を BlackBox の SQLite テーブル (command_history) で管理
-    let history =
-        Box::new(BlackBoxHistory::open(db_path).expect("failed to open history database"));
-
-    // Fish ライクなオートサジェスト（履歴からグレーテキストで候補を表示）
-    let hinter = Box::new(
-        DefaultHinter::default()
-            .with_style(Style::new().fg(Color::DarkGray))
-            .with_min_chars(2),
-    );
 
     let mut keybindings = default_emacs_keybindings();
     keybindings.add_binding(
@@ -46,11 +39,29 @@ pub fn build_editor(classifier: Arc<InputClassifier>, db_path: PathBuf) -> Reedl
         ]),
     );
 
-    Reedline::create()
-        .with_history(history)
-        .with_hinter(hinter)
+    let mut editor = Reedline::create()
         .with_highlighter(Box::new(JarvisHighlighter::new(classifier)))
         .with_completer(completer)
         .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
-        .with_edit_mode(Box::new(Emacs::new(keybindings)))
+        .with_edit_mode(Box::new(Emacs::new(keybindings)));
+
+    // コマンド履歴を BlackBox の SQLite テーブル (command_history) で管理。
+    // DB オープンに失敗した場合は警告を出力し、履歴・ヒンターなしで動作を継続する。
+    let history_available = match BlackBoxHistory::open(db_path) {
+        Ok(history) => {
+            let hinter = Box::new(
+                DefaultHinter::default()
+                    .with_style(Style::new().fg(Color::DarkGray))
+                    .with_min_chars(2),
+            );
+            editor = editor.with_history(Box::new(history)).with_hinter(hinter);
+            true
+        }
+        Err(e) => {
+            eprintln!("jarvish: warning: failed to open history database: {e}");
+            false
+        }
+    };
+
+    (editor, history_available)
 }

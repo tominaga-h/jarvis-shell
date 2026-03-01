@@ -7,6 +7,22 @@ use termimad::{rgb, CompoundStyle, MadSkin, StyledChar};
 
 use super::color::{red, white};
 
+/// スピナーを生成・開始する共通ヘルパー。
+///
+/// `template` に `{spinner}` と `{msg}` を含むテンプレート文字列を渡す。
+/// テンプレートが不正な場合はデフォルトスタイルにフォールバックする。
+fn create_spinner(template: &str, message: &str) -> ProgressBar {
+    let spinner = ProgressBar::new_spinner();
+    let style = ProgressStyle::default_spinner()
+        .template(template)
+        .unwrap_or_else(|_| ProgressStyle::default_spinner())
+        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏");
+    spinner.set_style(style);
+    spinner.set_message(message.to_string());
+    spinner.enable_steady_tick(Duration::from_millis(80));
+    spinner
+}
+
 /// Jarvis が発話するときに使う共通関数。
 /// 先頭に 🤵 絵文字を付与し、白色テキストで表示する。
 pub fn jarvis_talk(message: &str) {
@@ -22,34 +38,19 @@ pub fn jarvis_notice(command: &str) {
 /// メッセージを `println!` で永続出力し、スピナーを分離して返す。
 /// 呼び出し元で `finish_and_clear()` を呼んでスピナーを停止すること。
 pub fn jarvis_read_file(path: &str) -> ProgressBar {
-    println!("📖 Reading file: {path}");
-    let spinner = ProgressBar::new_spinner();
-    spinner.enable_steady_tick(Duration::from_millis(80));
-    spinner
+    create_spinner("📖 {spinner} Reading file: {msg}", path)
 }
 
 /// Jarvis がファイルを書き込むときに使う共通関数。
-/// メッセージを `println!` で永続出力し、スピナーを分離して返す。
 /// 呼び出し元で `finish_and_clear()` を呼んでスピナーを停止すること。
 pub fn jarvis_write_file(path: &str) -> ProgressBar {
-    println!("📝 Writing file: {path}");
-    let spinner = ProgressBar::new_spinner();
-    spinner.enable_steady_tick(Duration::from_millis(80));
-    spinner
+    create_spinner("📝 {spinner} Writing file: {msg}", path)
 }
 
 /// AI 処理中に表示するスピナーを生成・開始する。
 /// `{msg}` を含むテンプレートにより、進捗メッセージを動的に更新できる。
 pub fn jarvis_spinner() -> ProgressBar {
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::default_spinner()
-            .template("🤵 {spinner} {msg}")
-            .expect("Invalid spinner template"),
-    );
-    spinner.set_message("Thinking...");
-    spinner.enable_steady_tick(Duration::from_millis(80));
-    spinner
+    create_spinner("🤵 {spinner} {msg}", "Thinking...")
 }
 
 /// Jarvish 専用の Markdown スキンを構築する。
@@ -107,6 +108,13 @@ pub fn jarvis_render_markdown(text: &str) {
 /// Markdown をレンダリングせず、プレーンテキストとしてそのまま表示する。
 pub fn jarvis_print_plain(text: &str) {
     println!("🤵 {text}");
+}
+
+/// Jarvis ペルソナなしで Markdown テキストをレンダリングする。
+/// AI パイプなど、🤵 プレフィックスが不要な場面で使用する。
+pub fn render_markdown(text: &str) {
+    let skin = jarvish_skin();
+    skin.print_text(text);
 }
 
 /// コマンド異常終了時にユーザーへ調査の可否を確認する。

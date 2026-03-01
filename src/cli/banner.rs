@@ -18,7 +18,10 @@ fn time_greeting() -> &'static str {
 }
 
 /// シェル起動時の Welcome バナーを表示する。
-pub fn print_welcome() {
+///
+/// `offline_systems` にオフラインのサブシステム名を渡すと、
+/// "All systems are operational." の代わりに状態を報告する。
+pub fn print_welcome(offline_systems: &[&str]) {
     let version = env!("CARGO_PKG_VERSION");
     let greeting = time_greeting();
 
@@ -47,7 +50,16 @@ pub fn print_welcome() {
     println!("{}", yellow(&version_line));
     println!("{}", cyan(separator));
     println!();
-    jarvis_talk(&format!("{greeting}, sir. All systems are operational."));
+
+    if offline_systems.is_empty() {
+        jarvis_talk(&format!("{greeting}, sir. All systems are operational."));
+    } else {
+        let detail = offline_systems.join(", ");
+        jarvis_talk(&format!(
+            "{greeting}, sir. Partially operational — {detail}."
+        ));
+    }
+
     println!();
 }
 

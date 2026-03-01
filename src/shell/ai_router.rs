@@ -23,6 +23,18 @@ pub(super) struct AiRoutingResult {
     pub executed_command: Option<String>,
 }
 
+/// AI が提案したコマンドを実行し、stdout に実行記録を付与する。
+fn execute_ai_command(cmd: &str) -> CommandResult {
+    jarvis_notice(cmd);
+    let mut result = execute(cmd);
+    if result.stdout.is_empty() {
+        result.stdout = format!("[Jarvis executed: {cmd}]");
+    } else {
+        result.stdout = format!("[Jarvis executed: {cmd}]\n{}", result.stdout);
+    }
+    result
+}
+
 impl Shell {
     /// 自然言語入力を AI にルーティングする。
     ///
@@ -58,14 +70,7 @@ impl Shell {
                         command = %cmd,
                         "AI continued conversation with a command"
                     );
-                    jarvis_notice(cmd);
-                    let mut result = execute(cmd);
-                    if result.stdout.is_empty() {
-                        result.stdout = format!("[Jarvis executed: {cmd}]");
-                    } else {
-                        result.stdout = format!("[Jarvis executed: {cmd}]\n{}", result.stdout);
-                    }
-                    // 会話コンテキストを維持
+                    let result = execute_ai_command(cmd);
                     self.conversation_state = Some(conv);
                     AiRoutingResult {
                         result,
@@ -123,15 +128,7 @@ impl Shell {
                             command = %cmd,
                             "AI interpreted natural language as a command"
                         );
-                        // AI が自然言語からコマンドを解釈 → 実行前にアナウンス
-                        jarvis_notice(cmd);
-                        let mut result = execute(cmd);
-                        // AI が実行したコマンドをコンテキストとして stdout に記録
-                        if result.stdout.is_empty() {
-                            result.stdout = format!("[Jarvis executed: {cmd}]");
-                        } else {
-                            result.stdout = format!("[Jarvis executed: {cmd}]\n{}", result.stdout);
-                        }
+                        let result = execute_ai_command(cmd);
                         AiRoutingResult {
                             result,
                             from_tool_call: true,

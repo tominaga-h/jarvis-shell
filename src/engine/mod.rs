@@ -1,6 +1,6 @@
 pub mod builtins;
 pub mod classifier;
-mod dispatch;
+pub mod dispatch;
 pub mod exec;
 pub mod expand;
 mod io;
@@ -9,7 +9,7 @@ mod pty;
 mod redirect;
 mod terminal;
 
-pub use dispatch::{execute, try_builtin};
+pub use dispatch::{execute, try_builtin, try_execute_ai_pipe};
 
 /// REPL ループの制御アクション
 #[derive(Debug, Clone, PartialEq)]

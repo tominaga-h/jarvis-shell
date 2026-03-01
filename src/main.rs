@@ -45,11 +45,11 @@ async fn main() {
     };
 
     // ログシステムの初期化（_guard は main 終了まで保持する必要がある）
-    let _guard = logging::init_logging(log_dir_override);
+    let (_guard, logging_ok) = logging::init_logging(log_dir_override);
 
     info!("\n\n==== J.A.R.V.I.S.H. STARTED ====\n");
 
-    let mut shell = shell::Shell::new();
+    let mut shell = shell::Shell::new(logging_ok);
     let exit_code = shell.run().await;
 
     info!("\n\n==== J.A.R.V.I.S.H. SHUTTING DOWN ====\n\n");
