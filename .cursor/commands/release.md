@@ -62,6 +62,8 @@
    - `gh release create <タグ> --notes-file docs/release/<タグ>.md`
 5. **リリースビルド**
    - `make release`
+   - `gh release upload <タグ> ./target/release/jarvish`
+   - `cargo publish`
 
 #### フォールバック手順（ユーザーが NG を返した場合）
 
@@ -90,4 +92,6 @@ gh release create <タグ> --notes-file docs/release/<タグ>.md
 
 # リリースビルド
 make release
+gh release upload <タグ> ./target/release/jarvish
+cargo publish
 ```
