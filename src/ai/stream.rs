@@ -233,7 +233,7 @@ pub async fn process_ai_pipe_stream(
         }
     };
 
-    spinner.set_message("Filtering...");
+    spinner.set_message("Thinking...");
 
     let mut full_text = String::new();
     let mut started = false;

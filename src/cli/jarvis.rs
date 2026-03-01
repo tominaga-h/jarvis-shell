@@ -22,18 +22,29 @@ pub fn jarvis_notice(command: &str) {
 /// メッセージを `println!` で永続出力し、スピナーを分離して返す。
 /// 呼び出し元で `finish_and_clear()` を呼んでスピナーを停止すること。
 pub fn jarvis_read_file(path: &str) -> ProgressBar {
-    println!("📖 Reading file: {path}");
     let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("📖 {spinner} Reading file: {msg}")
+            .expect("Invalid spinner template")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+    );
+    spinner.set_message(path.to_string());
     spinner.enable_steady_tick(Duration::from_millis(80));
     spinner
 }
 
 /// Jarvis がファイルを書き込むときに使う共通関数。
-/// メッセージを `println!` で永続出力し、スピナーを分離して返す。
 /// 呼び出し元で `finish_and_clear()` を呼んでスピナーを停止すること。
 pub fn jarvis_write_file(path: &str) -> ProgressBar {
-    println!("📝 Writing file: {path}");
     let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("📝 {spinner} Writing file: {msg}")
+            .expect("Invalid spinner template")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+    );
+    spinner.set_message(path.to_string());
     spinner.enable_steady_tick(Duration::from_millis(80));
     spinner
 }
@@ -45,7 +56,8 @@ pub fn jarvis_spinner() -> ProgressBar {
     spinner.set_style(
         ProgressStyle::default_spinner()
             .template("🤵 {spinner} {msg}")
-            .expect("Invalid spinner template"),
+            .expect("Invalid spinner template")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
     );
     spinner.set_message("Thinking...");
     spinner.enable_steady_tick(Duration::from_millis(80));
