@@ -226,9 +226,17 @@ fn run_single_command_legacy(simple: &SimpleCommand) -> CommandResult {
         .any(|r| matches!(r, Redirect::StdoutOverwrite(_) | Redirect::StdoutAppend(_)));
 
     let final_stdout: Stdio = if has_stdout_redirect {
-        let file = find_stdout_redirect(&simple.redirects).expect("redirect checked above");
-        drop(stdout_writer);
-        file.into()
+        match find_stdout_redirect(&simple.redirects) {
+            Some(file) => {
+                drop(stdout_writer);
+                file.into()
+            }
+            None => {
+                let msg = "jarvish: internal error: stdout redirect not found\n".to_string();
+                eprint!("{msg}");
+                return CommandResult::error(msg, 1);
+            }
+        }
     } else {
         stdout_writer
     };
@@ -348,9 +356,18 @@ fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
                 .any(|r| matches!(r, Redirect::StdoutOverwrite(_) | Redirect::StdoutAppend(_)));
 
             let final_stdout: Stdio = if has_stdout_redirect {
-                let file = find_stdout_redirect(&simple.redirects).expect("redirect checked above");
-                drop(stdout_writer);
-                file.into()
+                match find_stdout_redirect(&simple.redirects) {
+                    Some(file) => {
+                        drop(stdout_writer);
+                        file.into()
+                    }
+                    None => {
+                        let msg =
+                            "jarvish: internal error: stdout redirect not found\n".to_string();
+                        eprint!("{msg}");
+                        return CommandResult::error(msg, 1);
+                    }
+                }
             } else {
                 stdout_writer
             };

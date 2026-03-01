@@ -108,11 +108,13 @@ fn log_dir() -> PathBuf {
 /// - フォーマット: タイムスタンプ + レベル + ターゲット + メッセージ
 ///
 /// # Returns
-/// `tracing_appender::non_blocking::WorkerGuard` を返す。
-/// このガードは `main()` で保持し続ける必要がある（ドロップするとログ出力が停止する）。
+/// `(WorkerGuard, bool)` を返す。
+/// - `WorkerGuard` は `main()` で保持し続ける必要がある（ドロップするとログ出力が停止する）。
+/// - `bool` はログファイルへの書き込みが正常に開始できたかどうか。
+///   `false` の場合、ログは sink（破棄）にフォールバックしている。
 pub fn init_logging(
     log_dir_override: Option<PathBuf>,
-) -> tracing_appender::non_blocking::WorkerGuard {
+) -> (tracing_appender::non_blocking::WorkerGuard, bool) {
     let log_dir = log_dir_override.unwrap_or_else(log_dir);
 
     // ログディレクトリが存在しない場合は作成
@@ -123,16 +125,22 @@ pub fn init_logging(
         );
     }
 
-    // JST ベースの日次ローテーションアペンダーを作成
-    let file_appender = JstRollingAppender::new(log_dir.clone(), "jarvish").unwrap_or_else(|e| {
-        panic!(
-            "jarvish: failed to create log file in {}: {e}",
-            log_dir.display()
-        )
-    });
+    // JST ベースの日次ローテーションアペンダーを作成。
+    // ログファイル作成に失敗した場合は stderr に警告を出力し、sink にフォールバック。
+    let (writer, operational): (Box<dyn Write + Send>, bool) =
+        match JstRollingAppender::new(log_dir.clone(), "jarvish") {
+            Ok(appender) => (Box::new(appender), true),
+            Err(e) => {
+                eprintln!(
+                    "jarvish: warning: failed to create log file in {}: {e}",
+                    log_dir.display()
+                );
+                (Box::new(std::io::sink()), false)
+            }
+        };
 
     // 非ブロッキング書き込み用のワーカーを作成
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    let (non_blocking, guard) = tracing_appender::non_blocking(writer);
 
     // JARVISH_LOG 環境変数でログレベルを制御（デフォルト: debug）
     let env_filter =
@@ -150,5 +158,5 @@ pub fn init_logging(
         .with_file(true) // ファイル名を表示（デバッグ用）
         .init();
 
-    guard
+    (guard, operational)
 }

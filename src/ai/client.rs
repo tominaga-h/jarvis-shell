@@ -26,6 +26,19 @@ use super::tools;
 use super::types::{AiResponse, ConversationResult, ConversationState};
 use crate::config::AiConfig;
 
+/// テキストのみのアシスタントメッセージを構築する。
+fn build_text_assistant_message(text: String) -> ChatCompletionRequestMessage {
+    ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+        content: Some(ChatCompletionRequestAssistantMessageContent::Text(text)),
+        refusal: None,
+        name: None,
+        audio: None,
+        tool_calls: None,
+        #[allow(deprecated)]
+        function_call: None,
+    })
+}
+
 /// J.A.R.V.I.S. AI クライアント
 pub struct JarvisAI {
     client: Client<OpenAIConfig>,
@@ -266,6 +279,7 @@ impl JarvisAI {
         &self,
         messages: &mut Vec<ChatCompletionRequestMessage>,
     ) -> Result<AiResponse> {
+        let model = self.model.clone();
         let tool_defs = tools::build_tools();
 
         for round in 0..self.max_rounds {
@@ -276,7 +290,7 @@ impl JarvisAI {
             );
 
             let request = CreateChatCompletionRequest {
-                model: self.model.clone(),
+                model: model.clone(),
                 messages: messages.clone(),
                 tools: Some(tool_defs.clone()),
                 stream: Some(true),
@@ -284,7 +298,7 @@ impl JarvisAI {
             };
 
             debug!(
-                model = %self.model,
+                model = %model,
                 message_count = messages.len(),
                 tools_count = tool_defs.len(),
                 stream = true,
@@ -303,20 +317,9 @@ impl JarvisAI {
                     text_length = stream_result.full_text.len(),
                     "Stream interrupted by Ctrl-C, returning partial result"
                 );
-                // 部分テキストがあれば会話履歴に追加（会話継続のため）
                 if !stream_result.full_text.is_empty() {
-                    messages.push(ChatCompletionRequestMessage::Assistant(
-                        ChatCompletionRequestAssistantMessage {
-                            content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-                                stream_result.full_text.clone(),
-                            )),
-                            refusal: None,
-                            name: None,
-                            audio: None,
-                            tool_calls: None,
-                            #[allow(deprecated)]
-                            function_call: None,
-                        },
+                    messages.push(build_text_assistant_message(
+                        stream_result.full_text.clone(),
                     ));
                 }
                 return Ok(AiResponse::NaturalLanguage(stream_result.full_text));
@@ -338,20 +341,9 @@ impl JarvisAI {
                     );
                 }
 
-                // 会話履歴にアシスタントの最終応答を追加（会話継続のため）
                 if !stream_result.full_text.is_empty() {
-                    messages.push(ChatCompletionRequestMessage::Assistant(
-                        ChatCompletionRequestAssistantMessage {
-                            content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-                                stream_result.full_text.clone(),
-                            )),
-                            refusal: None,
-                            name: None,
-                            audio: None,
-                            tool_calls: None,
-                            #[allow(deprecated)]
-                            function_call: None,
-                        },
+                    messages.push(build_text_assistant_message(
+                        stream_result.full_text.clone(),
                     ));
                 }
 
