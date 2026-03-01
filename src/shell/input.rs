@@ -13,8 +13,9 @@ use std::path::PathBuf;
 
 use crate::engine::builtins::{alias, source, unalias};
 use crate::engine::classifier::{is_ai_goodbye_response, InputType};
+use crate::engine::dispatch::AiPipeRequest;
 use crate::engine::expand;
-use crate::engine::{execute, try_builtin, CommandResult, LoopAction};
+use crate::engine::{execute, try_builtin, try_execute_ai_pipe, CommandResult, LoopAction};
 
 use super::Shell;
 
@@ -63,9 +64,15 @@ impl Shell {
                 return false;
             }
             InputType::Command => {
-                // コマンド → AI を介さず直接実行
-                debug!(input = %line, "Executing as command (no AI)");
-                (execute(&line), false, true, None)
+                // AI パイプ検出: `cmd | ai "prompt"` パターンをインターセプト
+                if let Some(ai_pipe_req) = try_execute_ai_pipe(&line) {
+                    debug!(input = %line, "AI pipe detected");
+                    let result = self.handle_ai_pipe(ai_pipe_req).await;
+                    (result, false, true, None)
+                } else {
+                    debug!(input = %line, "Executing as command (no AI)");
+                    (execute(&line), false, true, None)
+                }
             }
             InputType::NaturalLanguage => {
                 // 自然言語 → AI にルーティング
@@ -216,6 +223,48 @@ impl Shell {
                     warn!("Failed to record history: {e}");
                     eprintln!("jarvish: warning: failed to record history: {e}");
                 }
+            }
+        }
+    }
+
+    /// AI パイプリクエストを処理する。
+    ///
+    /// 手前パイプラインの stdout キャプチャ結果を AI に渡し、
+    /// フィルタリング結果を `CommandResult` として返す。
+    async fn handle_ai_pipe(&self, req: AiPipeRequest) -> CommandResult {
+        let ai = match self.ai_client {
+            Some(ref ai) => ai,
+            None => {
+                let msg = "jarvish: AI pipe requires OPENAI_API_KEY to be set.\n";
+                eprint!("{msg}");
+                return CommandResult::error(msg.to_string(), 1);
+            }
+        };
+
+        // stdout が空の場合は AI 呼び出しをスキップ
+        if req.stdin_text.is_empty() {
+            debug!(
+                exit_code = req.exit_code,
+                "AI pipe: source pipeline produced no stdout, skipping AI"
+            );
+            let msg = "jarvish: AI pipe: no input received from the source pipeline.\n";
+            eprint!("{msg}");
+            return CommandResult::error(msg.to_string(), req.exit_code.max(1));
+        }
+
+        debug!(
+            prompt = %req.prompt,
+            input_chars = req.stdin_text.chars().count(),
+            source_exit_code = req.exit_code,
+            "Processing AI pipe"
+        );
+
+        match ai.process_ai_pipe(&req.stdin_text, &req.prompt).await {
+            Ok(output) => CommandResult::success(output),
+            Err(e) => {
+                let msg = format!("jarvish: {e}\n");
+                eprint!("{msg}");
+                CommandResult::error(msg, 1)
             }
         }
     }
