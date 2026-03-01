@@ -13,7 +13,7 @@ use tracing::info;
 
 /// Next Generation AI Integrated Shell
 #[derive(Parser)]
-#[command(name = "jarvish")]
+#[command(name = "jarvish", version)]
 struct Args {
     /// デバッグモード: ログを ./var/logs に出力する
     #[arg(long)]
