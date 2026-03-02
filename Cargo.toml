@@ -18,7 +18,7 @@ name = "jarvish"
 path = "src/main.rs"
 
 [dependencies]
-reedline = "0.44"
+reedline = "0.45"
 os_pipe = "1.2"
 tokio = { version = "1", features = ["full"] }
 shell-words = "1"
