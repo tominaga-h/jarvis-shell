@@ -3,6 +3,19 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.1.1](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.1.1) - 2026-03-03
+
+### Fixed
+
+- プロンプト Git 情報取得時の CPU 使用率を改善（AsyncGitState の導入）([#49](https://github.com/tominaga-h/jarvis-shell/issues/49))
+- 日本語版 README のリンク切れを修正
+
+### Changed
+
+- CPU 使用率をデバッグログに組み込み ([#56](https://github.com/tominaga-h/jarvis-shell/issues/56))
+- reedline を 0.45 にアップデート
+- release コマンドの手順を追加・改善
+
 ## [v1.1.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.1.0) - 2026-03-02
 
 ### Added
