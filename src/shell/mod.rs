@@ -68,6 +68,7 @@ impl Shell {
         let last_exit_code = Arc::new(AtomicI32::new(EXIT_CODE_NONE));
 
         let prompt = JarvisPrompt::new(Arc::clone(&last_exit_code), config.prompt.clone());
+        prompt.refresh_git_status();
 
         // Black Box（履歴永続化）の初期化
         // BlackBox::open() ではなく open_at() を使い、フォールバック時も同じパスを使用する
@@ -220,6 +221,7 @@ impl Shell {
                     if !self.handle_input(&line).await {
                         break;
                     }
+                    self.prompt.refresh_git_status();
                 }
                 Ok(Signal::CtrlC) => {
                     info!("\n!!!! Ctrl-C received: do it nothing !!!!!\n");

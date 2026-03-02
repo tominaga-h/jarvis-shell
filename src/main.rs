@@ -46,6 +46,7 @@ async fn main() {
 
     // ログシステムの初期化（_guard は main 終了まで保持する必要がある）
     let (_guard, logging_ok) = logging::init_logging(log_dir_override);
+    logging::start_cpu_monitor();
 
     info!("\n\n==== J.A.R.V.I.S.H. STARTED ====\n");
 

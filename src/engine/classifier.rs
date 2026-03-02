@@ -3,10 +3,13 @@
 //! AI API を呼ばずに、ヒューリスティックとリアルタイム PATH 解決で
 //! ユーザー入力がシェルコマンドか自然言語かを瞬時に判定する。
 //!
-//! fish shell の設計思想に倣い、インメモリキャッシュを持たず、
-//! `which` クレートを用いて都度 `$PATH` を走査する（キャッシュレス設計）。
-//! OS の VFS キャッシュにより `stat()` は数μs で完了するため、
-//! キーストロークごとの呼び出しでも十分高速に動作する。
+//! `which` クレートを用いて `$PATH` を走査し、短寿命 TTL キャッシュで
+//! 同一トークンの重複走査を排除する。`brew install` 等で新しいバイナリが
+//! 追加された場合でも TTL 経過後に自動で反映される。
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use tracing::{debug, info};
 
@@ -21,17 +24,30 @@ pub enum InputType {
     Goodbye,
 }
 
-/// アルゴリズムベースの入力分類器（キャッシュレス設計）
+/// PATH lookup キャッシュの TTL（秒）。
 ///
-/// `which::which()` を用いてリアルタイムに `$PATH` 上の実行可能ファイルを検索する。
-/// インメモリキャッシュを持たないため、`brew install` 等で新しいバイナリが
-/// PATH 上に追加された直後でも、キャッシュ更新なしに即座にコマンドとして認識する。
-pub struct InputClassifier;
+/// この期間内は同一トークンに対する `which::which()` 呼び出しをスキップする。
+/// TTL 経過後は次回の `is_command_in_path()` 呼び出し時に再走査される。
+const PATH_CACHE_TTL_SECS: u64 = 5;
+
+/// アルゴリズムベースの入力分類器（TTL キャッシュ付き PATH 解決）
+///
+/// `which::which()` を用いて `$PATH` 上の実行可能ファイルを検索する。
+/// キーストロークごとのハイライト呼び出しによる CPU 負荷を抑えるため、
+/// コマンド名 → 存在有無のマッピングを短寿命キャッシュで保持する。
+pub struct InputClassifier {
+    /// PATH lookup キャッシュ: コマンド名 → (存在するか, キャッシュ時刻)
+    path_cache: Mutex<HashMap<String, (bool, Instant)>>,
+}
 
 impl InputClassifier {
     pub fn new() -> Self {
-        info!("InputClassifier initialized (cacheless, real-time PATH resolution)");
-        Self
+        info!(
+            "InputClassifier initialized (TTL-cached PATH resolution, TTL={PATH_CACHE_TTL_SECS}s)"
+        );
+        Self {
+            path_cache: Mutex::new(HashMap::new()),
+        }
     }
 
     /// ユーザー入力を分類する。
@@ -253,10 +269,36 @@ impl InputClassifier {
 
     /// 先頭トークンが `$PATH` 上の実行可能ファイルとして存在するか。
     ///
-    /// `which::which()` を用いてリアルタイムに PATH を走査する。
-    /// 実行権限チェックも内部で行われるため、README 等の非実行ファイルは除外される。
+    /// TTL キャッシュにより、同一トークンに対する `which::which()` の
+    /// 重複呼び出しを排除する。TTL 経過後は自動で再走査される。
     fn is_command_in_path(&self, token: &str) -> bool {
-        which::which(token).is_ok()
+        let now = Instant::now();
+
+        if let Ok(cache) = self.path_cache.lock() {
+            if let Some(&(result, cached_at)) = cache.get(token) {
+                if now.duration_since(cached_at).as_secs() < PATH_CACHE_TTL_SECS {
+                    return result;
+                }
+            }
+        }
+
+        let result = which::which(token).is_ok();
+
+        if let Ok(mut cache) = self.path_cache.lock() {
+            cache.insert(token.to_string(), (result, now));
+        }
+
+        result
+    }
+
+    /// PATH lookup キャッシュをクリアする。
+    ///
+    /// テストで PATH 変更後に即座に再走査させるために使用する。
+    #[cfg(test)]
+    fn clear_path_cache(&self) {
+        if let Ok(mut cache) = self.path_cache.lock() {
+            cache.clear();
+        }
     }
 
     /// 入力にシェル構文（パイプ、論理演算子、セミコロン、変数展開、代入）が含まれるか。
@@ -487,11 +529,13 @@ mod tests {
             std::env::set_var("PATH", &new_path);
         }
 
-        // キャッシュリロード不要 — 即座に Command として認識される
+        // TTL キャッシュをクリアして PATH 変更を即座に反映
+        c.clear_path_cache();
+
         assert_eq!(
             c.classify(fake_cmd),
             InputType::Command,
-            "should be Command immediately after PATH change (no reload needed)"
+            "should be Command after PATH change and cache clear"
         );
 
         // クリーンアップ
@@ -500,7 +544,9 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&tmp_dir);
 
-        // PATH を戻したら NaturalLanguage に戻る
+        // キャッシュクリアで PATH 復元を反映
+        c.clear_path_cache();
+
         assert_eq!(c.classify(fake_cmd), InputType::NaturalLanguage);
     }
 

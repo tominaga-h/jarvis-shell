@@ -1,7 +1,7 @@
 # 🤵 Jarvis Shell (jarvish)
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-![version](https://img.shields.io/badge/version-1.1.0-blue)
+![version](https://img.shields.io/badge/version-1.1.1-blue)
 
 > 🌐 [English README](../README.md)
 

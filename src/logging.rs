@@ -160,3 +160,55 @@ pub fn init_logging(
 
     (guard, operational)
 }
+
+// ---------------------------------------------------------------------------
+// CPU 使用率モニター
+// ---------------------------------------------------------------------------
+
+/// 自プロセスのCPU使用率を定期監視するバックグラウンドスレッドを起動する。
+///
+/// 2秒間隔でCPU使用率を計測し、閾値（10.0%）を超えた場合に warn レベルで
+/// ログ出力する。閾値未満の場合は debug レベルで記録する。
+/// スレッドはデーモンスレッドとして動作し、プロセス終了時に自動で停止する。
+pub fn start_cpu_monitor() {
+    use std::time::Duration;
+
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+
+    const INTERVAL: Duration = Duration::from_secs(2);
+    const CPU_THRESHOLD: f32 = 10.0;
+
+    std::thread::spawn(move || {
+        let pid = match sysinfo::get_current_pid() {
+            Ok(pid) => pid,
+            Err(e) => {
+                tracing::warn!("[CPU Monitor] Failed to get current PID: {e}");
+                return;
+            }
+        };
+
+        let refresh_kind = ProcessRefreshKind::nothing().with_cpu();
+        let pids = [pid];
+        let target = ProcessesToUpdate::Some(&pids);
+        let mut sys = sysinfo::System::new();
+
+        // ベースライン測定（sysinfo はCPU使用率算出に前回値が必要）
+        sys.refresh_processes_specifics(target, false, refresh_kind);
+        std::thread::sleep(INTERVAL);
+
+        loop {
+            sys.refresh_processes_specifics(target, false, refresh_kind);
+
+            if let Some(process) = sys.process(pid) {
+                let usage = process.cpu_usage();
+                if usage >= CPU_THRESHOLD {
+                    tracing::warn!("[CPU Monitor] High CPU usage detected: {usage:.1}%");
+                } else {
+                    tracing::debug!("[CPU Monitor] CPU usage: {usage:.1}%");
+                }
+            }
+
+            std::thread::sleep(INTERVAL);
+        }
+    });
+}
