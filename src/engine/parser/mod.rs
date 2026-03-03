@@ -3,90 +3,9 @@
 //! `shell_words::split()` で得たトークン列を、パイプライン（`|`）と
 //! リダイレクト（`>`, `>>`, `<`）を含む構造化された `Pipeline` に変換する。
 
-/// I/O リダイレクト
-#[derive(Debug, Clone, PartialEq)]
-pub enum Redirect {
-    /// `> file` — stdout を上書き
-    StdoutOverwrite(String),
-    /// `>> file` — stdout に追記
-    StdoutAppend(String),
-    /// `< file` — stdin をファイルから読み込み
-    StdinFrom(String),
-}
+mod types;
 
-/// パイプラインの 1 セグメント（単一コマンド）
-#[derive(Debug, Clone, PartialEq)]
-pub struct SimpleCommand {
-    /// コマンド名（例: "git"）
-    pub cmd: String,
-    /// コマンド引数（例: ["log", "--oneline"]）
-    pub args: Vec<String>,
-    /// このコマンドに付与されたリダイレクト
-    pub redirects: Vec<Redirect>,
-}
-
-/// パイプ（`|`）で接続された一連のコマンド
-#[derive(Debug, Clone, PartialEq)]
-pub struct Pipeline {
-    pub commands: Vec<SimpleCommand>,
-}
-
-impl Pipeline {
-    /// パイプラインの最後のコマンドが `ai` であれば、その引数（プロンプト）と、
-    /// AI コマンドを除いた新しい Pipeline を返す。
-    ///
-    /// 以下の場合は `None` を返す:
-    /// - 末尾のコマンドが `ai` でない
-    /// - `ai` に引数（プロンプト）が指定されていない
-    /// - `ai` の手前にコマンドがない（`ai` 単独）
-    pub fn extract_ai_filter(&self) -> Option<(String, Pipeline)> {
-        let last = self.commands.last()?;
-        if last.cmd != "ai" {
-            return None;
-        }
-        let prompt = last.args.join(" ");
-        if prompt.is_empty() {
-            return None;
-        }
-        let remaining = Pipeline {
-            commands: self.commands[..self.commands.len() - 1].to_vec(),
-        };
-        if remaining.commands.is_empty() {
-            return None;
-        }
-        Some((prompt, remaining))
-    }
-}
-
-/// コマンドリストの接続演算子
-#[derive(Debug, Clone, PartialEq)]
-pub enum Connector {
-    /// `&&` — 前のコマンドが成功 (exit_code == 0) した場合のみ次を実行
-    And,
-    /// `||` — 前のコマンドが失敗 (exit_code != 0) した場合のみ次を実行
-    Or,
-    /// `;` — 前のコマンドの結果に関わらず次を実行
-    Semi,
-}
-
-/// `&&`, `||`, `;` で接続された一連のパイプライン
-#[derive(Debug, Clone, PartialEq)]
-pub struct CommandList {
-    /// 先頭のパイプライン
-    pub first: Pipeline,
-    /// (接続演算子, パイプライン) のペアのリスト
-    pub rest: Vec<(Connector, Pipeline)>,
-}
-
-/// パースエラー
-#[derive(Debug, Clone, PartialEq)]
-pub struct ParseError(pub String);
-
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+pub use types::*;
 
 /// トークン列をコマンドリストにパースする。
 ///
@@ -110,9 +29,6 @@ pub fn parse_command_list(tokens: Vec<String>) -> Result<CommandList, ParseError
 }
 
 /// トークン列を `&&`, `||`, `;` で分割する。
-///
-/// 戻り値: (セグメント群, 接続演算子群)
-/// segments.len() == connectors.len() + 1 が常に成立する。
 fn split_by_connector(tokens: &[String]) -> Result<(Vec<Vec<String>>, Vec<Connector>), ParseError> {
     let mut segments: Vec<Vec<String>> = Vec::new();
     let mut connectors: Vec<Connector> = Vec::new();
@@ -151,7 +67,6 @@ fn split_by_connector(tokens: &[String]) -> Result<(Vec<Vec<String>>, Vec<Connec
         }
     }
 
-    // 最後のセグメント
     if current.is_empty() && !connectors.is_empty() {
         return Err(ParseError(
             "syntax error: unexpected end of command after connector".to_string(),
@@ -173,7 +88,6 @@ pub fn parse_pipeline(tokens: Vec<String>) -> Result<Pipeline, ParseError> {
         return Err(ParseError("empty command".to_string()));
     }
 
-    // トークン列を "|" で分割
     let segments = split_by_pipe(&tokens)?;
 
     let mut commands = Vec::new();
@@ -200,7 +114,6 @@ fn split_by_pipe(tokens: &[String]) -> Result<Vec<&[String]>, ParseError> {
         }
     }
 
-    // 最後のセグメント
     if start >= tokens.len() {
         return Err(ParseError(
             "syntax error: unexpected end of command after '|'".to_string(),
@@ -280,8 +193,6 @@ mod tests {
         assert_eq!(pipeline.commands[0].args, vec!["log", "--oneline"]);
     }
 
-    // ── parse_pipeline: パイプ ──
-
     #[test]
     fn two_commands_piped() {
         let tokens = vec!["git".into(), "log".into(), "|".into(), "head".into()];
@@ -313,8 +224,6 @@ mod tests {
         assert_eq!(pipeline.commands[2].cmd, "wc");
         assert_eq!(pipeline.commands[2].args, vec!["-l"]);
     }
-
-    // ── parse_pipeline: リダイレクト ──
 
     #[test]
     fn stdout_overwrite_redirect() {
@@ -351,7 +260,6 @@ mod tests {
 
     #[test]
     fn pipe_with_redirect() {
-        // echo hello | cat > out.txt
         let tokens = vec![
             "echo".into(),
             "hello".into(),
@@ -368,8 +276,6 @@ mod tests {
             vec![Redirect::StdoutOverwrite("out.txt".into())]
         );
     }
-
-    // ── parse_pipeline: エラーケース ──
 
     #[test]
     fn empty_tokens_returns_error() {
@@ -404,8 +310,6 @@ mod tests {
         let result = parse_pipeline(tokens);
         assert!(result.is_err());
     }
-
-    // ── parse_command_list: && ──
 
     #[test]
     fn command_list_and_two_commands() {
@@ -443,8 +347,6 @@ mod tests {
         assert_eq!(list.rest[1].1.commands[0].cmd, "cmd3");
     }
 
-    // ── parse_command_list: || ──
-
     #[test]
     fn command_list_or() {
         let tokens = vec![
@@ -459,8 +361,6 @@ mod tests {
         assert_eq!(list.rest[0].0, Connector::Or);
         assert_eq!(list.rest[0].1.commands[0].cmd, "echo");
     }
-
-    // ── parse_command_list: ; ──
 
     #[test]
     fn command_list_semi() {
@@ -477,8 +377,6 @@ mod tests {
         assert_eq!(list.rest[0].0, Connector::Semi);
         assert_eq!(list.rest[0].1.commands[0].cmd, "echo");
     }
-
-    // ── parse_command_list: 混合 ──
 
     #[test]
     fn command_list_mixed_connectors() {
@@ -499,11 +397,8 @@ mod tests {
         assert_eq!(list.rest[2].0, Connector::Semi);
     }
 
-    // ── parse_command_list: パイプとの組み合わせ ──
-
     #[test]
     fn command_list_with_pipe() {
-        // echo hello | cat && echo done
         let tokens = vec![
             "echo".into(),
             "hello".into(),
@@ -514,13 +409,11 @@ mod tests {
             "done".into(),
         ];
         let list = parse_command_list(tokens).unwrap();
-        assert_eq!(list.first.commands.len(), 2); // echo hello | cat
+        assert_eq!(list.first.commands.len(), 2);
         assert_eq!(list.rest.len(), 1);
         assert_eq!(list.rest[0].0, Connector::And);
         assert_eq!(list.rest[0].1.commands[0].cmd, "echo");
     }
-
-    // ── parse_command_list: 単一コマンド (接続演算子なし) ──
 
     #[test]
     fn command_list_single_command() {
@@ -529,8 +422,6 @@ mod tests {
         assert_eq!(list.first.commands[0].cmd, "ls");
         assert!(list.rest.is_empty());
     }
-
-    // ── parse_command_list: エラーケース ──
 
     #[test]
     fn command_list_leading_and_returns_error() {
@@ -555,9 +446,6 @@ mod tests {
 
     #[test]
     fn command_list_trailing_semi_is_ok() {
-        // `echo hello ;` — 末尾のセミコロン後にコマンドがなくても許容
-        // (実際のシェルでは `echo hello ;` は有効)
-        // ただし現在の実装ではエラーになる — これはシンプルさのため
         let tokens = vec!["echo".into(), "hello".into(), ";".into()];
         let result = parse_command_list(tokens);
         assert!(result.is_err());
@@ -569,11 +457,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── extract_ai_filter: 正常系 ──
-
     #[test]
     fn extract_ai_filter_single_command_pipe_ai() {
-        // cat file.txt | ai "要約して"
         let tokens = vec![
             "cat".into(),
             "file.txt".into(),
@@ -591,7 +476,6 @@ mod tests {
 
     #[test]
     fn extract_ai_filter_multi_pipe() {
-        // cat log | grep error | ai "JSON形式で出力して"
         let tokens = vec![
             "cat".into(),
             "log".into(),
@@ -612,7 +496,6 @@ mod tests {
 
     #[test]
     fn extract_ai_filter_multi_word_prompt() {
-        // echo hello | ai "translate to Japanese"
         let tokens = vec![
             "echo".into(),
             "hello".into(),
@@ -627,11 +510,8 @@ mod tests {
         assert_eq!(prompt, "translate to Japanese");
     }
 
-    // ── extract_ai_filter: None を返すケース ──
-
     #[test]
     fn extract_ai_filter_no_ai_command() {
-        // cat file.txt | grep error
         let tokens = vec![
             "cat".into(),
             "file.txt".into(),
@@ -645,7 +525,6 @@ mod tests {
 
     #[test]
     fn extract_ai_filter_ai_alone() {
-        // ai "prompt" — 手前にコマンドがない
         let tokens = vec!["ai".into(), "prompt".into()];
         let pipeline = parse_pipeline(tokens).unwrap();
         assert!(pipeline.extract_ai_filter().is_none());
@@ -653,7 +532,6 @@ mod tests {
 
     #[test]
     fn extract_ai_filter_empty_prompt() {
-        // echo hello | ai — プロンプトなし
         let tokens = vec!["echo".into(), "hello".into(), "|".into(), "ai".into()];
         let pipeline = parse_pipeline(tokens).unwrap();
         assert!(pipeline.extract_ai_filter().is_none());
@@ -661,7 +539,6 @@ mod tests {
 
     #[test]
     fn extract_ai_filter_ai_not_last() {
-        // ai "prompt" | cat — ai が末尾でない
         let tokens = vec!["ai".into(), "prompt".into(), "|".into(), "cat".into()];
         let pipeline = parse_pipeline(tokens).unwrap();
         assert!(pipeline.extract_ai_filter().is_none());
