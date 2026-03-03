@@ -52,6 +52,8 @@
    - `git commit -m "Release <タグ>"` でコミットする
 2. **main ブランチへマージしてタグを打つ**
    - `git checkout main`
+   - `git fetch origin main`
+   - 必要があれば `git merge --ff FETCH_HEAD`
    - `git merge --no-ff develop -m "Merge branch 'develop' for release <タグ>"`
    - `git tag <タグ>`
 3. **リモートへのプッシュ**
