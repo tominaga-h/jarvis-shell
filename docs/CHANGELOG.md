@@ -3,6 +3,23 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.1.2](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.1.2) - 2026-03-03
+
+### Added
+
+- 機密情報のサニタイズ機能を実装（API キー・トークン値の流出防御）([#68](https://github.com/tominaga-h/jarvis-shell/issues/68))
+- AI の `temperature` 設定を `config.toml` で変更可能に ([#66](https://github.com/tominaga-h/jarvis-shell/issues/66))
+
+### Fixed
+
+- エイリアスが解除されたコマンドが履歴に残るバグを修正 ([#65](https://github.com/tominaga-h/jarvis-shell/issues/65))
+
+### Changed
+
+- version バッヂにリリースページへのリンクを追加 ([#64](https://github.com/tominaga-h/jarvis-shell/issues/64))
+- 新しいデモ GIF を作成 ([#63](https://github.com/tominaga-h/jarvis-shell/issues/63))
+- release コマンドの手順を調整
+
 ## [v1.1.1](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.1.1) - 2026-03-03
 
 ### Fixed

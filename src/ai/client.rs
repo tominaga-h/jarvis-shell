@@ -50,6 +50,8 @@ pub struct JarvisAI {
     markdown_rendering: bool,
     /// AI パイプの入力テキスト文字数上限
     ai_pipe_max_chars: usize,
+    /// 回答のランダム性（0.0 = 決定的、2.0 = 最大ランダム）
+    temperature: f32,
 }
 
 impl JarvisAI {
@@ -73,6 +75,7 @@ impl JarvisAI {
             max_rounds: ai_config.max_rounds,
             markdown_rendering: ai_config.markdown_rendering,
             ai_pipe_max_chars: ai_config.ai_pipe_max_chars,
+            temperature: ai_config.temperature,
         })
     }
 
@@ -84,11 +87,13 @@ impl JarvisAI {
         self.max_rounds = ai_config.max_rounds;
         self.markdown_rendering = ai_config.markdown_rendering;
         self.ai_pipe_max_chars = ai_config.ai_pipe_max_chars;
+        self.temperature = ai_config.temperature;
         info!(
             model = %self.model,
             max_rounds = self.max_rounds,
             markdown_rendering = self.markdown_rendering,
             ai_pipe_max_chars = self.ai_pipe_max_chars,
+            temperature = self.temperature,
             "AI config updated"
         );
     }
@@ -263,6 +268,7 @@ impl JarvisAI {
             model: self.model.clone(),
             messages,
             stream: Some(true),
+            temperature: Some(self.temperature),
             ..Default::default()
         };
 
@@ -294,6 +300,7 @@ impl JarvisAI {
                 messages: messages.clone(),
                 tools: Some(tool_defs.clone()),
                 stream: Some(true),
+                temperature: Some(self.temperature),
                 ..Default::default()
             };
 

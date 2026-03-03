@@ -1,7 +1,7 @@
 # 🤵 Jarvis Shell (jarvish)
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-[![version](https://img.shields.io/badge/version-1.1.1-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.1.1)
+[![version](https://img.shields.io/badge/version-1.1.2-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.1.2)
 
 > 🌐 [日本語版 README はこちら](docs/README_JA.md)
 
@@ -11,7 +11,7 @@
 
 **Jarvish** is a **Next Generation AI Integrated Shell** written in Rust, inspired by **J.A.R.V.I.S.** from Marvel's Iron Man. It natively embeds AI intelligence into your everyday shell experience — no more copy-pasting errors into a browser. Just ask Jarvis.
 
-![jarvish](images/jarvish-demo.gif)
+[![jarvish](images/jarvish-demo.gif)](https://asciinema.org/a/806755)
 
 ## ✨ Features
 
@@ -85,6 +85,7 @@ model = "gpt-4o" # AI model to use
 max_rounds = 10 # Max agent loop rounds
 markdown_rendering = true # Set to false to disable Markdown rendering
 ai_pipe_max_chars = 50000 # Max characters for AI Pipe input
+temperature = 0.5 # Response randomness (0.0 = deterministic, 2.0 = max random)
 
 [alias]
 g = "git" # Command aliases
@@ -99,7 +100,7 @@ nerd_font = true # Set to false if NerdFont is not installed
 
 | Section    | Description                                                                         |
 | ---------- | ----------------------------------------------------------------------------------- |
-| `[ai]`     | AI model name, agent loop limit, Markdown rendering toggle, and AI Pipe input limit |
+| `[ai]`     | AI model name, agent loop limit, Markdown rendering toggle, AI Pipe input limit, and temperature |
 | `[alias]`  | Command aliases (also manageable via `alias` / `unalias` builtins)                  |
 | `[export]` | Environment variables applied on startup (supports `$VAR` expansion)                |
 | `[prompt]` | Prompt display settings (`nerd_font = false` disables NerdFont icons)               |

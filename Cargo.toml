@@ -1,6 +1,6 @@
 [package]
 name = "jarvish"
-version = "1.1.1"
+version = "1.1.2"
 edition = "2021"
 rust-version = "1.75"
 description = "Next Generation AI Integrated Shell inspired by J.A.R.V.I.S. on Marvel's Iron Man"
@@ -47,6 +47,7 @@ toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 termimad = "0.34"
 sysinfo = "0.34"
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"

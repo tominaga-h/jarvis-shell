@@ -118,7 +118,13 @@ impl Shell {
     fn apply_exports(config: &JarvishConfig) {
         for (key, value) in &config.export {
             let expanded = expand::expand_token(value);
-            info!(key = %key, value = %expanded, "Applying export from config");
+            let display = format!("{key}={expanded}");
+            let masked = if crate::storage::sanitizer::contains_secrets(&display) {
+                crate::storage::sanitizer::mask_secrets(&display)
+            } else {
+                display
+            };
+            info!(masked = %masked, "Applying export from config");
             // SAFETY: シェル起動時のシングルスレッド初期化で呼ばれるため安全
             unsafe {
                 std::env::set_var(key, &expanded);
@@ -159,7 +165,7 @@ impl Shell {
         // サマリー出力（config.toml のセクション順: ai, alias, export, prompt）
         let summary = format!(
             "Loaded {}\n\
-             \x20 [ai]      model: {}, max_rounds: {}, markdown_rendering: {}, ai_pipe_max_chars: {}\n\
+             \x20 [ai]      model: {}, max_rounds: {}, markdown_rendering: {}, ai_pipe_max_chars: {}, temperature: {}\n\
              \x20 [alias]   {} {}\n\
              \x20 [export]  {} {}\n\
              \x20 [prompt]  nerd_font: {}\n",
@@ -168,6 +174,7 @@ impl Shell {
             config.ai.max_rounds,
             config.ai.markdown_rendering,
             config.ai.ai_pipe_max_chars,
+            config.ai.temperature,
             config.alias.len(),
             if config.alias.len() == 1 {
                 "entry"

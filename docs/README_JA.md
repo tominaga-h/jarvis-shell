@@ -1,7 +1,7 @@
 # 🤵 Jarvis Shell (jarvish)
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-[![version](https://img.shields.io/badge/version-1.1.1-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.1.1)
+[![version](https://img.shields.io/badge/version-1.1.2-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.1.2)
 
 > 🌐 [English README](../README.md)
 
@@ -11,7 +11,7 @@
 
 **Jarvish** は、Marvel の Iron Man に登場する **J.A.R.V.I.S.** にインスパイアされた、Rust 製の **次世代 AI 統合シェル (Next Generation AI Integrated Shell)** です。日常のシェル体験に AI の知性をネイティブに組み込みます。エラーをブラウザにコピペする必要はもうありません。Jarvis に聞くだけです。
 
-![jarvish](../images/jarvish-demo.gif)
+[![jarvish](images/jarvish-demo.gif)](https://asciinema.org/a/806755)
 
 ## ✨ 主な機能
 
@@ -85,6 +85,7 @@ model = "gpt-4o" # 使用する AI モデル
 max_rounds = 10 # エージェントループの最大ラウンド数
 markdown_rendering = true # falseにするとMarkdownレンダリングをしない
 ai_pipe_max_chars = 50000 # AIパイプへの入力文字数上限
+temperature = 0.5 # 回答のランダム性 (0.0=決定的, 2.0=最大ランダム)
 
 [alias]
 g = "git" # コマンドエイリアス
@@ -99,7 +100,7 @@ nerd_font = true # NerdFont 未インストールの場合は false に設定
 
 | セクション | 説明                                                                   |
 | ---------- | ---------------------------------------------------------------------- |
-| `[ai]`     | AI モデル名、エージェントループ上限、Markdownレンダリング、AIパイプ入力上限            |
+| `[ai]`     | AI モデル名、エージェントループ上限、Markdownレンダリング、AIパイプ入力上限、temperature |
 | `[alias]`  | コマンドエイリアス（`alias` / `unalias` ビルトインでも管理可能）       |
 | `[export]` | 起動時に適用する環境変数（`$VAR` 展開に対応）                          |
 | `[prompt]` | プロンプト表示設定（`nerd_font = false` で NerdFont アイコンを無効化） |

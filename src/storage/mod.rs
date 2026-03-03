@@ -1,5 +1,6 @@
 pub mod blob;
 pub mod history;
+pub(crate) mod sanitizer;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -66,14 +67,25 @@ impl BlackBox {
             "Recording command result to BlackBox"
         );
 
+        let masked_stdout = if sanitizer::contains_secrets(&result.stdout) {
+            sanitizer::mask_secrets(&result.stdout)
+        } else {
+            result.stdout.clone()
+        };
+        let masked_stderr = if sanitizer::contains_secrets(&result.stderr) {
+            sanitizer::mask_secrets(&result.stderr)
+        } else {
+            result.stderr.clone()
+        };
+
         // Alternate Screen 使用時は stdout を保存しない
         // （TUI の画面制御シーケンスは AI コンテキストとして無価値）
         let stdout_hash = if result.used_alt_screen {
             Ok(None)
         } else {
-            self.blob_store.store(&result.stdout)
+            self.blob_store.store(&masked_stdout)
         }?;
-        let stderr_hash = self.blob_store.store(&result.stderr)?;
+        let stderr_hash = self.blob_store.store(&masked_stderr)?;
 
         // reedline の save() が先に INSERT した最新行を UPDATE する
         let rows_updated = self
@@ -127,9 +139,14 @@ impl BlackBox {
 
         let mut context = String::from("=== Recent Command History ===\n");
         for entry in &entries {
+            let masked_command = if sanitizer::contains_secrets(&entry.command) {
+                sanitizer::mask_secrets(&entry.command)
+            } else {
+                entry.command.clone()
+            };
             context.push_str(&format!(
                 "\n[#{}] {} (exit: {}, cwd: {})\n",
-                entry.id, entry.command, entry.exit_code, entry.cwd
+                entry.id, masked_command, entry.exit_code, entry.cwd
             ));
             if let Some(ref stdout) = entry.stdout {
                 let truncated = Self::truncate_lines(stdout, 50);
