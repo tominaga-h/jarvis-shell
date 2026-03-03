@@ -1,7 +1,7 @@
 # 🤵 Jarvis Shell (jarvish)
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-[![version](https://img.shields.io/badge/version-1.1.1-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.1.1)
+[![version](https://img.shields.io/badge/version-1.1.2-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.1.2)
 
 > 🌐 [English README](../README.md)
 
@@ -11,7 +11,7 @@
 
 **Jarvish** は、Marvel の Iron Man に登場する **J.A.R.V.I.S.** にインスパイアされた、Rust 製の **次世代 AI 統合シェル (Next Generation AI Integrated Shell)** です。日常のシェル体験に AI の知性をネイティブに組み込みます。エラーをブラウザにコピペする必要はもうありません。Jarvis に聞くだけです。
 
-![jarvish](../images/jarvish-demo.gif)
+[![jarvish](images/jarvish-demo.gif)](https://asciinema.org/a/806755)
 
 ## ✨ 主な機能
 
