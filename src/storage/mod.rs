@@ -1,15 +1,14 @@
 pub mod blob;
+mod context;
 pub mod history;
+mod record;
 pub(crate) mod sanitizer;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use directories::ProjectDirs;
 use rusqlite::Connection;
 use std::path::PathBuf;
-use tracing::debug;
 
-use crate::engine::CommandResult;
 use blob::BlobStore;
 
 pub use history::BlackBoxHistory;
@@ -51,191 +50,11 @@ impl BlackBox {
         Ok(Self { conn, blob_store })
     }
 
-    /// コマンド実行結果を記録する。
-    /// stdout/stderr が空でなければ Blob として保存し、メタデータを DB に UPDATE する。
-    /// Alternate Screen を使用した TUI コマンドの場合、stdout blob はスキップする。
-    ///
-    /// reedline の History::save() が先に INSERT しているため、
-    /// 最新の該当行を UPDATE する。該当行が見つからない場合は INSERT にフォールバックする。
-    pub fn record(&self, command: &str, result: &CommandResult) -> Result<()> {
-        debug!(
-            command = %command,
-            exit_code = result.exit_code,
-            stdout_len = result.stdout.len(),
-            stderr_len = result.stderr.len(),
-            used_alt_screen = result.used_alt_screen,
-            "Recording command result to BlackBox"
-        );
-
-        let masked_stdout = if sanitizer::contains_secrets(&result.stdout) {
-            sanitizer::mask_secrets(&result.stdout)
-        } else {
-            result.stdout.clone()
-        };
-        let masked_stderr = if sanitizer::contains_secrets(&result.stderr) {
-            sanitizer::mask_secrets(&result.stderr)
-        } else {
-            result.stderr.clone()
-        };
-
-        // Alternate Screen 使用時は stdout を保存しない
-        // （TUI の画面制御シーケンスは AI コンテキストとして無価値）
-        let stdout_hash = if result.used_alt_screen {
-            Ok(None)
-        } else {
-            self.blob_store.store(&masked_stdout)
-        }?;
-        let stderr_hash = self.blob_store.store(&masked_stderr)?;
-
-        // reedline の save() が先に INSERT した最新行を UPDATE する
-        let rows_updated = self
-            .conn
-            .execute(
-                "UPDATE command_history \
-                 SET exit_code = ?1, stdout_hash = ?2, stderr_hash = ?3 \
-                 WHERE id = (SELECT MAX(id) FROM command_history WHERE command = ?4)",
-                rusqlite::params![result.exit_code, stdout_hash, stderr_hash, command,],
-            )
-            .context("failed to update command history")?;
-
-        // save() が呼ばれていない場合（初回起動時やテスト時）は INSERT にフォールバック
-        if rows_updated == 0 {
-            let cwd = std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let created_at = Utc::now().to_rfc3339();
-
-            self.conn
-                .execute(
-                    "INSERT INTO command_history (command, cwd, exit_code, stdout_hash, stderr_hash, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![
-                        command,
-                        cwd,
-                        result.exit_code,
-                        stdout_hash,
-                        stderr_hash,
-                        created_at,
-                    ],
-                )
-                .context("failed to insert command history")?;
-        }
-
-        Ok(())
-    }
-
-    /// 直近 N 件のコマンド履歴を取得し、AI に渡すコンテキスト文字列を生成する。
-    /// stdout/stderr は末尾 50 行に切り詰める。
-    pub fn get_recent_context(&self, limit: usize) -> Result<String> {
-        let entries = self.get_recent_entries(limit)?;
-        debug!(
-            requested = limit,
-            retrieved = entries.len(),
-            "get_recent_context()"
-        );
-        if entries.is_empty() {
-            return Ok(String::new());
-        }
-
-        let mut context = String::from("=== Recent Command History ===\n");
-        for entry in &entries {
-            let masked_command = if sanitizer::contains_secrets(&entry.command) {
-                sanitizer::mask_secrets(&entry.command)
-            } else {
-                entry.command.clone()
-            };
-            context.push_str(&format!(
-                "\n[#{}] {} (exit: {}, cwd: {})\n",
-                entry.id, masked_command, entry.exit_code, entry.cwd
-            ));
-            if let Some(ref stdout) = entry.stdout {
-                let truncated = Self::truncate_lines(stdout, 50);
-                if !truncated.is_empty() {
-                    context.push_str(&format!("stdout:\n{truncated}\n"));
-                }
-            }
-            if let Some(ref stderr) = entry.stderr {
-                let truncated = Self::truncate_lines(stderr, 50);
-                if !truncated.is_empty() {
-                    context.push_str(&format!("stderr:\n{truncated}\n"));
-                }
-            }
-        }
-        Ok(context)
-    }
-
-    /// 直近 N 件のコマンド履歴エントリを取得する（新しい順）。
-    fn get_recent_entries(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, command, cwd, exit_code, stdout_hash, stderr_hash, created_at
-             FROM command_history
-             ORDER BY id DESC
-             LIMIT ?1",
-        )?;
-
-        let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i32>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, String>(6)?,
-            ))
-        })?;
-
-        let mut entries = Vec::new();
-        for row in rows {
-            let (id, command, cwd, exit_code, stdout_hash, stderr_hash, created_at) = row?;
-
-            let stdout = stdout_hash
-                .as_deref()
-                .map(|h| self.blob_store.load(h))
-                .transpose()
-                .unwrap_or(None);
-            let stderr = stderr_hash
-                .as_deref()
-                .map(|h| self.blob_store.load(h))
-                .transpose()
-                .unwrap_or(None);
-
-            entries.push(HistoryEntry {
-                id,
-                command,
-                cwd,
-                exit_code,
-                stdout,
-                stderr,
-                created_at,
-            });
-        }
-
-        Ok(entries)
-    }
-
-    /// テキストを末尾 N 行に切り詰める。
-    fn truncate_lines(text: &str, max_lines: usize) -> String {
-        let lines: Vec<&str> = text.lines().collect();
-        if lines.len() <= max_lines {
-            text.to_string()
-        } else {
-            let skip = lines.len() - max_lines;
-            format!(
-                "... ({} lines omitted) ...\n{}",
-                skip,
-                lines[skip..].join("\n")
-            )
-        }
-    }
-
     /// データディレクトリのパスを返す。
     ///
     /// `directories` クレートを使用してプラットフォームに応じたパスを決定する。
     /// - macOS: `~/Library/Application Support/jarvish/`
     /// - Linux: `~/.local/share/jarvish/`
-    ///
-    /// `ProjectDirs` の取得に失敗した場合は `~/.jarvish` にフォールバックする。
     pub(crate) fn data_dir() -> PathBuf {
         ProjectDirs::from("", "", "jarvish")
             .map(|p| p.data_dir().to_path_buf())
@@ -246,24 +65,6 @@ impl BlackBox {
                     .unwrap_or_else(|_| PathBuf::from("."))
                     .join(".jarvish")
             })
-    }
-
-    /// DB スキーマのマイグレーションを実行する。
-    fn migrate(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS command_history (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                command     TEXT    NOT NULL,
-                cwd         TEXT    NOT NULL,
-                exit_code   INTEGER NOT NULL,
-                stdout_hash TEXT,
-                stderr_hash TEXT,
-                created_at  TEXT    NOT NULL
-            );",
-        )
-        .context("failed to create command_history table")?;
-
-        Ok(())
     }
 }
 
@@ -288,7 +89,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let bb = BlackBox::open_at(tmp.path().to_path_buf()).unwrap();
 
-        // テーブルが存在することを確認
         let count: i32 = bb
             .conn
             .query_row(
@@ -330,7 +130,6 @@ mod tests {
         let result = make_result(stdout_content, stderr_content, 1);
         bb.record("failing-command", &result).unwrap();
 
-        // DB からハッシュを取得
         let (stdout_hash, stderr_hash): (Option<String>, Option<String>) = bb
             .conn
             .query_row(
@@ -340,7 +139,6 @@ mod tests {
             )
             .unwrap();
 
-        // Blob からコンテンツを復元して検証
         let loaded_stdout = bb.blob_store.load(&stdout_hash.unwrap()).unwrap();
         assert_eq!(loaded_stdout, stdout_content);
 
@@ -380,7 +178,6 @@ mod tests {
             .unwrap();
 
         let ctx = bb.get_recent_context(5).unwrap();
-        // 直近の履歴が含まれていることを確認
         assert!(ctx.contains("echo hello"));
         assert!(ctx.contains("bad-cmd"));
         assert!(ctx.contains("error: not found"));

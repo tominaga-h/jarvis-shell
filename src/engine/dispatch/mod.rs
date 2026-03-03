@@ -4,20 +4,13 @@
 //! トークン分割、シェル展開、パイプラインパースを経て、
 //! 適切な実行パスに振り分ける。
 
+mod ai_pipe;
+
+pub use ai_pipe::{try_execute_ai_pipe, AiPipeRequest};
+
 use tracing::debug;
 
 use super::{builtins, exec, expand, parser, CommandResult};
-
-/// AI パイプ (`cmd | ai "prompt"`) の検出結果。
-/// 手前パイプラインの実行結果と AI に渡すプロンプトを保持する。
-pub struct AiPipeRequest {
-    /// AI に渡すユーザー指示（`ai` の引数）
-    pub prompt: String,
-    /// 手前パイプラインの stdout キャプチャ結果
-    pub stdin_text: String,
-    /// 手前パイプラインの終了コード
-    pub exit_code: i32,
-}
 
 /// ビルトインコマンドのみを試行する。
 /// ビルトインでなければ None を返す（AI ルーティング前のチェック用）。
@@ -31,7 +24,6 @@ pub fn try_builtin(input: &str) -> Option<CommandResult> {
         return Some(CommandResult::success(String::new()));
     }
 
-    // 先頭ワードがビルトインでなければ即 None → AI に回す
     let first_word = input.split_whitespace().next().unwrap_or("");
     if !builtins::is_builtin(first_word) {
         debug!(
@@ -42,7 +34,6 @@ pub fn try_builtin(input: &str) -> Option<CommandResult> {
         return None;
     }
 
-    // ビルトインのみフルパース
     let tokens = match shell_words::split(input) {
         Ok(tokens) => tokens,
         Err(e) => {
@@ -56,8 +47,6 @@ pub fn try_builtin(input: &str) -> Option<CommandResult> {
         return Some(CommandResult::success(String::new()));
     }
 
-    // パイプ/リダイレクト/接続演算子を含む場合は None を返す。
-    // → execute() 側でコマンドリスト処理される。
     if tokens
         .iter()
         .any(|t| matches!(t.as_str(), "|" | ">" | ">>" | "<" | "&&" | "||" | ";"))
@@ -85,92 +74,6 @@ pub fn try_builtin(input: &str) -> Option<CommandResult> {
     result
 }
 
-/// ユーザー入力が AI パイプ (`cmd | ai "prompt"`) であるかを判定し、
-/// 該当する場合は手前のパイプラインを実行して stdout をキャプチャする。
-///
-/// v1 制約: 接続演算子（`&&`, `||`, `;`）との組み合わせは非対応。
-pub fn try_execute_ai_pipe(input: &str) -> Option<AiPipeRequest> {
-    let input = input.trim();
-    if input.is_empty() {
-        return None;
-    }
-
-    let tokens = shell_words::split(input).ok()?;
-    if tokens.is_empty() {
-        return None;
-    }
-
-    // 接続演算子を含む場合は AI パイプ非対応
-    if tokens
-        .iter()
-        .any(|t| matches!(t.as_str(), "&&" | "||" | ";"))
-    {
-        return None;
-    }
-
-    let expanded: Vec<String> = tokens
-        .into_iter()
-        .map(|t| {
-            if matches!(t.as_str(), "|" | ">" | ">>" | "<") {
-                t
-            } else {
-                expand::expand_token(&t)
-            }
-        })
-        .collect();
-
-    let pipeline = parser::parse_pipeline(expanded).ok()?;
-    let (prompt, remaining) = pipeline.extract_ai_filter()?;
-
-    debug!(prompt = %prompt, "AI pipe detected, executing source pipeline");
-
-    // ビルトイン先頭対応: 先頭がビルトインなら printf に置換
-    let remaining = if remaining.commands.len() > 1 {
-        let first = &remaining.commands[0];
-        let args: Vec<&str> = first.args.iter().map(|s| s.as_str()).collect();
-        if let Some(result) = builtins::dispatch_builtin(&first.cmd, &args) {
-            if result.exit_code != 0 {
-                return Some(AiPipeRequest {
-                    prompt,
-                    stdin_text: result.stdout,
-                    exit_code: result.exit_code,
-                });
-            }
-            let mut new_commands = remaining.commands.clone();
-            new_commands[0] = parser::SimpleCommand {
-                cmd: "printf".to_string(),
-                args: vec!["%s".to_string(), result.stdout],
-                redirects: vec![],
-            };
-            parser::Pipeline {
-                commands: new_commands,
-            }
-        } else {
-            remaining
-        }
-    } else {
-        // 単一コマンドがビルトインの場合
-        let first = &remaining.commands[0];
-        let args: Vec<&str> = first.args.iter().map(|s| s.as_str()).collect();
-        if let Some(result) = builtins::dispatch_builtin(&first.cmd, &args) {
-            return Some(AiPipeRequest {
-                prompt,
-                stdin_text: result.stdout,
-                exit_code: result.exit_code,
-            });
-        }
-        remaining
-    };
-
-    let result = exec::run_pipeline_captured(&remaining);
-
-    Some(AiPipeRequest {
-        prompt,
-        stdin_text: result.stdout,
-        exit_code: result.exit_code,
-    })
-}
-
 /// ユーザー入力をパースし、ビルトインまたは外部コマンドとして実行する。
 ///
 /// パイプライン（`|`）やリダイレクト（`>`, `>>`, `<`）を含むコマンドに対応。
@@ -182,7 +85,6 @@ pub fn execute(input: &str) -> CommandResult {
         return CommandResult::success(String::new());
     }
 
-    // 1. トークン分割
     let tokens = match shell_words::split(input) {
         Ok(tokens) => tokens,
         Err(e) => {
@@ -196,7 +98,6 @@ pub fn execute(input: &str) -> CommandResult {
         return CommandResult::success(String::new());
     }
 
-    // 2. 各トークンにシェル展開を適用（ただし演算子は展開しない）
     let expanded: Vec<String> = tokens
         .into_iter()
         .map(|t| {
@@ -208,7 +109,6 @@ pub fn execute(input: &str) -> CommandResult {
         })
         .collect();
 
-    // 3. コマンドリストにパース
     let command_list = match parser::parse_command_list(expanded) {
         Ok(cl) => cl,
         Err(e) => {
@@ -224,20 +124,16 @@ pub fn execute(input: &str) -> CommandResult {
         "execute() parsed command list"
     );
 
-    // 4. 単一パイプラインの場合（接続演算子なし）は従来のビルトイン最適化パスを使用
     if command_list.rest.is_empty() {
         let pipeline = &command_list.first;
         return execute_pipeline(pipeline);
     }
 
-    // 5. 複数パイプライン: run_command_list() で実行
-    //    各パイプラインのビルトインも処理するため、ディスパッチ付きで実行
     run_command_list_with_builtins(&command_list)
 }
 
 /// 単一パイプラインを実行する（ビルトイン最適化パス付き）。
 fn execute_pipeline(pipeline: &parser::Pipeline) -> CommandResult {
-    // 単一コマンドの場合はビルトインを試行
     if pipeline.commands.len() == 1 && pipeline.commands[0].redirects.is_empty() {
         let simple = &pipeline.commands[0];
         let args: Vec<&str> = simple.args.iter().map(|s| s.as_str()).collect();
@@ -247,7 +143,6 @@ fn execute_pipeline(pipeline: &parser::Pipeline) -> CommandResult {
         }
     }
 
-    // パイプラインの先頭がビルトインの場合、実行して出力を後続に渡す
     if pipeline.commands.len() > 1 {
         let first = &pipeline.commands[0];
         let args: Vec<&str> = first.args.iter().map(|s| s.as_str()).collect();
@@ -260,7 +155,6 @@ fn execute_pipeline(pipeline: &parser::Pipeline) -> CommandResult {
             if result.exit_code != 0 {
                 return result;
             }
-            // ビルトインの stdout を printf で出力するコマンドに置き換え
             let mut new_commands = pipeline.commands.clone();
             new_commands[0] = parser::SimpleCommand {
                 cmd: "printf".to_string(),
@@ -274,14 +168,10 @@ fn execute_pipeline(pipeline: &parser::Pipeline) -> CommandResult {
         }
     }
 
-    // 外部コマンドまたはパイプラインを実行
     exec::run_pipeline(pipeline)
 }
 
 /// コマンドリストをビルトイン対応で実行する。
-///
-/// `exec::run_command_list()` と異なり、各パイプラインの実行時に
-/// ビルトインコマンドの最適化パスを適用する。
 fn run_command_list_with_builtins(list: &parser::CommandList) -> CommandResult {
     use super::LoopAction;
     use parser::Connector;
@@ -324,7 +214,6 @@ mod tests {
     use std::env;
     use std::path::PathBuf;
 
-    /// テスト中にカレントディレクトリを安全に変更・復元するヘルパー
     struct CwdGuard {
         original: PathBuf,
     }
@@ -343,12 +232,8 @@ mod tests {
         }
     }
 
-    // ── try_builtin: アポストロフィ問題の修正テスト ──
-
     #[test]
     fn try_builtin_apostrophe_returns_none() {
-        // "I'm tired, Jarvis." のようなアポストロフィ入力は
-        // ビルトインではないので None を返し、AI ルーティングに進むべき
         assert!(try_builtin("I'm tired, Jarvis.").is_none());
     }
 
@@ -384,11 +269,8 @@ mod tests {
         assert!(try_builtin("echo hello").is_none());
     }
 
-    // ── try_builtin: パイプ/リダイレクト演算子を含む場合は None ──
-
     #[test]
     fn try_builtin_with_pipe_returns_none() {
-        // ビルトインでもパイプを含む場合は execute() に委譲する
         assert!(try_builtin("history | less").is_none());
         assert!(try_builtin("export | grep PATH").is_none());
         assert!(try_builtin("cwd | cat").is_none());
@@ -396,12 +278,9 @@ mod tests {
 
     #[test]
     fn try_builtin_with_redirect_returns_none() {
-        // リダイレクトを含む場合も execute() に委譲する
         assert!(try_builtin("history > /tmp/hist.txt").is_none());
         assert!(try_builtin("export >> /tmp/env.txt").is_none());
     }
-
-    // ── execute: パイプ ──
 
     #[test]
     fn execute_pipe_two_commands() {
@@ -416,8 +295,6 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout.trim(), "bbb");
     }
-
-    // ── execute: リダイレクト ──
 
     #[test]
     fn execute_redirect_stdout_overwrite() {
@@ -459,8 +336,6 @@ mod tests {
         assert_eq!(result.stdout.trim(), "from_file");
     }
 
-    // ── execute: ビルトイン + パイプライン統合 ──
-
     #[test]
     #[serial]
     fn execute_cd_still_works() {
@@ -476,13 +351,10 @@ mod tests {
         assert_eq!(result.stdout.trim(), "test123");
     }
 
-    // ── execute: ビルトイン先頭パイプライン ──
-
     #[test]
     #[serial]
     fn execute_builtin_pipe_to_cat() {
         let _guard = CwdGuard::new();
-        // cwd | cat → 現在のディレクトリが出力される
         let expected = env::current_dir().unwrap();
         let result = execute("cwd | cat");
         assert_eq!(result.exit_code, 0);
@@ -492,7 +364,6 @@ mod tests {
     #[test]
     #[serial]
     fn execute_builtin_pipe_to_grep() {
-        // export | grep PATH → PATH を含む行が出力される
         let result = execute("export | grep PATH");
         assert_eq!(result.exit_code, 0);
         assert!(
@@ -501,8 +372,6 @@ mod tests {
             result.stdout
         );
     }
-
-    // ── execute: && 演算子 ──
 
     #[test]
     fn execute_and_both_succeed() {
@@ -528,8 +397,6 @@ mod tests {
         assert!(result.stdout.contains("c"));
     }
 
-    // ── execute: || 演算子 ──
-
     #[test]
     fn execute_or_first_fails() {
         let result = execute("false || echo fallback");
@@ -544,8 +411,6 @@ mod tests {
         assert!(!result.stdout.contains("skipped"));
     }
 
-    // ── execute: ; 演算子 ──
-
     #[test]
     fn execute_semi_always_runs() {
         let result = execute("false ; echo always");
@@ -553,18 +418,13 @@ mod tests {
         assert!(result.stdout.contains("always"));
     }
 
-    // ── execute: 混合 ──
-
     #[test]
     fn execute_and_then_or() {
-        // false && echo skip || echo rescue
         let result = execute("false && echo skip || echo rescue");
         assert_eq!(result.exit_code, 0);
         assert!(!result.stdout.contains("skip"));
         assert!(result.stdout.contains("rescue"));
     }
-
-    // ── try_builtin: 接続演算子を含む場合は None ──
 
     #[test]
     fn try_builtin_with_and_returns_none() {
@@ -580,8 +440,6 @@ mod tests {
     fn try_builtin_with_semi_returns_none() {
         assert!(try_builtin("cd /tmp ; echo done").is_none());
     }
-
-    // ── execute: ビルトイン + && ──
 
     #[test]
     #[serial]

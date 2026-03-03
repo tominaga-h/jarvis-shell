@@ -7,6 +7,11 @@
 //! 同一トークンの重複走査を排除する。`brew install` 等で新しいバイナリが
 //! 追加された場合でも TTL 経過後に自動で反映される。
 
+mod goodbye;
+mod patterns;
+
+pub use goodbye::is_ai_goodbye_response;
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -25,9 +30,6 @@ pub enum InputType {
 }
 
 /// PATH lookup キャッシュの TTL（秒）。
-///
-/// この期間内は同一トークンに対する `which::which()` 呼び出しをスキップする。
-/// TTL 経過後は次回の `is_command_in_path()` 呼び出し時に再走査される。
 const PATH_CACHE_TTL_SECS: u64 = 5;
 
 /// アルゴリズムベースの入力分類器（TTL キャッシュ付き PATH 解決）
@@ -66,205 +68,45 @@ impl InputClassifier {
             return InputType::Command;
         }
 
-        // 0. Goodbye パターン（最優先）
         if Self::is_goodbye_pattern(trimmed) {
             debug!(input = %trimmed, reason = "goodbye_pattern", "Classified as Goodbye");
             return InputType::Goodbye;
         }
 
-        // 1. Jarvis トリガー
         if self.is_jarvis_trigger(trimmed) {
             debug!(input = %trimmed, reason = "jarvis_trigger", "Classified as NaturalLanguage");
             return InputType::NaturalLanguage;
         }
 
-        // 2. 自然言語パターン
         if self.is_natural_language_pattern(trimmed) {
             debug!(input = %trimmed, reason = "nl_pattern", "Classified as NaturalLanguage");
             return InputType::NaturalLanguage;
         }
 
-        // 先頭トークンを抽出
         let first_token = Self::first_token(trimmed);
 
-        // 3. パス実行パターン（./script.sh, /usr/bin/foo, ~/bin/tool）
         if Self::is_path_execution(first_token) {
             debug!(input = %trimmed, first_token = %first_token, reason = "path_execution", "Classified as Command");
             return InputType::Command;
         }
 
-        // 4. PATH 内コマンド（最も強力なヒューリスティック）
         if self.is_command_in_path(first_token) {
             debug!(input = %trimmed, first_token = %first_token, reason = "path_lookup", "Classified as Command");
             return InputType::Command;
         }
 
-        // 5. シェル構文シグナル
         if Self::has_shell_syntax(trimmed) {
             debug!(input = %trimmed, reason = "shell_syntax", "Classified as Command");
             return InputType::Command;
         }
 
-        // 6. デフォルト: 自然言語として AI に委ねる
         debug!(input = %trimmed, reason = "default", "Classified as NaturalLanguage");
         InputType::NaturalLanguage
     }
 
-    // ========== プライベートヘルパー ==========
-
-    /// ユーザー入力が Goodbye パターンにマッチするかを判定する。
-    ///
-    /// 英語・日本語の別れの挨拶を検出する。
-    /// 誤検出を防ぐため、入力が短い（概ね3語以下）場合に限定する。
-    fn is_goodbye_pattern(input: &str) -> bool {
-        let lower = input.to_lowercase();
-
-        // Jarvis 呼びかけプレフィックスを除去して本文を取得
-        let body = Self::strip_jarvis_prefix(&lower);
-
-        // 本文が長すぎる場合は goodbye 意図ではないと判定（"say goodbye to X" 等を除外）
-        let word_count = body.split_whitespace().count();
-        if word_count > 4 {
-            return false;
-        }
-
-        // 英語 goodbye パターン（完全一致 or 先頭一致）
-        let goodbye_phrases = [
-            "bye",
-            "bye bye",
-            "bye-bye",
-            "byebye",
-            "goodbye",
-            "good bye",
-            "good-bye",
-            "see you",
-            "see ya",
-            "good night",
-            "goodnight",
-            "farewell",
-            "ciao",
-        ];
-
-        for phrase in &goodbye_phrases {
-            if body == *phrase || body.starts_with(&format!("{phrase} ")) {
-                return true;
-            }
-        }
-
-        // 日本語 goodbye パターン（末尾一致 or 完全一致）
-        let jp_patterns = [
-            "さようなら",
-            "さよなら",
-            "おやすみ",
-            "おやすみなさい",
-            "バイバイ",
-            "ばいばい",
-            "じゃあね",
-            "じゃね",
-            "またね",
-            "また明日",
-            "またあとで",
-            "おつかれ",
-            "おつかれさま",
-            "おつかれさまでした",
-            "お疲れ様",
-            "お疲れさま",
-            "お疲れさまでした",
-        ];
-
-        for pattern in &jp_patterns {
-            if body == *pattern || body.ends_with(pattern) {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    /// Jarvis 呼びかけプレフィックス（"jarvis, ", "hey jarvis, ", "j, " 等）を除去する。
-    fn strip_jarvis_prefix(input: &str) -> &str {
-        let prefixes = [
-            "hey jarvis, ",
-            "hey jarvis,",
-            "hey jarvis ",
-            "jarvis, ",
-            "jarvis,",
-            "jarvis ",
-            "j, ",
-            "j,",
-        ];
-
-        for prefix in &prefixes {
-            if let Some(rest) = input.strip_prefix(prefix) {
-                return rest.trim();
-            }
-        }
-
-        input
-    }
-
-    /// Jarvis に話しかけるトリガーパターンかを判定する。
-    fn is_jarvis_trigger(&self, input: &str) -> bool {
-        let lower = input.to_lowercase();
-        // "jarvis" / "jarvis," / "hey jarvis" / "j," で始まる
-        lower.starts_with("jarvis")
-            || lower.starts_with("hey jarvis")
-            || lower.starts_with("j,")
-            || lower.starts_with("j ") && !self.is_command_in_path("j")
-    }
-
-    /// 自然言語パターン（疑問詞、依頼表現 等）にマッチするかを判定する。
-    fn is_natural_language_pattern(&self, input: &str) -> bool {
-        let lower = input.to_lowercase();
-
-        // 末尾が ? で終わる
-        if lower.ends_with('?') {
-            return true;
-        }
-
-        // 先頭の単語を取得
-        let first_word = lower.split_whitespace().next().unwrap_or("");
-
-        // 英語の疑問詞・助動詞で始まる（2語以上の場合のみ）
-        let has_multiple_words = lower.contains(' ');
-        if has_multiple_words {
-            let question_starters = [
-                "what", "how", "why", "where", "when", "who", "which", "can", "could", "would",
-                "should", "shall", "is", "are", "was", "were", "am", "do", "does", "did", "tell",
-                "explain", "describe", "show", "please", "help",
-            ];
-
-            if question_starters.contains(&first_word) {
-                // ただし PATH 上にも同名コマンドが存在する場合はコマンド優先
-                // 例: "which python" は自然言語ではなくコマンド
-                if !self.is_command_in_path(first_word) {
-                    return true;
-                }
-            }
-        }
-
-        // 日本語パターン
-        if lower.ends_with("して")
-            || lower.ends_with("してください")
-            || lower.ends_with("とは")
-            || lower.ends_with("教えて")
-            || lower.ends_with("ですか")
-            || lower.ends_with("ますか")
-            || lower.ends_with("なに")
-            || lower.ends_with("何")
-        {
-            return true;
-        }
-
-        false
-    }
-
-    /// 先頭トークンがパス実行パターン（./foo, ../foo, /usr/bin/foo, ~/foo）か。
-    fn is_path_execution(first_token: &str) -> bool {
-        first_token.starts_with("./")
-            || first_token.starts_with("../")
-            || first_token.starts_with('/')
-            || first_token.starts_with("~/")
+    /// 入力文字列から先頭トークン（空白前の最初の語）を取得する。
+    fn first_token(input: &str) -> &str {
+        input.split_whitespace().next().unwrap_or("")
     }
 
     /// 先頭トークンが `$PATH` 上の実行可能ファイルとして存在するか。
@@ -292,74 +134,12 @@ impl InputClassifier {
     }
 
     /// PATH lookup キャッシュをクリアする。
-    ///
-    /// テストで PATH 変更後に即座に再走査させるために使用する。
     #[cfg(test)]
     fn clear_path_cache(&self) {
         if let Ok(mut cache) = self.path_cache.lock() {
             cache.clear();
         }
     }
-
-    /// 入力にシェル構文（パイプ、論理演算子、セミコロン、変数展開、代入）が含まれるか。
-    fn has_shell_syntax(input: &str) -> bool {
-        // パイプ、論理演算子、セミコロン
-        input.contains('|')
-            || input.contains("&&")
-            || input.contains(';')
-            // 変数展開（先頭が $ で始まる）
-            || input.starts_with('$')
-            // 環境変数代入パターン（KEY=value）
-            || input.split_whitespace().any(|token| {
-                token.contains('=')
-                    && token.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-            })
-    }
-
-    /// 入力文字列から先頭トークン（空白前の最初の語）を取得する。
-    fn first_token(input: &str) -> &str {
-        input.split_whitespace().next().unwrap_or("")
-    }
-}
-
-/// AI の応答テキストが Goodbye（別れの挨拶）を含むかを判定する。
-///
-/// 誤検出を防ぐため、応答テキストの末尾付近（最後の3行）のみを検査する。
-/// AI が文中で "goodbye" に言及しただけの場合はトリガーしない。
-pub fn is_ai_goodbye_response(text: &str) -> bool {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    // 末尾3行を取得して検査対象とする
-    let lines: Vec<&str> = trimmed.lines().collect();
-    let tail_start = if lines.len() > 3 { lines.len() - 3 } else { 0 };
-    let tail = lines[tail_start..].join("\n").to_lowercase();
-
-    let farewell_patterns = [
-        // 英語
-        "goodbye",
-        "good bye",
-        "farewell",
-        "signing off",
-        "until next time",
-        "see you later",
-        "see you soon",
-        "good night",
-        "take care",
-        // 日本語
-        "さようなら",
-        "さよなら",
-        "おやすみなさい",
-        "良い夜を",
-        "良い一日を",
-        "お疲れ様",
-        "お疲れさま",
-        "またお会い",
-    ];
-
-    farewell_patterns.iter().any(|p| tail.contains(p))
 }
 
 #[cfg(test)]
@@ -370,8 +150,6 @@ mod tests {
     fn test_classifier() -> InputClassifier {
         InputClassifier::new()
     }
-
-    // ── InputType: コマンド判定 ──
 
     #[test]
     fn classify_simple_command() {
@@ -418,8 +196,6 @@ mod tests {
         let c = test_classifier();
         assert_eq!(c.classify("$HOME/bin/tool"), InputType::Command);
     }
-
-    // ── InputType: 自然言語判定 ──
 
     #[test]
     fn classify_jarvis_trigger() {
@@ -492,12 +268,9 @@ mod tests {
         assert_eq!(c.classify("   "), InputType::Command);
     }
 
-    // ── リアルタイム PATH 解決 ──
-
     #[test]
     fn realtime_path_resolution_finds_common_commands() {
         let c = test_classifier();
-        // ls と cat は macOS/Linux のどちらにも存在するはず
         assert_eq!(c.classify("ls"), InputType::Command);
         assert_eq!(c.classify("cat file.txt"), InputType::Command);
     }
@@ -511,10 +284,8 @@ mod tests {
         let c = test_classifier();
         let fake_cmd = "zzz_jarvish_test_fake_cmd_42";
 
-        // 変更前: 存在しないコマンドは NaturalLanguage
         assert_eq!(c.classify(fake_cmd), InputType::NaturalLanguage);
 
-        // 一時ディレクトリに実行権限付きの架空コマンドを配置
         let tmp_dir = std::env::temp_dir().join("jarvish_test_realtime");
         let _ = fs::remove_dir_all(&tmp_dir);
         fs::create_dir_all(&tmp_dir).unwrap();
@@ -522,14 +293,12 @@ mod tests {
         fs::write(&fake_bin, "#!/bin/sh\necho hello\n").unwrap();
         fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o755)).unwrap();
 
-        // PATH に一時ディレクトリを追加
         let original_path = std::env::var("PATH").unwrap();
         let new_path = format!("{}:{original_path}", tmp_dir.display());
         unsafe {
             std::env::set_var("PATH", &new_path);
         }
 
-        // TTL キャッシュをクリアして PATH 変更を即座に反映
         c.clear_path_cache();
 
         assert_eq!(
@@ -538,24 +307,19 @@ mod tests {
             "should be Command after PATH change and cache clear"
         );
 
-        // クリーンアップ
         unsafe {
             std::env::set_var("PATH", &original_path);
         }
         let _ = fs::remove_dir_all(&tmp_dir);
 
-        // キャッシュクリアで PATH 復元を反映
         c.clear_path_cache();
 
         assert_eq!(c.classify(fake_cmd), InputType::NaturalLanguage);
     }
 
-    // ── エッジケース ──
-
     #[test]
     fn classify_apostrophe_input() {
         let c = test_classifier();
-        // "I'm tired, Jarvis" のようなアポストロフィ入力は自然言語
         assert_eq!(c.classify("I'm tired, Jarvis"), InputType::NaturalLanguage);
     }
 
@@ -564,8 +328,6 @@ mod tests {
         let c = test_classifier();
         assert_eq!(c.classify("echo hello; echo world"), InputType::Command);
     }
-
-    // ── InputType: Goodbye 判定 ──
 
     #[test]
     fn classify_goodbye_english() {
@@ -618,7 +380,6 @@ mod tests {
     #[test]
     fn classify_goodbye_with_trailing_words() {
         let c = test_classifier();
-        // 短い追加語は許容する
         assert_eq!(c.classify("bye jarvis"), InputType::Goodbye);
         assert_eq!(c.classify("goodbye sir"), InputType::Goodbye);
         assert_eq!(c.classify("see you later"), InputType::Goodbye);
@@ -627,7 +388,6 @@ mod tests {
     #[test]
     fn classify_goodbye_false_positives() {
         let c = test_classifier();
-        // 長い文の中に goodbye が含まれる場合は goodbye として扱わない
         assert_ne!(
             c.classify("say goodbye to the old config file and update"),
             InputType::Goodbye
@@ -636,51 +396,5 @@ mod tests {
             c.classify("echo goodbye world from here today"),
             InputType::Goodbye
         );
-    }
-
-    // ── AI Goodbye レスポンス検出 ──
-
-    #[test]
-    fn ai_goodbye_response_english() {
-        assert!(is_ai_goodbye_response("Goodbye, sir. It was a pleasure."));
-        assert!(is_ai_goodbye_response(
-            "I've completed the task.\nFarewell, sir."
-        ));
-        assert!(is_ai_goodbye_response(
-            "That's all done.\nUntil next time, sir."
-        ));
-        assert!(is_ai_goodbye_response("Take care, sir. Signing off."));
-    }
-
-    #[test]
-    fn ai_goodbye_response_japanese() {
-        assert!(is_ai_goodbye_response("承知しました。さようなら。"));
-        assert!(is_ai_goodbye_response(
-            "タスクは完了しました。\nおやすみなさい。"
-        ));
-        assert!(is_ai_goodbye_response("お疲れ様でした。良い一日を。"));
-    }
-
-    #[test]
-    fn ai_goodbye_response_not_goodbye() {
-        // 空テキスト
-        assert!(!is_ai_goodbye_response(""));
-        // farewell パターンを含まない通常応答
-        assert!(!is_ai_goodbye_response(
-            "Here is the command you need: ls -la"
-        ));
-        assert!(!is_ai_goodbye_response("エラーの原因はこちらです。"));
-    }
-
-    #[test]
-    fn ai_goodbye_response_only_checks_tail() {
-        // 先頭に goodbye があっても末尾3行になければ検出しない
-        let long_response = "Goodbye was mentioned here.\n\
-                             Line 2\n\
-                             Line 3\n\
-                             Line 4\n\
-                             Line 5\n\
-                             This is just a normal response.";
-        assert!(!is_ai_goodbye_response(long_response));
     }
 }
