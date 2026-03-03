@@ -33,6 +33,8 @@ impl Shell {
         }
 
         // 0. エイリアス展開（先頭トークンがエイリアスに一致すれば置換）
+        // 履歴にはユーザーが実際に入力した文字列を記録するため、展開前の入力を保持する
+        let original_line = line.clone();
         let line = if let Some(expanded) = expand::expand_alias(&line, &self.aliases) {
             debug!(original = %line, expanded = %expanded, "Alias expanded");
             expanded
@@ -44,12 +46,12 @@ impl Shell {
 
         // 0.5. alias / unalias / source は Shell 状態を操作するためインターセプト
         if let Some(result) = self.try_shell_builtins(&line) {
-            return self.handle_builtin(&line, result);
+            return self.handle_builtin(&original_line, &line, result);
         }
 
         // 1. ビルトインコマンドをチェック（cd, cwd, exit, export 等は AI を介さず直接実行）
         if let Some(result) = try_builtin(&line) {
-            return self.handle_builtin(&line, result);
+            return self.handle_builtin(&original_line, &line, result);
         }
 
         // 2. アルゴリズムで入力を分類（AI を呼ばず瞬時に判定）
@@ -94,8 +96,8 @@ impl Shell {
         }
         println!(); // 実行結果の後に空行を追加
 
-        // 5. 履歴を記録
-        self.record_history(&line, &result);
+        // 5. 履歴を記録（エイリアス展開前の入力を記録する）
+        self.record_history(&original_line, &result);
 
         // 6. AI が実行したコマンドを reedline 履歴に追加（矢印キーで辿れるようにする）
         if let Some(ref cmd) = executed_command {
@@ -127,8 +129,11 @@ impl Shell {
 
     /// ビルトインコマンドの結果を処理する。
     ///
+    /// - `original_line`: エイリアス展開前のユーザー入力（履歴記録用）
+    /// - `line`: エイリアス展開後のコマンド（ログ用）
+    ///
     /// 戻り値: `true` = REPL ループ続行、`false` = シェル終了
-    fn handle_builtin(&mut self, line: &str, result: CommandResult) -> bool {
+    fn handle_builtin(&mut self, original_line: &str, line: &str, result: CommandResult) -> bool {
         debug!(
             command = %line,
             exit_code = result.exit_code,
@@ -143,7 +148,7 @@ impl Shell {
 
         match result.action {
             LoopAction::Continue => {
-                self.record_history(line, &result);
+                self.record_history(original_line, &result);
                 true
             }
             LoopAction::Exit => {
