@@ -207,6 +207,28 @@ mod tests {
         );
         assert_eq!(c.classify("hey jarvis"), InputType::NaturalLanguage);
         assert_eq!(c.classify("j, commit please"), InputType::NaturalLanguage);
+        assert_eq!(c.classify("jarvis"), InputType::NaturalLanguage);
+    }
+
+    #[test]
+    fn jarvis_trigger_ignores_words_starting_with_jarvis() {
+        let c = test_classifier();
+        assert!(
+            !c.is_jarvis_trigger("jarvish"),
+            "jarvish must not match Jarvis trigger"
+        );
+        assert!(
+            !c.is_jarvis_trigger("jarvisbot --help"),
+            "jarvisbot must not match Jarvis trigger"
+        );
+        assert!(c.is_jarvis_trigger("jarvis"));
+        assert!(c.is_jarvis_trigger("jarvis help"));
+        assert!(c.is_jarvis_trigger("jarvis, help"));
+        assert!(c.is_jarvis_trigger("hey jarvis, help"));
+        assert!(
+            !c.is_jarvis_trigger("hey jarvish"),
+            "hey jarvish must not match Jarvis trigger"
+        );
     }
 
     #[test]

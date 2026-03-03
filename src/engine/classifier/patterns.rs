@@ -88,10 +88,26 @@ impl super::InputClassifier {
     }
 
     /// Jarvis に話しかけるトリガーパターンかを判定する。
+    ///
+    /// "jarvis" / "hey jarvis" の直後が英数字の場合は別コマンド
+    /// （例: `jarvish`）とみなしトリガーしない。
     pub(super) fn is_jarvis_trigger(&self, input: &str) -> bool {
         let lower = input.to_lowercase();
-        lower.starts_with("jarvis")
-            || lower.starts_with("hey jarvis")
+
+        let jarvis_word = lower.starts_with("jarvis")
+            && !lower
+                .as_bytes()
+                .get(6)
+                .is_some_and(|b| b.is_ascii_alphanumeric());
+
+        let hey_jarvis_word = lower.starts_with("hey jarvis")
+            && !lower
+                .as_bytes()
+                .get(10)
+                .is_some_and(|b| b.is_ascii_alphanumeric());
+
+        jarvis_word
+            || hey_jarvis_word
             || lower.starts_with("j,")
             || lower.starts_with("j ") && !self.is_command_in_path("j")
     }
