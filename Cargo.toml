@@ -47,6 +47,7 @@ toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 termimad = "0.34"
 sysinfo = "0.34"
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"

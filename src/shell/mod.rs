@@ -118,7 +118,13 @@ impl Shell {
     fn apply_exports(config: &JarvishConfig) {
         for (key, value) in &config.export {
             let expanded = expand::expand_token(value);
-            info!(key = %key, value = %expanded, "Applying export from config");
+            let display = format!("{key}={expanded}");
+            let masked = if crate::storage::sanitizer::contains_secrets(&display) {
+                crate::storage::sanitizer::mask_secrets(&display)
+            } else {
+                display
+            };
+            info!(masked = %masked, "Applying export from config");
             // SAFETY: シェル起動時のシングルスレッド初期化で呼ばれるため安全
             unsafe {
                 std::env::set_var(key, &expanded);
