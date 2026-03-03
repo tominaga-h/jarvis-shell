@@ -85,6 +85,7 @@ model = "gpt-4o" # AI model to use
 max_rounds = 10 # Max agent loop rounds
 markdown_rendering = true # Set to false to disable Markdown rendering
 ai_pipe_max_chars = 50000 # Max characters for AI Pipe input
+ai_redirect_max_chars = 50000 # Max characters for AI Redirect input
 temperature = 0.5 # Response randomness (0.0 = deterministic, 2.0 = max random)
 
 [alias]

@@ -17,6 +17,7 @@ impl super::JarvishConfig {
 # max_rounds = 10
 # markdown_rendering = true  # false にすると Markdown レンダリングを無効化
 # ai_pipe_max_chars = 50000
+# ai_redirect_max_chars = 50000
 # temperature = 0.5          # 回答のランダム性 (0.0=決定的, 2.0=最大ランダム)
 
 [alias]

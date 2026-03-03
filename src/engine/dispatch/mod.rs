@@ -6,7 +6,7 @@
 
 mod ai_pipe;
 
-pub use ai_pipe::{try_execute_ai_pipe, AiPipeRequest};
+pub use ai_pipe::{try_execute_ai_pipe, AiPipeMode, AiPipeRequest};
 
 use tracing::debug;
 

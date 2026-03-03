@@ -8,6 +8,7 @@ alwaysApply: true
 
 - 毎回、 `docs/OVERVIEW.md` を読み込み、プロジェクトの概要を確認すること。
 - `cargo build` `cargo test` `cargo check` コマンドはサンドボックスで実行しないこと。
+- config値の設定を変更する場合は、必ずソースコード内コメントと `README.md`・`docs/README_JA.md`、そして `source` コマンド実行後の出力に反映すること。
 
 ## コーディング規約
 

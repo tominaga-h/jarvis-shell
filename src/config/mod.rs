@@ -11,6 +11,7 @@
 //! max_rounds = 10
 //! markdown_rendering = true
 //! ai_pipe_max_chars = 50000
+//! ai_redirect_max_chars = 50000
 //! temperature = 0.5
 //!
 //! [alias]
@@ -58,6 +59,8 @@ pub struct AiConfig {
     pub markdown_rendering: bool,
     /// AI パイプ (`cmd | ai "..."`) の入力テキスト文字数上限
     pub ai_pipe_max_chars: usize,
+    /// AI リダイレクト (`cmd > ai "..."`) の入力テキスト文字数上限
+    pub ai_redirect_max_chars: usize,
     /// 回答のランダム性（0.0 = 決定的、2.0 = 最大ランダム）
     pub temperature: f32,
 }
@@ -69,6 +72,7 @@ impl Default for AiConfig {
             max_rounds: 10,
             markdown_rendering: true,
             ai_pipe_max_chars: 50_000,
+            ai_redirect_max_chars: 50_000,
             temperature: 0.5,
         }
     }

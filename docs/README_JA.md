@@ -85,6 +85,7 @@ model = "gpt-4o" # 使用する AI モデル
 max_rounds = 10 # エージェントループの最大ラウンド数
 markdown_rendering = true # falseにするとMarkdownレンダリングをしない
 ai_pipe_max_chars = 50000 # AIパイプへの入力文字数上限
+ai_redirect_max_chars = 50000 # AIリダイレクトへの入力文字数上限
 temperature = 0.5 # 回答のランダム性 (0.0=決定的, 2.0=最大ランダム)
 
 [alias]
