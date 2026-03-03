@@ -21,6 +21,7 @@
 - When a command fails, Jarvis **automatically investigates** the error using stdout/stderr context
 - Jarvis can **read and write files**, execute commands as an AI agent with tool-calling capabilities
 - **AI Pipe (`| ai "..."`)**: Filter, transform, or extract data from command outputs using natural language (e.g., `cat access.log | ai "extract only 500 errors"`)
+- **AI Redirect (`> ai "..."`)**: Send command output to Jarvis for conversational analysis (e.g., `git log --oneline -10 > ai "summarize recent changes"`)
 
 ### Fish-like UX
 
@@ -32,7 +33,8 @@
 
 - Every command execution is **persisted** — command, timestamp, working directory, exit code
 - stdout/stderr outputs are stored in a **Git-like content-addressable blob storage** (SHA-256 + zstd compression)
-- Ask Jarvis about _"last week's error"_ — even after restarting the shell
+- Ask Jarvis about _"yesterday's error"_ — even after restarting the shell
+- **Security:** Sensitive information such as API keys or tokens (e.g., those stored in `.bashrc`) are **masked** before being saved.
 
 ### Shell Fundamentals
 
@@ -101,7 +103,7 @@ nerd_font = true # Set to false if NerdFont is not installed
 
 | Section    | Description                                                                         |
 | ---------- | ----------------------------------------------------------------------------------- |
-| `[ai]`     | AI model name, agent loop limit, Markdown rendering toggle, AI Pipe input limit, and temperature |
+| `[ai]`     | AI model name, agent loop limit, Markdown rendering toggle, AI Pipe / Redirect input limits, and temperature |
 | `[alias]`  | Command aliases (also manageable via `alias` / `unalias` builtins)                  |
 | `[export]` | Environment variables applied on startup (supports `$VAR` expansion)                |
 | `[prompt]` | Prompt display settings (`nerd_font = false` disables NerdFont icons)               |
