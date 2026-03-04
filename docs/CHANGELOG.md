@@ -3,6 +3,18 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.2.1](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.2.1) - 2026-03-04
+
+### Added
+
+- `which` / `type` ビルトインコマンドを実装 ([#74](https://github.com/tominaga-h/jarvis-shell/issues/74))
+- `pushd` / `popd` / `dirs` ビルトインコマンドを実装 ([#73](https://github.com/tominaga-h/jarvis-shell/issues/73))
+- `pwd` コマンドを `cwd` のエイリアスとして追加
+
+### Changed
+
+- README を再構築し、目次を追加（英語版・日本語版）
+
 ## [v1.2.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.2.0) - 2026-03-04
 
 ### Added
