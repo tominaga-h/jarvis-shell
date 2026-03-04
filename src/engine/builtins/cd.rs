@@ -17,7 +17,9 @@ struct CdArgs {
 /// - 引数なし → `$HOME` へ移動
 /// - 引数あり → 指定パスへ移動
 ///   展開は execute 側で実施済み
-pub(super) fn execute(args: &[&str]) -> CommandResult {
+///
+/// cd 成功時、変更前のカレントディレクトリを `dir_stack` に push する。
+pub(crate) fn execute(args: &[&str], dir_stack: &mut Vec<PathBuf>) -> CommandResult {
     let parsed = match super::parse_args::<CdArgs>("cd", args) {
         Ok(a) => a,
         Err(result) => return result,
@@ -46,11 +48,10 @@ pub(super) fn execute(args: &[&str]) -> CommandResult {
 
     match env::set_current_dir(&target) {
         Ok(()) => {
-            // OLDPWD を設定
             if let Some(old) = old_pwd {
+                dir_stack.push(PathBuf::from(&old));
                 env::set_var("OLDPWD", &old);
             }
-            // PWD を新しいディレクトリに設定
             if let Ok(new_pwd) = env::current_dir() {
                 env::set_var("PWD", &new_pwd);
             }
@@ -80,7 +81,7 @@ mod tests {
         let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
         let target = tmpdir.path().to_path_buf();
 
-        let result = execute(&[target.to_str().unwrap()]);
+        let result = execute(&[target.to_str().unwrap()], &mut Vec::new());
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.action, LoopAction::Continue);
 
@@ -94,7 +95,7 @@ mod tests {
     fn cd_no_args_goes_home() {
         let _guard = CwdGuard::new();
         if let Some(home) = env::var_os("HOME") {
-            let result = execute(&[]);
+            let result = execute(&[], &mut Vec::new());
             assert_eq!(result.exit_code, 0);
 
             let cwd = env::current_dir().unwrap();
@@ -109,14 +110,14 @@ mod tests {
     #[serial]
     fn cd_nonexistent_path_returns_error() {
         let _guard = CwdGuard::new();
-        let result = execute(&["/nonexistent_path_that_does_not_exist"]);
+        let result = execute(&["/nonexistent_path_that_does_not_exist"], &mut Vec::new());
         assert_ne!(result.exit_code, 0);
         assert!(result.stderr.contains("cd:"));
     }
 
     #[test]
     fn cd_help_returns_success() {
-        let result = execute(&["--help"]);
+        let result = execute(&["--help"], &mut Vec::new());
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("cd"));
     }
@@ -128,7 +129,7 @@ mod tests {
         let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
         let target = tmpdir.path().to_path_buf();
 
-        let result = execute(&[target.to_str().unwrap()]);
+        let result = execute(&[target.to_str().unwrap()], &mut Vec::new());
         assert_eq!(result.exit_code, 0);
 
         // $PWD が新しいディレクトリに更新されていること
@@ -150,7 +151,7 @@ mod tests {
         let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
         let target = tmpdir.path().to_path_buf();
 
-        let result = execute(&[target.to_str().unwrap()]);
+        let result = execute(&[target.to_str().unwrap()], &mut Vec::new());
         assert_eq!(result.exit_code, 0);
 
         // $OLDPWD が変更前のディレクトリを保持していること

@@ -7,13 +7,18 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("alias", "Set or display aliases"),
     ("cd", "Change the current directory"),
     ("cwd", "Print the current working directory"),
+    ("dirs", "Display directory stack"),
     ("exit", "Exit the shell"),
     ("export", "Set or display environment variables"),
     ("help", "Display help for builtin commands"),
     ("history", "Display or manage command history"),
+    ("popd", "Pop directory from stack and change to it"),
+    ("pushd", "Push directory onto stack and change to it"),
     ("source", "Load a configuration file (TOML)"),
+    ("type", "Display information about command type"),
     ("unalias", "Remove aliases"),
     ("unset", "Remove environment variables"),
+    ("which", "Locate a command (builtin, alias, or external)"),
 ];
 
 /// help: ビルトインコマンドのヘルプを表示する。

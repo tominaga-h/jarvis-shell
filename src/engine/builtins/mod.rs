@@ -1,6 +1,7 @@
 pub(crate) mod alias;
-mod cd;
+pub(crate) mod cd;
 mod cwd;
+pub(crate) mod dirstack;
 mod exit;
 mod export;
 mod help;
@@ -8,6 +9,7 @@ mod history;
 pub(crate) mod source;
 pub(crate) mod unalias;
 mod unset;
+pub(crate) mod which_type;
 
 use super::CommandResult;
 
@@ -36,13 +38,19 @@ pub fn is_builtin(cmd: &str) -> bool {
         "alias"
             | "cd"
             | "cwd"
+            | "dirs"
+            | "pwd"
             | "exit"
             | "export"
             | "help"
+            | "popd"
+            | "pushd"
             | "source"
             | "unalias"
             | "unset"
             | "history"
+            | "which"
+            | "type"
     )
 }
 
@@ -54,8 +62,9 @@ pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
             args,
             &mut std::collections::HashMap::new(),
         )),
-        "cd" => Some(cd::execute(args)),
-        "cwd" => Some(cwd::execute(args)),
+        "cd" => Some(cd::execute(args, &mut Vec::new())),
+        "cwd" | "pwd" => Some(cwd::execute(args)),
+        "dirs" => Some(dirstack::execute_dirs(args, &mut Vec::new())),
         "exit" => Some(exit::execute(args)),
         "export" => Some(export::execute(args)),
         "help" => Some(help::execute(args)),
@@ -66,8 +75,18 @@ pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
         "source" => {
             Some(source::parse(args).map_or_else(|e| e, |_| CommandResult::success(String::new())))
         }
+        "pushd" => Some(dirstack::execute_pushd(args, &mut Vec::new())),
+        "popd" => Some(dirstack::execute_popd(args, &mut Vec::new())),
         "unset" => Some(unset::execute(args)),
         "history" => Some(history::execute(args)),
+        "which" => Some(which_type::execute_which(
+            args,
+            &std::collections::HashMap::new(),
+        )),
+        "type" => Some(which_type::execute_type(
+            args,
+            &std::collections::HashMap::new(),
+        )),
         _ => None,
     }
 }
@@ -158,10 +177,22 @@ mod tests {
     // ── 新規ビルトイン登録テスト ──
 
     #[test]
+    fn pwd_is_alias_for_cwd() {
+        assert!(is_builtin("pwd"));
+        let pwd_result = dispatch_builtin("pwd", &[]).unwrap();
+        assert_eq!(pwd_result.exit_code, 0);
+        let cwd_result = dispatch_builtin("cwd", &[]).unwrap();
+        assert_eq!(pwd_result.stdout, cwd_result.stdout);
+    }
+
+    #[test]
     fn new_builtins_are_registered() {
         assert!(is_builtin("alias"));
+        assert!(is_builtin("dirs"));
         assert!(is_builtin("export"));
         assert!(is_builtin("help"));
+        assert!(is_builtin("popd"));
+        assert!(is_builtin("pushd"));
         assert!(is_builtin("source"));
         assert!(is_builtin("unalias"));
         assert!(is_builtin("unset"));
