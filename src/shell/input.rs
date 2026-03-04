@@ -11,7 +11,7 @@ use reedline::HistoryItem;
 
 use std::path::PathBuf;
 
-use crate::engine::builtins::{alias, source, unalias};
+use crate::engine::builtins::{alias, cd, dirstack, source, unalias};
 use crate::engine::classifier::{is_ai_goodbye_response, InputType};
 use crate::engine::dispatch::{AiPipeMode, AiPipeRequest};
 use crate::engine::expand;
@@ -159,14 +159,19 @@ impl Shell {
         }
     }
 
-    /// Shell 状態を操作するビルトイン（alias / unalias / source）をインターセプトする。
+    /// Shell 状態を操作するビルトインをインターセプトする。
+    ///
+    /// 対象: alias / unalias / source / cd / pushd / popd / dirs
     ///
     /// 先頭ワードが対象コマンドであり、かつパイプ・リダイレクト等を
     /// 含まない単純なコマンドの場合に `Some(CommandResult)` を返す。
     /// それ以外は `None` を返し、通常の実行パスに委ねる。
     fn try_shell_builtins(&mut self, input: &str) -> Option<CommandResult> {
         let first_word = input.split_whitespace().next().unwrap_or("");
-        if !matches!(first_word, "alias" | "unalias" | "source") {
+        if !matches!(
+            first_word,
+            "alias" | "unalias" | "source" | "cd" | "pushd" | "popd" | "dirs"
+        ) {
             return None;
         }
 
@@ -201,7 +206,6 @@ impl Shell {
             "alias" => alias::execute_with_aliases(&args, &mut self.aliases),
             "unalias" => unalias::execute_with_aliases(&args, &mut self.aliases),
             "source" => {
-                // clap で引数パース（--help やエラーはここで処理される）
                 let path_str = match source::parse(&args) {
                     Ok(p) => p,
                     Err(cmd_result) => return Some(cmd_result),
@@ -209,6 +213,10 @@ impl Shell {
                 let path = PathBuf::from(&path_str);
                 self.reload_config(&path)
             }
+            "cd" => cd::execute(&args, &mut self.dir_stack),
+            "pushd" => dirstack::execute_pushd(&args, &mut self.dir_stack),
+            "popd" => dirstack::execute_popd(&args, &mut self.dir_stack),
+            "dirs" => dirstack::execute_dirs(&args, &mut self.dir_stack),
             _ => unreachable!(),
         };
 

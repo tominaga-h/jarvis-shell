@@ -1,6 +1,7 @@
 pub(crate) mod alias;
-mod cd;
+pub(crate) mod cd;
 mod cwd;
+pub(crate) mod dirstack;
 mod exit;
 mod export;
 mod help;
@@ -36,10 +37,13 @@ pub fn is_builtin(cmd: &str) -> bool {
         "alias"
             | "cd"
             | "cwd"
+            | "dirs"
             | "pwd"
             | "exit"
             | "export"
             | "help"
+            | "popd"
+            | "pushd"
             | "source"
             | "unalias"
             | "unset"
@@ -55,8 +59,9 @@ pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
             args,
             &mut std::collections::HashMap::new(),
         )),
-        "cd" => Some(cd::execute(args)),
+        "cd" => Some(cd::execute(args, &mut Vec::new())),
         "cwd" | "pwd" => Some(cwd::execute(args)),
+        "dirs" => Some(dirstack::execute_dirs(args, &mut Vec::new())),
         "exit" => Some(exit::execute(args)),
         "export" => Some(export::execute(args)),
         "help" => Some(help::execute(args)),
@@ -67,6 +72,8 @@ pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
         "source" => {
             Some(source::parse(args).map_or_else(|e| e, |_| CommandResult::success(String::new())))
         }
+        "pushd" => Some(dirstack::execute_pushd(args, &mut Vec::new())),
+        "popd" => Some(dirstack::execute_popd(args, &mut Vec::new())),
         "unset" => Some(unset::execute(args)),
         "history" => Some(history::execute(args)),
         _ => None,
@@ -170,8 +177,11 @@ mod tests {
     #[test]
     fn new_builtins_are_registered() {
         assert!(is_builtin("alias"));
+        assert!(is_builtin("dirs"));
         assert!(is_builtin("export"));
         assert!(is_builtin("help"));
+        assert!(is_builtin("popd"));
+        assert!(is_builtin("pushd"));
         assert!(is_builtin("source"));
         assert!(is_builtin("unalias"));
         assert!(is_builtin("unset"));

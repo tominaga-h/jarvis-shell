@@ -9,6 +9,7 @@ mod input;
 mod investigate;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
@@ -34,6 +35,8 @@ pub struct Shell {
     classifier: Arc<InputClassifier>,
     /// 設定ファイルで定義されたコマンドエイリアス
     aliases: HashMap<String, String>,
+    /// pushd / popd / cd で管理されるディレクトリスタック
+    dir_stack: Vec<PathBuf>,
     /// Farewell メッセージが既に表示済みかどうか（AI goodbye 等で表示済みの場合 true）
     farewell_shown: bool,
     /// コマンド履歴（reedline 矢印キー・ヒンター）が利用可能か
@@ -106,6 +109,7 @@ impl Shell {
             last_exit_code,
             classifier,
             aliases: config.alias,
+            dir_stack: Vec::new(),
             farewell_shown: false,
             history_available,
             logging_operational,
