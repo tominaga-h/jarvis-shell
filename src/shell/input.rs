@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use crate::engine::builtins::{alias, source, unalias};
 use crate::engine::classifier::{is_ai_goodbye_response, InputType};
-use crate::engine::dispatch::AiPipeRequest;
+use crate::engine::dispatch::{AiPipeMode, AiPipeRequest};
 use crate::engine::expand;
 use crate::engine::{execute, try_builtin, try_execute_ai_pipe, CommandResult, LoopAction};
 
@@ -66,9 +66,10 @@ impl Shell {
                 return false;
             }
             InputType::Command => {
-                // AI パイプ検出: `cmd | ai "prompt"` パターンをインターセプト
+                // AI パイプ / リダイレクト検出:
+                // `cmd | ai "prompt"` または `cmd > ai "prompt"` をインターセプト
                 if let Some(ai_pipe_req) = try_execute_ai_pipe(&line) {
-                    debug!(input = %line, "AI pipe detected");
+                    debug!(input = %line, mode = ?ai_pipe_req.mode, "AI pipe/redirect detected");
                     let result = self.handle_ai_pipe(ai_pipe_req).await;
                     (result, false, true, None)
                 } else {
@@ -232,10 +233,11 @@ impl Shell {
         }
     }
 
-    /// AI パイプリクエストを処理する。
+    /// AI パイプ / リダイレクトリクエストを処理する。
     ///
-    /// 手前パイプラインの stdout キャプチャ結果を AI に渡し、
-    /// フィルタリング結果を `CommandResult` として返す。
+    /// 手前パイプラインの stdout キャプチャ結果を AI に渡し、結果を返す。
+    /// - `Filter` モード: テキストフィルタとして動作（`| ai`）
+    /// - `Redirect` モード: Jarvis が対話的に応答（`> ai`）
     async fn handle_ai_pipe(&self, req: AiPipeRequest) -> CommandResult {
         let ai = match self.ai_client {
             Some(ref ai) => ai,
@@ -246,10 +248,10 @@ impl Shell {
             }
         };
 
-        // stdout が空の場合は AI 呼び出しをスキップ
         if req.stdin_text.is_empty() {
             debug!(
                 exit_code = req.exit_code,
+                mode = ?req.mode,
                 "AI pipe: source pipeline produced no stdout, skipping AI"
             );
             let msg = "jarvish: AI pipe: no input received from the source pipeline.\n";
@@ -261,10 +263,16 @@ impl Shell {
             prompt = %req.prompt,
             input_chars = req.stdin_text.chars().count(),
             source_exit_code = req.exit_code,
+            mode = ?req.mode,
             "Processing AI pipe"
         );
 
-        match ai.process_ai_pipe(&req.stdin_text, &req.prompt).await {
+        let result = match req.mode {
+            AiPipeMode::Filter => ai.process_ai_pipe(&req.stdin_text, &req.prompt).await,
+            AiPipeMode::Redirect => ai.process_ai_redirect(&req.stdin_text, &req.prompt).await,
+        };
+
+        match result {
             Ok(output) => CommandResult::success(output),
             Err(e) => {
                 let msg = format!("jarvish: {e}\n");

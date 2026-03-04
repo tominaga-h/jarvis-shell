@@ -1,7 +1,7 @@
 # 🤵 Jarvis Shell (jarvish)
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-[![version](https://img.shields.io/badge/version-1.1.2-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.1.2)
+[![version](https://img.shields.io/badge/version-1.2.0-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.2.0)
 
 > 🌐 [English README](../README.md)
 
@@ -21,6 +21,7 @@
 - コマンドが失敗すると、Jarvis が stdout/stderr のコンテキストを使って**自動的にエラーを調査**
 - Jarvis は AI エージェントとして**ファイルの読み書き**やコマンド実行が可能（ツールコール機能）
 - **AI パイプ (`| ai "..."`)**: コマンドの出力を自然言語でフィルタリング・整形・抽出（例: `cat access.log | ai "500番台のエラーだけ抽出して"`）
+- **AI リダイレクト (`> ai "..."`)**: コマンドの出力を Jarvis に送り、対話的に分析・応答させる（例: `git log --oneline -10 > ai "最近の変更を要約して"`）
 
 ### Fish ライクな UX
 
@@ -32,7 +33,8 @@
 
 - すべてのコマンド実行が**永続化** — コマンド、タイムスタンプ、作業ディレクトリ、終了コード
 - stdout/stderr の出力は **Git ライクなコンテンツアドレッサブル Blob ストレージ**に保存（SHA-256 + zstd 圧縮）
-- シェルを再起動しても、*「先週のエラー」*について Jarvis に相談可能
+- シェルを再起動しても、*「昨日のエラー」*について Jarvis に相談可能
+- **セキュリティ対策**: `.bashrc` などに記載されたAPIキーやトークンなどの機密事項は **マスキング** を実施して保存
 
 ### シェルの基本機能
 
@@ -85,6 +87,7 @@ model = "gpt-4o" # 使用する AI モデル
 max_rounds = 10 # エージェントループの最大ラウンド数
 markdown_rendering = true # falseにするとMarkdownレンダリングをしない
 ai_pipe_max_chars = 50000 # AIパイプへの入力文字数上限
+ai_redirect_max_chars = 50000 # AIリダイレクトへの入力文字数上限
 temperature = 0.5 # 回答のランダム性 (0.0=決定的, 2.0=最大ランダム)
 
 [alias]
@@ -100,7 +103,7 @@ nerd_font = true # NerdFont 未インストールの場合は false に設定
 
 | セクション | 説明                                                                   |
 | ---------- | ---------------------------------------------------------------------- |
-| `[ai]`     | AI モデル名、エージェントループ上限、Markdownレンダリング、AIパイプ入力上限、temperature |
+| `[ai]`     | AI モデル名、エージェントループ上限、Markdownレンダリング、AIパイプ/リダイレクト入力上限、temperature |
 | `[alias]`  | コマンドエイリアス（`alias` / `unalias` ビルトインでも管理可能）       |
 | `[export]` | 起動時に適用する環境変数（`$VAR` 展開に対応）                          |
 | `[prompt]` | プロンプト表示設定（`nerd_font = false` で NerdFont アイコンを無効化） |

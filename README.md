@@ -1,7 +1,7 @@
 # 🤵 Jarvis Shell (jarvish)
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-[![version](https://img.shields.io/badge/version-1.1.2-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.1.2)
+[![version](https://img.shields.io/badge/version-1.2.0-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.2.0)
 
 > 🌐 [日本語版 README はこちら](docs/README_JA.md)
 
@@ -21,6 +21,7 @@
 - When a command fails, Jarvis **automatically investigates** the error using stdout/stderr context
 - Jarvis can **read and write files**, execute commands as an AI agent with tool-calling capabilities
 - **AI Pipe (`| ai "..."`)**: Filter, transform, or extract data from command outputs using natural language (e.g., `cat access.log | ai "extract only 500 errors"`)
+- **AI Redirect (`> ai "..."`)**: Send command output to Jarvis for conversational analysis (e.g., `git log --oneline -10 > ai "summarize recent changes"`)
 
 ### Fish-like UX
 
@@ -32,7 +33,8 @@
 
 - Every command execution is **persisted** — command, timestamp, working directory, exit code
 - stdout/stderr outputs are stored in a **Git-like content-addressable blob storage** (SHA-256 + zstd compression)
-- Ask Jarvis about _"last week's error"_ — even after restarting the shell
+- Ask Jarvis about _"yesterday's error"_ — even after restarting the shell
+- **Security:** Sensitive information such as API keys or tokens (e.g., those stored in `.bashrc`) are **masked** before being saved.
 
 ### Shell Fundamentals
 
@@ -85,6 +87,7 @@ model = "gpt-4o" # AI model to use
 max_rounds = 10 # Max agent loop rounds
 markdown_rendering = true # Set to false to disable Markdown rendering
 ai_pipe_max_chars = 50000 # Max characters for AI Pipe input
+ai_redirect_max_chars = 50000 # Max characters for AI Redirect input
 temperature = 0.5 # Response randomness (0.0 = deterministic, 2.0 = max random)
 
 [alias]
@@ -100,7 +103,7 @@ nerd_font = true # Set to false if NerdFont is not installed
 
 | Section    | Description                                                                         |
 | ---------- | ----------------------------------------------------------------------------------- |
-| `[ai]`     | AI model name, agent loop limit, Markdown rendering toggle, AI Pipe input limit, and temperature |
+| `[ai]`     | AI model name, agent loop limit, Markdown rendering toggle, AI Pipe / Redirect input limits, and temperature |
 | `[alias]`  | Command aliases (also manageable via `alias` / `unalias` builtins)                  |
 | `[export]` | Environment variables applied on startup (supports `$VAR` expansion)                |
 | `[prompt]` | Prompt display settings (`nerd_font = false` disables NerdFont icons)               |
