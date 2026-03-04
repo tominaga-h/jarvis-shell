@@ -11,7 +11,30 @@
 
 **Jarvish** は、Marvel の Iron Man に登場する **J.A.R.V.I.S.** にインスパイアされた、Rust 製の **次世代 AI 統合シェル (Next Generation AI Integrated Shell)** です。日常のシェル体験に AI の知性をネイティブに組み込みます。エラーをブラウザにコピペする必要はもうありません。Jarvis に聞くだけです。
 
-[![jarvish](images/jarvish-demo.gif)](https://asciinema.org/a/806755)
+[![jarvish](../images/jarvish-demo.gif)](https://asciinema.org/a/806755)
+
+## 📑 目次
+
+- [概要](#-概要)
+- [主な機能](#-主な機能)
+  - [AI アシスタント](#ai-アシスタント)
+  - [Fish ライクな UX](#fish-ライクな-ux)
+  - [The Black Box](#the-black-box)
+  - [シェルの基本機能](#シェルの基本機能)
+- [インストール](#-インストール)
+  - [前提条件](#前提条件)
+  - [Cargo でインストール](#cargo-でインストール)
+  - [ソースからビルド](#ソースからビルド)
+  - [セットアップ](#セットアップ)
+  - [設定ファイル](#設定ファイル)
+  - [起動](#起動)
+- [アーキテクチャ](#️-アーキテクチャ)
+- [技術スタック](#️-技術スタック)
+- [開発](#-開発)
+  - [Git Hooks](#git-hooks)
+  - [チェック実行](#チェック実行)
+  - [CI パイプライン (GitHub Actions)](#ci-パイプライン-github-actions)
+
 
 ## ✨ 主な機能
 

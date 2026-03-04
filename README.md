@@ -13,6 +13,28 @@
 
 [![jarvish](images/jarvish-demo.gif)](https://asciinema.org/a/806755)
 
+## 📑 Table of Contents
+
+- [About](#-about)
+- [Features](#-features)
+  - [AI-Powered Assistance](#ai-powered-assistance)
+  - [Fish-like UX](#fish-like-ux)
+  - [The Black Box](#the-black-box)
+  - [Shell Fundamentals](#shell-fundamentals)
+- [Install](#-install)
+  - [Prerequisites](#prerequisites)
+  - [Install via Cargo](#install-via-cargo)
+  - [Build from Source](#build-from-source)
+  - [Setup](#setup)
+  - [Configuration](#configuration)
+  - [Run](#run)
+- [Architecture](#️-architecture)
+- [Tech Stack](#️-tech-stack)
+- [Development](#-development)
+  - [Git Hooks](#git-hooks)
+  - [Run Checks](#run-checks)
+  - [CI Pipeline (GitHub Actions)](#ci-pipeline-github-actions)
+
 ## ✨ Features
 
 ### AI-Powered Assistance
