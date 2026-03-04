@@ -36,6 +36,7 @@ pub fn is_builtin(cmd: &str) -> bool {
         "alias"
             | "cd"
             | "cwd"
+            | "pwd"
             | "exit"
             | "export"
             | "help"
@@ -55,7 +56,7 @@ pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
             &mut std::collections::HashMap::new(),
         )),
         "cd" => Some(cd::execute(args)),
-        "cwd" => Some(cwd::execute(args)),
+        "cwd" | "pwd" => Some(cwd::execute(args)),
         "exit" => Some(exit::execute(args)),
         "export" => Some(export::execute(args)),
         "help" => Some(help::execute(args)),
@@ -156,6 +157,15 @@ mod tests {
     }
 
     // ── 新規ビルトイン登録テスト ──
+
+    #[test]
+    fn pwd_is_alias_for_cwd() {
+        assert!(is_builtin("pwd"));
+        let pwd_result = dispatch_builtin("pwd", &[]).unwrap();
+        assert_eq!(pwd_result.exit_code, 0);
+        let cwd_result = dispatch_builtin("cwd", &[]).unwrap();
+        assert_eq!(pwd_result.stdout, cwd_result.stdout);
+    }
 
     #[test]
     fn new_builtins_are_registered() {
