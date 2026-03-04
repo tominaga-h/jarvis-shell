@@ -15,8 +15,10 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("popd", "Pop directory from stack and change to it"),
     ("pushd", "Push directory onto stack and change to it"),
     ("source", "Load a configuration file (TOML)"),
+    ("type", "Display information about command type"),
     ("unalias", "Remove aliases"),
     ("unset", "Remove environment variables"),
+    ("which", "Locate a command (builtin, alias, or external)"),
 ];
 
 /// help: ビルトインコマンドのヘルプを表示する。

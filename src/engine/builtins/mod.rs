@@ -9,6 +9,7 @@ mod history;
 pub(crate) mod source;
 pub(crate) mod unalias;
 mod unset;
+pub(crate) mod which_type;
 
 use super::CommandResult;
 
@@ -48,6 +49,8 @@ pub fn is_builtin(cmd: &str) -> bool {
             | "unalias"
             | "unset"
             | "history"
+            | "which"
+            | "type"
     )
 }
 
@@ -76,6 +79,14 @@ pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
         "popd" => Some(dirstack::execute_popd(args, &mut Vec::new())),
         "unset" => Some(unset::execute(args)),
         "history" => Some(history::execute(args)),
+        "which" => Some(which_type::execute_which(
+            args,
+            &std::collections::HashMap::new(),
+        )),
+        "type" => Some(which_type::execute_type(
+            args,
+            &std::collections::HashMap::new(),
+        )),
         _ => None,
     }
 }
