@@ -3,6 +3,31 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.2.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.2.0) - 2026-03-04
+
+### Added
+
+- AI リダイレクト機能 (`> ai "..."`) を実装 ([#67](https://github.com/tominaga-h/jarvis-shell/issues/67))
+- 機密情報のサニタイズ機能を実装（API キー・トークン値の流出防御）([#68](https://github.com/tominaga-h/jarvis-shell/issues/68))
+- AI の `temperature` 設定を `config.toml` で変更可能に ([#66](https://github.com/tominaga-h/jarvis-shell/issues/66))
+- AsyncGitState の導入により Git 情報取得時の CPU 使用率を改善 ([#49](https://github.com/tominaga-h/jarvis-shell/issues/49))
+- CPU 使用率をデバッグログに組み込み ([#56](https://github.com/tominaga-h/jarvis-shell/issues/56))
+
+### Fixed
+
+- jarvish 内で jarvish を再帰的に実行できないバグを修正 ([#71](https://github.com/tominaga-h/jarvis-shell/issues/71))
+- エイリアスが解除されたコマンドが履歴に残るバグを修正 ([#65](https://github.com/tominaga-h/jarvis-shell/issues/65))
+- 日本語版 README のリンク切れを修正
+
+### Changed
+
+- 全体リファクタリングを実施（モジュール構造の整理）([#69](https://github.com/tominaga-h/jarvis-shell/issues/69))
+- reedline を 0.45 にアップデート
+- version バッヂにリリースページへのリンクを追加 ([#64](https://github.com/tominaga-h/jarvis-shell/issues/64))
+- 新しいデモ GIF を作成 ([#63](https://github.com/tominaga-h/jarvis-shell/issues/63))
+- AI リダイレクトとマスキングについて README に追記
+- release コマンドの手順を調整・改善
+
 ## [v1.1.2](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.1.2) - 2026-03-03
 
 ### Added
