@@ -1,4 +1,4 @@
-# 🤵 Jarvis Shell (jarvish)
+# 🤵 Jarvish — The AI-Native Shell
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
 [![version](https://img.shields.io/badge/version-1.2.0-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.2.0)
@@ -9,72 +9,73 @@
 
 > _"I want J.A.R.V.I.S. as my companion — but inside my terminal."_
 
-**Jarvish** is a **Next Generation AI Integrated Shell** written in Rust, inspired by **J.A.R.V.I.S.** from Marvel's Iron Man. It natively embeds AI intelligence into your everyday shell experience — no more copy-pasting errors into a browser. Just ask Jarvis.
+**Jarvish** is a **Next Generation AI Integrated Shell** written in Rust, inspired by **J.A.R.V.I.S.** from Marvel's Iron Man.
 
-[![jarvish](images/jarvish-demo.gif)](https://asciinema.org/a/806755)
+It is not just a wrapper around existing shells (Bash, Zsh) or an external tool. Jarvish deeply integrates AI into your terminal workflow itself, delivering an unprecedented experience where **you can seamlessly switch between regular commands and natural language** as naturally as breathing.
+
+The days of copy-pasting errors into a browser to ask AI are over. Just ask Jarvish.
+
+[![jarvish-demo](images/jarvish-demo.gif)](https://asciinema.org/a/806755)
 
 ## 📑 Table of Contents
 
 - [About](#-about)
-- [Features](#-features)
-  - [AI-Powered Assistance](#ai-powered-assistance)
-  - [Fish-like UX](#fish-like-ux)
-  - [The Black Box](#the-black-box)
-  - [Shell Fundamentals](#shell-fundamentals)
+- [Core Experience](#-core-experience)
+  - [Your Personal Assistant, Living in the Terminal](#1-your-personal-assistant-living-in-the-terminal)
+  - [AI Pipe & AI Redirect (The Ultimate Text Processor)](#2-ai-pipe--ai-redirect-the-ultimate-text-processor)
+  - ["The Black Box" (Total Recall Storage)](#3-the-black-box-total-recall-storage)
+  - [Uncompromising "Blazing Fast" Shell UX](#4-uncompromising-blazing-fast-shell-ux)
 - [Install](#-install)
-  - [Prerequisites](#prerequisites)
-  - [Install via Cargo](#install-via-cargo)
-  - [Build from Source](#build-from-source)
-  - [Setup](#setup)
-  - [Configuration](#configuration)
-  - [Run](#run)
+- [Setup and Configuration](#️-setup-and-configuration)
 - [Architecture](#️-architecture)
-- [Tech Stack](#️-tech-stack)
 - [Development](#-development)
-  - [Git Hooks](#git-hooks)
-  - [Run Checks](#run-checks)
-  - [CI Pipeline (GitHub Actions)](#ci-pipeline-github-actions)
 
-## ✨ Features
+## ✨ Core Experience
 
-### AI-Powered Assistance
+### 1. Your Personal Assistant, Living in the Terminal
 
-- Talk to Jarvis in **natural language** — right from your shell prompt
-- When a command fails, Jarvis **automatically investigates** the error using stdout/stderr context
-- Jarvis can **read and write files**, execute commands as an AI agent with tool-calling capabilities
-- **AI Pipe (`| ai "..."`)**: Filter, transform, or extract data from command outputs using natural language (e.g., `cat access.log | ai "extract only 500 errors"`)
-- **AI Redirect (`> ai "..."`)**: Send command output to Jarvis for conversational analysis (e.g., `git log --oneline -10 > ai "summarize recent changes"`)
+- **Natural Language Execution**: Just type "show me the list of active ports" at the prompt, and Jarvish translates it into the optimal command and executes it.
+- **Smart Error Handling**: When a command fails, Jarvish reads the `stdout`/`stderr` context and automatically analyzes the cause and suggests solutions.
+- **Autonomous Agent**: More than just a chatbot — Jarvish can read/write files and re-execute commands on its own (Tool Calls).
 
-### Fish-like UX
+### 2. AI Pipe & AI Redirect (The Ultimate Text Processor)
 
-- **Real-time syntax highlighting** as you type
-- **Auto-completion** for commands (PATH binaries, builtins) and file paths
-- History-based suggestions powered by `reedline`
+No more struggling to remember complex `awk`, `sed`, or `jq` syntax.
 
-### The Black Box
+- **AI Pipe (`| ai "..."`)**: Filter and transform command output directly using natural language.
+  ```bash
+  ls -la | ai "what is the most heavy file?"
+  docker ps | ai "output the container IDs and image names as JSON"
+  ```
+- **AI Redirect (`> ai "..."`)**: Send command output to Jarvish's context for interactive analysis.
+  ```bash
+  git log --oneline -10 > ai "summarize the intent of recent commits"
+  eza --help > ai "what options can be used with --tree?"
+  ```
 
-- Every command execution is **persisted** — command, timestamp, working directory, exit code
-- stdout/stderr outputs are stored in a **Git-like content-addressable blob storage** (SHA-256 + zstd compression)
-- Ask Jarvis about _"yesterday's error"_ — even after restarting the shell
-- **Security:** Sensitive information such as API keys or tokens (e.g., those stored in `.bashrc`) are **masked** before being saved.
+### 3. "The Black Box" (Total Recall Storage)
 
-### Shell Fundamentals
+Jarvish remembers everything that happens in your terminal.
 
-- **Pipelines** (`cmd1 | cmd2 | cmd3`)
-- **Redirects** (`>`, `>>`, `<`)
-- **Tilde & variable expansion** (`~`, `$HOME`, `${VAR}`)
-- Full **PTY support** for interactive programs (vim, top, etc.)
+- **Git-like History Storage**: Every command, timestamp, directory, exit code, and full `stdout`/`stderr` output is persisted in a content-addressable blob storage (SHA-256 + zstd compression).
+- **Time-Traveling Context**: Even after restarting the shell, you can ask Jarvish "what caused that error yesterday?"
+- **Security**: Sensitive information such as API keys or tokens (e.g., those in `.bashrc`) is automatically **masked** before being saved.
 
-## 📦 Install
+### 4. Uncompromising "Blazing Fast" Shell UX
+
+Despite deep AI integration, Jarvish leverages Rust's strengths to deliver outstanding performance as an infrastructure tool.
+
+- **Async Background Prompt**: Git status scanning runs in a separate thread (using the Stale-While-Revalidate pattern), achieving **zero UI jitter** regardless of repository size.
+- **Fish-like Autocomplete**: Real-time syntax highlighting with powerful auto-completion for PATH binaries and file paths.
+- **Full PTY Support**: Interactive programs like `vim` and `top` work natively.
+
+## 🚀 Install
 
 ### Prerequisites
 
-| Requirement        | Details                                                   |
-| ------------------ | --------------------------------------------------------- |
-| **Rust**           | Stable toolchain (Edition 2021)                           |
-| **OpenAI API Key** | Required for AI features                                  |
-| **OS**             | macOS / Linux                                             |
-| **NerdFont**       | Recommended for prompt icons (can be disabled via config) |
+- **Rust** (Stable toolchain / Edition 2021)
+- **OpenAI API Key**
+- **NerdFont** (recommended for prompt icons)
 
 ### Install via Cargo
 
@@ -90,7 +91,7 @@ cd jarvis-shell
 cargo install --path .
 ```
 
-### Setup
+## ⚙️ Setup and Configuration
 
 Set your OpenAI API key as an environment variable:
 
@@ -98,111 +99,84 @@ Set your OpenAI API key as an environment variable:
 export OPENAI_API_KEY="sk-..."
 ```
 
-### Configuration
+> You can also configure this in the `[export]` section of `~/.config/jarvish/config.toml` for automatic setup.
 
-Jarvish uses a TOML configuration file located at `~/.config/jarvish/config.toml`.
-A default config file is automatically generated on first launch.
+### Configuration File (`config.toml`)
+
+A default config file is automatically generated at `~/.config/jarvish/config.toml` on first launch.
 
 ```toml
 [ai]
-model = "gpt-4o" # AI model to use
-max_rounds = 10 # Max agent loop rounds
-markdown_rendering = true # Set to false to disable Markdown rendering
-ai_pipe_max_chars = 50000 # Max characters for AI Pipe input
-ai_redirect_max_chars = 50000 # Max characters for AI Redirect input
-temperature = 0.5 # Response randomness (0.0 = deterministic, 2.0 = max random)
+model = "gpt-4o"              # AI model to use
+max_rounds = 10               # Max agent loop rounds
+markdown_rendering = true     # Render AI responses as Markdown
+ai_pipe_max_chars = 50000     # Max characters for AI Pipe input (fail-fast on overflow)
+ai_redirect_max_chars = 50000 # Max characters for AI Redirect input (fail-fast on overflow)
+temperature = 0.5             # Response randomness
 
 [alias]
-g = "git" # Command aliases
-ll = "ls -la"
+g = "git"                     # Command aliases (also manageable via builtins)
+ll = "eza --icons -la"
 
 [export]
-PATH = "/usr/local/bin:$PATH" # Environment variables set on startup
+PATH = "/usr/local/bin:$PATH" # Environment variables expanded on startup
 
 [prompt]
-nerd_font = true # Set to false if NerdFont is not installed
+nerd_font = true              # Set to false if NerdFont is not installed
 ```
 
-| Section    | Description                                                                         |
-| ---------- | ----------------------------------------------------------------------------------- |
-| `[ai]`     | AI model name, agent loop limit, Markdown rendering toggle, AI Pipe / Redirect input limits, and temperature |
-| `[alias]`  | Command aliases (also manageable via `alias` / `unalias` builtins)                  |
-| `[export]` | Environment variables applied on startup (supports `$VAR` expansion)                |
-| `[prompt]` | Prompt display settings (`nerd_font = false` disables NerdFont icons)               |
-
-> **Tip**: You can reload the config at runtime with the `source` builtin command:
+> **Tip**: After changing settings, you can apply them without restarting using the `source` command:
 >
 > ```bash
 > source ~/.config/jarvish/config.toml
 > ```
 
-### Run
-
-```bash
-jarvish
-```
-
 ## 🏗️ Architecture
 
-Jarvish is composed of four core components:
+Jarvish is composed of four highly modular core components:
 
 ```mermaid
 graph TB
     User(["User"]) --> A["Line Editor (reedline)"]
     A --> B["Execution Engine"]
-    B --> B1["Builtin Commands (cd, cwd, exit)"]
+    B --> B1["Builtin Commands (cd, exit, alias...)"]
     B --> B2["External Commands (PTY + I/O Capture)"]
-    B --> D["AI Brain (OpenAI API)"]
+    B --> D["AI Brain (OpenAI API / Tools)"]
     B2 --> C["Black Box"]
     D --> C
     C --> C1[("history.db (SQLite)")]
     C --> C2[("blobs/ (SHA-256 + zstd)")]
 ```
 
-| Component            | Description                                                                                       |
-| -------------------- | ------------------------------------------------------------------------------------------------- |
-| **Line Editor**      | REPL interface powered by `reedline` with syntax highlighting, completion, and history            |
-| **Execution Engine** | Routes input to builtins or external commands; captures I/O via PTY teeing                        |
-| **Black Box**        | Persists all execution history and outputs (SQLite index + content-addressable blob store)        |
-| **AI Brain**         | Classifies input as command vs. natural language; provides context-aware AI assistance via OpenAI |
-
-## 🛠️ Tech Stack
-
-| Category    | Crate            | Purpose                                |
-| ----------- | ---------------- | -------------------------------------- |
-| Line Editor | `reedline`       | Fish-like interactive line editing     |
-| Process     | `os_pipe`, `nix` | I/O capture, PTY management            |
-| Async       | `tokio`          | Async runtime                          |
-| Database    | `rusqlite`       | SQLite for command history             |
-| Hashing     | `sha2`           | SHA-256 content hashing                |
-| Compression | `zstd`           | Blob compression                       |
-| AI          | `async-openai`   | OpenAI API client                      |
-| Paths       | `directories`    | XDG-compliant path resolution          |
-| Terminal    | `nu-ansi-term`   | ANSI color styling                     |
-| Logging     | `tracing`        | Structured logging with daily rotation |
+| Component            | Description                                                                                        |
+| :------------------- | :------------------------------------------------------------------------------------------------- |
+| **Line Editor**      | `reedline`-based REPL with async Git prompt, syntax highlighting, and history suggestions.         |
+| **Execution Engine** | Parses and dispatches commands with reliable I/O capture via PTY sessions.                         |
+| **Black Box**        | Storage engine for all terminal memory. Hybrid architecture of SQLite and compressed blob storage. |
+| **AI Brain**         | Classifies intent (natural language vs. command) and drives a context-aware autonomous agent loop. |
 
 ## 👩‍💻 Development
 
 ### Git Hooks
 
+For safe development, we provide pre-push hooks.
+
 ```bash
-make install-hooks   # Install pre-push hook
-make uninstall-hooks # Remove pre-push hook
+make install-hooks   # Install hooks
+make uninstall-hooks # Remove hooks
 ```
 
-### Run Checks
+### Code Verification (Local CI)
 
 ```bash
-make check  # Run format, clippy, check, and test
+make check  # Run format, clippy, check, and test in one go
 ```
 
 ### CI Pipeline (GitHub Actions)
 
-The CI runs on every push and PR to `main`:
+The following CI runs on every push and PR to `main`:
 
-| Job    | Command                                     |
-| ------ | ------------------------------------------- |
-| Check  | `cargo check --all-targets`                 |
-| Test   | `cargo test --all-targets`                  |
-| Format | `cargo fmt --all -- --check`                |
-| Clippy | `cargo clippy --all-targets -- -D warnings` |
+- `cargo check --all-targets`
+- `cargo test --all-targets`
+- `cargo fmt --all -- --check`
+- `cargo clippy --all-targets -- -D warnings`
