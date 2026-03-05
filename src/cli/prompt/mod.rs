@@ -165,6 +165,16 @@ impl JarvisPrompt {
         });
     }
 
+    /// プロンプトが占めるターミナル上の行数を返す。
+    ///
+    /// Alternate Screen 復元後の残像消去で、カーソルを何行上に移動すべきかを算出するために使用する。
+    /// `render_prompt_left` 内の改行数 + 1（インジケータ行）で動的に決定する。
+    pub fn prompt_height(&self) -> usize {
+        let left = self.render_prompt_left();
+        let newlines = left.chars().filter(|&c| c == '\n').count();
+        newlines + 1
+    }
+
     /// 現在の `AsyncGitState` を読み取り、git_part 文字列を返す。
     ///
     /// 純粋な読み取り専用メソッド。スレッドのスポーンは一切行わない。

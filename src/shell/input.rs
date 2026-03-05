@@ -95,6 +95,13 @@ impl Shell {
             self.last_exit_code
                 .store(result.exit_code, Ordering::Relaxed);
         }
+
+        // 4.5. Alternate Screen 復元後の旧プロンプト残像を消去し、コマンド履歴を再描画
+        if result.used_alt_screen {
+            erase_stale_prompt(self.prompt.prompt_height());
+            reprint_command_history(&self.prompt, &original_line);
+        }
+
         println!(); // 実行結果の後に空行を追加
 
         // 5. 履歴を記録（エイリアス展開前の入力を記録する）
@@ -291,4 +298,29 @@ impl Shell {
             }
         }
     }
+}
+
+/// Alternate Screen プログラム (vim, less 等) 終了後、メイン画面に残る旧プロンプトの残像を消去する。
+///
+/// Alternate Screen 復元時にターミナルが保存していた画面内容（旧プロンプトを含む）が
+/// 再表示されるため、カーソルを旧プロンプトの先頭行まで移動し、そこから画面末尾まで消去する。
+fn erase_stale_prompt(prompt_height: usize) {
+    use std::io::Write;
+    if prompt_height > 0 {
+        print!("\x1b[{}A\x1b[0J", prompt_height);
+        let _ = std::io::stdout().flush();
+    }
+}
+
+/// Alternate Screen 消去後、旧プロンプトと実行コマンドを再描画してコマンド履歴を画面上に残す。
+///
+/// `erase_stale_prompt` で消去された領域に、プロンプト左部 + インジケータ + コマンド文字列を
+/// 出力することで、ユーザーが直前に実行したコマンドを視認できるようにする。
+fn reprint_command_history(prompt: &crate::cli::prompt::JarvisPrompt, command: &str) {
+    use reedline::{Prompt, PromptEditMode};
+    use std::io::Write;
+    let left = prompt.render_prompt_left();
+    let indicator = prompt.render_prompt_indicator(PromptEditMode::Default);
+    println!("{left}{indicator}{command}");
+    let _ = std::io::stdout().flush();
 }
