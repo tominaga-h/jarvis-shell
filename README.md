@@ -80,7 +80,7 @@ Despite deep AI integration, Jarvish leverages Rust's strengths to deliver outst
 
 ```bash
 brew tap tominaga-h/tap
-brew install jarvish
+brew install tominaga-h/tap/jarvish
 ```
 
 ### Install via Cargo
