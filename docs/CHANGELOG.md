@@ -3,6 +3,19 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.3.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.3.0) - 2026-03-09
+
+### Added
+
+- セッション機能を実装（セッション ID によりコマンド履歴やログを分割）([#75](https://github.com/tominaga-h/jarvis-shell/issues/75), [#78](https://github.com/tominaga-h/jarvis-shell/issues/78))
+- `-c` オプションを実装（コマンド文字列を引数で渡して実行）([#81](https://github.com/tominaga-h/jarvis-shell/issues/81))
+- 特定のコマンドのみ自動調査を無効化する設定 `ignore_auto_investigation_cmds` を追加 ([#82](https://github.com/tominaga-h/jarvis-shell/issues/82))
+
+### Fixed
+
+- ブランチ補完で現在のブランチが先頭に表示されない問題を修正 ([#76](https://github.com/tominaga-h/jarvis-shell/issues/76))
+- テストが失敗する問題を修正
+
 ## [v1.2.1](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.2.1) - 2026-03-04
 
 ### Added
