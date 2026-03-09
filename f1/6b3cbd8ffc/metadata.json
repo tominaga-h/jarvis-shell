@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "f16b3cbd8ffc",
+  "strategy": "manual-commit",
+  "branch": "develop",
+  "checkpoints_count": 8,
+  "files_touched": [
+    "src/engine/builtins/history.rs",
+    "src/logging.rs",
+    "src/main.rs",
+    "src/shell/editor.rs",
+    "src/shell/mod.rs",
+    "src/storage/history.rs",
+    "src/storage/mod.rs",
+    "src/storage/record.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f1/6b3cbd8ffc/0/metadata.json",
+      "transcript": "/f1/6b3cbd8ffc/0/full.jsonl",
+      "content_hash": "/f1/6b3cbd8ffc/0/content_hash.txt",
+      "prompt": "/f1/6b3cbd8ffc/0/prompt.txt"
+    }
+  ]
+}

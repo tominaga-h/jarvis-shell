@@ -1,0 +1,40 @@
+Welcomeバナーにセッションキーの表示は不要です
+
+---
+
+Implement the plan as specified, it is attached for your reference. Do NOT edit the plan file itself.
+
+To-do's from the plan have already been created. Do not create them again. Mark them as in_progress as you work, starting with the first one. Don't stop until you have completed all the to-dos.
+
+---
+
+コマンド履歴のセッション分離がうまく行ってません。デバッグしてください
+
+---
+
+Issue reproduced, please proceed.
+
+---
+
+The issue has been fixed. Please clean up the instrumentation.
+
+---
+
+今回のセッション分割の実装によって、jarvishを起動したらそのプロセスの中で動かしたコマンド履歴のみ上・下キーで辿れるようになりました。ただし、その分過去のコマンド履歴の補完が効かなくなりました。セッションが分割されていても、コマンド補完を有効にすることは可能ですか？
+
+---
+
+Implement the plan as specified, it is attached for your reference. Do NOT edit the plan file itself.
+
+To-do's from the plan have already been created. Do not create them again. Mark them as in_progress as you work, starting with the first one. Don't stop until you have completed all the to-dos.
+
+---
+
+AのjarvishとBのjarvishがあり、Aで実行したコマンドはBでは辿れず、Bで実行したコマンドはAで辿れない。
+これは仕様どおりです。ですが、AとBのjarvishを **終了した後に実行したCのjarvish** では、AとBで実行したコマンド両方とも辿れて良いとおもうんですよね。完全にセッション分割してしまうと、jarvishを起動時に一切過去のコマンドに辿れないので、それはシェルの機能として不十分な気がします。
+
+---
+
+Implement the plan as specified, it is attached for your reference. Do NOT edit the plan file itself.
+
+To-do's from the plan have already been created. Do not create them again. Mark them as in_progress as you work, starting with the first one. Don't stop until you have completed all the to-dos.

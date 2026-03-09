@@ -1,0 +1,36 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "f16b3cbd8ffc",
+  "session_id": "0160eca0-22a3-414b-86ab-883c028bc2cd",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-09T13:07:32.977391Z",
+  "branch": "develop",
+  "checkpoints_count": 8,
+  "files_touched": [
+    "src/engine/builtins/history.rs",
+    "src/logging.rs",
+    "src/main.rs",
+    "src/shell/editor.rs",
+    "src/shell/mod.rs",
+    "src/storage/history.rs",
+    "src/storage/mod.rs",
+    "src/storage/record.rs"
+  ],
+  "agent": "Cursor",
+  "model": "claude-4.6-opus-high-thinking",
+  "turn_id": "eb26c1ed902c",
+  "session_metrics": {
+    "turn_count": 9,
+    "context_tokens": 202105,
+    "context_window_size": 200000
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-09T13:07:32.804267Z",
+    "agent_lines": 37,
+    "human_added": 68,
+    "human_modified": 13,
+    "human_removed": 0,
+    "total_committed": 118,
+    "agent_percentage": 31.35593220338983
+  }
+}
