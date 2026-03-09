@@ -3,7 +3,7 @@
   "checkpoint_id": "aa6daa806438",
   "strategy": "manual-commit",
   "branch": "develop",
-  "checkpoints_count": 0,
+  "checkpoints_count": 1,
   "files_touched": [
     "src/main.rs",
     "src/shell/mod.rs"
@@ -14,6 +14,12 @@
       "transcript": "/aa/6daa806438/0/full.jsonl",
       "content_hash": "/aa/6daa806438/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/aa/6daa806438/1/metadata.json",
+      "transcript": "/aa/6daa806438/1/full.jsonl",
+      "content_hash": "/aa/6daa806438/1/content_hash.txt",
+      "prompt": "/aa/6daa806438/1/prompt.txt"
     }
   ]
 }
