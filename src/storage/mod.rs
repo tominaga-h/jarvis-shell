@@ -31,11 +31,12 @@ pub struct HistoryEntry {
 pub struct BlackBox {
     conn: Connection,
     blob_store: BlobStore,
+    session_id: i64,
 }
 
 impl BlackBox {
     /// 指定されたディレクトリで BlackBox を初期化する。
-    pub fn open_at(data_dir: PathBuf) -> Result<Self> {
+    pub fn open_at(data_dir: PathBuf, session_id: i64) -> Result<Self> {
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("failed to create data directory: {}", data_dir.display()))?;
 
@@ -47,7 +48,22 @@ impl BlackBox {
 
         let blob_store = BlobStore::new(data_dir.join("blobs"))?;
 
-        Ok(Self { conn, blob_store })
+        Ok(Self {
+            conn,
+            blob_store,
+            session_id,
+        })
+    }
+
+    /// セッション終了時に session_id を NULL に解放する。
+    ///
+    /// 終了済みセッションの履歴は次回起動時に上下矢印で辿れるようになる。
+    /// 同時実行中の他セッションの履歴は session_id が残っているため分離が維持される。
+    pub fn release_session(&self) {
+        let _ = self.conn.execute(
+            "UPDATE command_history SET session_id = NULL WHERE session_id = ?1",
+            rusqlite::params![self.session_id],
+        );
     }
 
     /// データディレクトリのパスを返す。
@@ -87,7 +103,7 @@ mod tests {
     #[test]
     fn open_creates_database() {
         let tmp = TempDir::new().unwrap();
-        let bb = BlackBox::open_at(tmp.path().to_path_buf()).unwrap();
+        let bb = BlackBox::open_at(tmp.path().to_path_buf(), 1).unwrap();
 
         let count: i32 = bb
             .conn
@@ -103,7 +119,7 @@ mod tests {
     #[test]
     fn record_stores_command_metadata() {
         let tmp = TempDir::new().unwrap();
-        let bb = BlackBox::open_at(tmp.path().to_path_buf()).unwrap();
+        let bb = BlackBox::open_at(tmp.path().to_path_buf(), 1).unwrap();
 
         let result = make_result("hello world\n", "", 0);
         bb.record("echo hello world", &result).unwrap();
@@ -123,7 +139,7 @@ mod tests {
     #[test]
     fn record_stores_and_retrieves_blobs() {
         let tmp = TempDir::new().unwrap();
-        let bb = BlackBox::open_at(tmp.path().to_path_buf()).unwrap();
+        let bb = BlackBox::open_at(tmp.path().to_path_buf(), 1).unwrap();
 
         let stdout_content = "output line 1\noutput line 2\n";
         let stderr_content = "error: something went wrong\n";
@@ -149,7 +165,7 @@ mod tests {
     #[test]
     fn record_with_empty_output_stores_null_hashes() {
         let tmp = TempDir::new().unwrap();
-        let bb = BlackBox::open_at(tmp.path().to_path_buf()).unwrap();
+        let bb = BlackBox::open_at(tmp.path().to_path_buf(), 1).unwrap();
 
         let result = make_result("", "", 0);
         bb.record("cd /tmp", &result).unwrap();
@@ -170,7 +186,7 @@ mod tests {
     #[test]
     fn get_recent_context_returns_formatted_history() {
         let tmp = TempDir::new().unwrap();
-        let bb = BlackBox::open_at(tmp.path().to_path_buf()).unwrap();
+        let bb = BlackBox::open_at(tmp.path().to_path_buf(), 1).unwrap();
 
         bb.record("echo hello", &make_result("hello\n", "", 0))
             .unwrap();
@@ -187,7 +203,7 @@ mod tests {
     #[test]
     fn get_recent_context_empty_when_no_history() {
         let tmp = TempDir::new().unwrap();
-        let bb = BlackBox::open_at(tmp.path().to_path_buf()).unwrap();
+        let bb = BlackBox::open_at(tmp.path().to_path_buf(), 1).unwrap();
 
         let ctx = bb.get_recent_context(5).unwrap();
         assert!(ctx.is_empty());
@@ -196,7 +212,7 @@ mod tests {
     #[test]
     fn multiple_records_increment_id() {
         let tmp = TempDir::new().unwrap();
-        let bb = BlackBox::open_at(tmp.path().to_path_buf()).unwrap();
+        let bb = BlackBox::open_at(tmp.path().to_path_buf(), 1).unwrap();
 
         bb.record("cmd1", &make_result("out1", "", 0)).unwrap();
         bb.record("cmd2", &make_result("out2", "", 0)).unwrap();

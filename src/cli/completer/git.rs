@@ -4,6 +4,13 @@ use std::collections::HashMap;
 
 use reedline::{Span, Suggestion};
 
+/// カレントブランチ名を `git2` 経由で取得する。Git リポジトリ外では `None`。
+fn current_branch() -> Option<String> {
+    let repo = git2::Repository::discover(".").ok()?;
+    let head = repo.head().ok()?;
+    head.shorthand().map(str::to_string)
+}
+
 /// ブランチ名補完を提供する git サブコマンド
 const GIT_BRANCH_SUBCOMMANDS: &[&str] = &[
     "checkout",
@@ -69,6 +76,13 @@ impl super::JarvishCompleter {
 
         branches.sort_unstable();
         branches.dedup();
+
+        if let Some(ref current) = current_branch() {
+            if let Some(pos) = branches.iter().position(|b| *b == current.as_str()) {
+                let branch = branches.remove(pos);
+                branches.insert(0, branch);
+            }
+        }
 
         branches
             .into_iter()
@@ -289,6 +303,31 @@ mod tests {
         env::set_current_dir(&original_dir).unwrap();
 
         assert_eq!(result, Some("checkout -b".to_string()));
+    }
+
+    #[test]
+    #[serial]
+    fn complete_git_branch_current_branch_comes_first() {
+        let tmpdir = create_test_git_repo();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let completer = test_completer();
+        let span = Span::new(0, 0);
+        let suggestions = completer.complete_git_branch("", span);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        assert!(
+            suggestions.len() >= 2,
+            "should have at least 2 branches (main/master + test-feature): {suggestions:?}"
+        );
+        let first = &suggestions[0].value;
+        let current = &["main", "master"];
+        assert!(
+            current.contains(&first.as_str()),
+            "first suggestion should be the current branch (main or master), got: {first}"
+        );
     }
 
     #[test]

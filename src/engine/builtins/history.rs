@@ -196,7 +196,7 @@ mod tests {
     /// テスト用に一時ディレクトリに BlackBox を作成し、履歴を挿入するヘルパー。
     fn setup_test_db(commands: &[&str]) -> TempDir {
         let tmp = TempDir::new().unwrap();
-        let bb = BlackBox::open_at(tmp.path().to_path_buf()).unwrap();
+        let bb = BlackBox::open_at(tmp.path().to_path_buf(), 1).unwrap();
 
         for cmd in commands {
             let result = crate::engine::CommandResult {

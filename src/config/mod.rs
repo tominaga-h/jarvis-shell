@@ -13,6 +13,7 @@
 //! ai_pipe_max_chars = 50000
 //! ai_redirect_max_chars = 50000
 //! temperature = 0.5
+//! ignore_auto_investigation_cmds = ["git log", "git diff"]
 //!
 //! [alias]
 //! g = "git"
@@ -63,6 +64,8 @@ pub struct AiConfig {
     pub ai_redirect_max_chars: usize,
     /// 回答のランダム性（0.0 = 決定的、2.0 = 最大ランダム）
     pub temperature: f32,
+    /// 異常終了時に自動調査をスキップするコマンドの前方一致パターン
+    pub ignore_auto_investigation_cmds: Vec<String>,
 }
 
 impl Default for AiConfig {
@@ -74,6 +77,7 @@ impl Default for AiConfig {
             ai_pipe_max_chars: 50_000,
             ai_redirect_max_chars: 50_000,
             temperature: 0.5,
+            ignore_auto_investigation_cmds: Vec::new(),
         }
     }
 }
@@ -114,6 +118,7 @@ impl JarvishConfig {
                         model = %config.ai.model,
                         max_rounds = config.ai.max_rounds,
                         markdown_rendering = config.ai.markdown_rendering,
+                        ignore_auto_investigation_cmds = config.ai.ignore_auto_investigation_cmds.len(),
                         alias_count = config.alias.len(),
                         export_count = config.export.len(),
                         nerd_font = config.prompt.nerd_font,
@@ -174,6 +179,7 @@ mod tests {
         assert_eq!(config.ai.model, "gpt-4o");
         assert_eq!(config.ai.max_rounds, 10);
         assert!(config.ai.markdown_rendering);
+        assert!(config.ai.ignore_auto_investigation_cmds.is_empty());
         assert!(config.alias.is_empty());
         assert!(config.export.is_empty());
         assert!(config.prompt.nerd_font);
@@ -186,6 +192,7 @@ mod tests {
 model = "gpt-4o-mini"
 max_rounds = 5
 markdown_rendering = false
+ignore_auto_investigation_cmds = ["git log", "git diff"]
 
 [alias]
 g = "git"
@@ -201,6 +208,10 @@ nerd_font = false
         assert_eq!(config.ai.model, "gpt-4o-mini");
         assert_eq!(config.ai.max_rounds, 5);
         assert!(!config.ai.markdown_rendering);
+        assert_eq!(
+            config.ai.ignore_auto_investigation_cmds,
+            vec!["git log", "git diff"]
+        );
         assert_eq!(config.alias.get("g").unwrap(), "git");
         assert_eq!(config.alias.get("ll").unwrap(), "ls -la");
         assert_eq!(config.export.get("EDITOR").unwrap(), "vim");
@@ -217,6 +228,7 @@ g = "git"
         assert_eq!(config.ai.model, "gpt-4o");
         assert_eq!(config.ai.max_rounds, 10);
         assert!(config.ai.markdown_rendering);
+        assert!(config.ai.ignore_auto_investigation_cmds.is_empty());
         assert!(config.prompt.nerd_font);
         assert_eq!(config.alias.get("g").unwrap(), "git");
         assert!(config.export.is_empty());
@@ -229,6 +241,16 @@ g = "git"
         assert_eq!(config.ai.max_rounds, 10);
         assert!(config.alias.is_empty());
         assert!(config.export.is_empty());
+    }
+
+    #[test]
+    fn parse_ignore_auto_investigation_cmds_single_entry() {
+        let toml = r#"
+[ai]
+ignore_auto_investigation_cmds = ["git"]
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(config.ai.ignore_auto_investigation_cmds, vec!["git"]);
     }
 
     #[test]

@@ -13,12 +13,20 @@ use reedline::{
 };
 use rusqlite::{types::Value, Connection};
 
+/// `HistorySessionId::new()` は `pub(crate)` のため外部から呼べない。
+/// `Deserialize` derive を利用して `serde_json` 経由で生成する。
+fn make_session_id(id: i64) -> HistorySessionId {
+    serde_json::from_value(serde_json::Value::Number(id.into()))
+        .expect("HistorySessionId deserialization from i64 should never fail")
+}
+
 /// reedline の History トレイトを BlackBox の command_history テーブル上に実装する。
 ///
 /// 独自の SQLite コネクションを保持し、BlackBox とは別接続でアクセスする。
 /// WAL モードを有効にし、BlackBox との並行アクセスを安全に行う。
 pub struct BlackBoxHistory {
     conn: Connection,
+    session_id: i64,
 }
 
 impl BlackBoxHistory {
@@ -27,7 +35,7 @@ impl BlackBoxHistory {
     /// - 親ディレクトリが存在しない場合は作成する
     /// - BlackBox と同じスキーマで command_history テーブルを初期化する（冪等）
     /// - WAL モードを有効化する
-    pub fn open(db_path: PathBuf) -> std::result::Result<Self, String> {
+    pub fn open(db_path: PathBuf, session_id: i64) -> std::result::Result<Self, String> {
         // 親ディレクトリが存在しない場合は作成
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)
@@ -46,16 +54,26 @@ impl BlackBoxHistory {
                 exit_code   INTEGER NOT NULL,
                 stdout_hash TEXT,
                 stderr_hash TEXT,
-                created_at  TEXT    NOT NULL
+                created_at  TEXT    NOT NULL,
+                session_id  INTEGER
             );",
         )
         .map_err(|e| format!("failed to create command_history table: {e}"))?;
+
+        // 既存 DB に session_id カラムがない場合に追加する
+        let has_session_id = conn
+            .prepare("SELECT session_id FROM command_history LIMIT 0")
+            .is_ok();
+        if !has_session_id {
+            conn.execute_batch("ALTER TABLE command_history ADD COLUMN session_id INTEGER;")
+                .map_err(|e| format!("failed to add session_id column: {e}"))?;
+        }
 
         // WAL モードを有効化（BlackBox との並行アクセスを安全にする）
         conn.execute_batch("PRAGMA journal_mode=WAL;")
             .map_err(|e| format!("failed to enable WAL mode: {e}"))?;
 
-        Ok(Self { conn })
+        Ok(Self { conn, session_id })
     }
 
     /// rusqlite エラーを reedline の ReedlineError に変換する。
@@ -65,13 +83,14 @@ impl BlackBoxHistory {
 
     /// DB の行を HistoryItem に変換する。
     ///
-    /// SELECT id, command, cwd, exit_code, created_at の順序を前提とする。
+    /// SELECT id, command, cwd, exit_code, created_at, session_id の順序を前提とする。
     fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
         let id: i64 = row.get(0)?;
         let command: String = row.get(1)?;
         let cwd: String = row.get(2)?;
         let exit_code: i32 = row.get(3)?;
         let created_at: String = row.get(4)?;
+        let session_id: Option<i64> = row.get(5)?;
 
         let timestamp = DateTime::parse_from_rfc3339(&created_at)
             .ok()
@@ -81,7 +100,7 @@ impl BlackBoxHistory {
             id: Some(HistoryItemId::new(id)),
             start_timestamp: timestamp,
             command_line: command,
-            session_id: None,
+            session_id: session_id.map(make_session_id),
             hostname: None,
             cwd: Some(cwd),
             duration: None,
@@ -125,6 +144,14 @@ impl BlackBoxHistory {
         if let Some(ref cwd_prefix) = query.filter.cwd_prefix {
             conditions.push("cwd LIKE ?".to_string());
             params.push(Value::Text(format!("{cwd_prefix}%")));
+        }
+
+        // session_id フィルター
+        // reedline のヒンター (filter.session あり) → セッション横断で補完
+        // reedline の上下矢印 (filter.session なし) → 現セッション + 終了済みセッション (NULL)
+        if query.filter.session.is_none() {
+            conditions.push("(session_id IS NULL OR session_id = ?)".to_string());
+            params.push(Value::Integer(self.session_id));
         }
 
         // exit_successful フィルター
@@ -243,9 +270,9 @@ impl History for BlackBoxHistory {
 
             self.conn
                 .execute(
-                    "INSERT INTO command_history (command, cwd, exit_code, created_at) \
-                     VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![h.command_line, cwd, exit_code, created_at],
+                    "INSERT INTO command_history (command, cwd, exit_code, created_at, session_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![h.command_line, cwd, exit_code, created_at, self.session_id],
                 )
                 .map_err(Self::to_reedline_err)?;
 
@@ -255,7 +282,7 @@ impl History for BlackBoxHistory {
                 id: Some(HistoryItemId::new(new_id)),
                 start_timestamp: h.start_timestamp,
                 command_line: h.command_line,
-                session_id: None,
+                session_id: Some(make_session_id(self.session_id)),
                 hostname: None,
                 cwd: Some(cwd),
                 duration: h.duration,
@@ -268,7 +295,7 @@ impl History for BlackBoxHistory {
     fn load(&self, id: HistoryItemId) -> Result<HistoryItem, ReedlineError> {
         self.conn
             .query_row(
-                "SELECT id, command, cwd, exit_code, created_at \
+                "SELECT id, command, cwd, exit_code, created_at, session_id \
                  FROM command_history WHERE id = ?1",
                 rusqlite::params![id.0],
                 Self::row_to_item,
@@ -287,7 +314,10 @@ impl History for BlackBoxHistory {
     }
 
     fn search(&self, query: SearchQuery) -> Result<Vec<HistoryItem>, ReedlineError> {
-        let (sql, params) = self.build_sql(&query, "id, command, cwd, exit_code, created_at");
+        let (sql, params) = self.build_sql(
+            &query,
+            "id, command, cwd, exit_code, created_at, session_id",
+        );
 
         let mut stmt = self.conn.prepare(&sql).map_err(Self::to_reedline_err)?;
         let rows = stmt
@@ -339,7 +369,6 @@ impl History for BlackBoxHistory {
     }
 
     fn session(&self) -> Option<HistorySessionId> {
-        // セッション管理は使用しない
-        None
+        Some(make_session_id(self.session_id))
     }
 }

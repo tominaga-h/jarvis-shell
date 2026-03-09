@@ -35,6 +35,8 @@ pub struct Shell {
     classifier: Arc<InputClassifier>,
     /// 設定ファイルで定義されたコマンドエイリアス
     aliases: HashMap<String, String>,
+    /// 異常終了時に自動調査をスキップするコマンドの前方一致パターン
+    ignore_auto_investigation_cmds: Vec<String>,
     /// pushd / popd / cd で管理されるディレクトリスタック
     dir_stack: Vec<PathBuf>,
     /// Farewell メッセージが既に表示済みかどうか（AI goodbye 等で表示済みの場合 true）
@@ -49,7 +51,7 @@ impl Shell {
     /// 新しい Shell インスタンスを作成する。
     ///
     /// 設定ファイル、入力分類器、エディタ、プロンプト、BlackBox、AI クライアントを初期化する。
-    pub fn new(logging_operational: bool) -> Self {
+    pub fn new(logging_operational: bool, session_id: i64) -> Self {
         // 設定ファイルの読み込み
         let config = JarvishConfig::load();
 
@@ -64,7 +66,8 @@ impl Shell {
         let data_dir = BlackBox::data_dir();
 
         let db_path = data_dir.join("history.db");
-        let (reedline, history_available) = editor::build_editor(Arc::clone(&classifier), db_path);
+        let (reedline, history_available) =
+            editor::build_editor(Arc::clone(&classifier), db_path, session_id);
 
         // 直前コマンドの終了コードを共有するアトミック変数
         // 初期値は EXIT_CODE_NONE（未設定）。コマンド実行時に実際の終了コードで上書きされる。
@@ -75,7 +78,7 @@ impl Shell {
 
         // Black Box（履歴永続化）の初期化
         // BlackBox::open() ではなく open_at() を使い、フォールバック時も同じパスを使用する
-        let black_box = match BlackBox::open_at(data_dir) {
+        let black_box = match BlackBox::open_at(data_dir, session_id) {
             Ok(bb) => {
                 info!("BlackBox initialized successfully");
                 Some(bb)
@@ -109,6 +112,7 @@ impl Shell {
             last_exit_code,
             classifier,
             aliases: config.alias,
+            ignore_auto_investigation_cmds: config.ai.ignore_auto_investigation_cmds,
             dir_stack: Vec::new(),
             farewell_shown: false,
             history_available,
@@ -162,14 +166,27 @@ impl Shell {
         if let Some(ref mut ai) = self.ai_client {
             ai.update_config(&config.ai);
         }
+        self.ignore_auto_investigation_cmds = config.ai.ignore_auto_investigation_cmds.clone();
 
         // [prompt] を反映
         self.prompt.update_config(config.prompt.clone());
 
         // サマリー出力（config.toml のセクション順: ai, alias, export, prompt）
+        let ignore_cmds_display = if config.ai.ignore_auto_investigation_cmds.is_empty() {
+            "none".to_string()
+        } else {
+            format!("{:?}", config.ai.ignore_auto_investigation_cmds)
+        };
         let summary = format!(
             "Loaded {}\n\
-             \x20 [ai]      model: {}, max_rounds: {}, markdown_rendering: {}, ai_pipe_max_chars: {}, ai_redirect_max_chars: {}, temperature: {}\n\
+             \x20 [ai]\n\
+             \x20\x20 model: {}\n\
+             \x20\x20 max_rounds: {}\n\
+             \x20\x20 markdown_rendering: {}\n\
+             \x20\x20 ai_pipe_max_chars: {}\n\
+             \x20\x20 ai_redirect_max_chars: {}\n\
+             \x20\x20 temperature: {}\n\
+             \x20\x20 ignore_auto_investigation_cmds: {}\n\
              \x20 [alias]   {} {}\n\
              \x20 [export]  {} {}\n\
              \x20 [prompt]  nerd_font: {}\n",
@@ -180,6 +197,7 @@ impl Shell {
             config.ai.ai_pipe_max_chars,
             config.ai.ai_redirect_max_chars,
             config.ai.temperature,
+            ignore_cmds_display,
             config.alias.len(),
             if config.alias.len() == 1 {
                 "entry"
@@ -197,6 +215,31 @@ impl Shell {
         print!("{summary}");
 
         CommandResult::success(summary)
+    }
+
+    /// `-c` オプションで渡されたコマンド文字列を非対話的に実行する。
+    ///
+    /// REPL ループには入らず、文字列を行ごとに `handle_input()` で処理して終了する。
+    /// ウェルカムバナー・Farewell メッセージは表示しない。
+    ///
+    /// 戻り値: 最後に実行したコマンドの終了コード。
+    pub async fn run_command(&mut self, command: &str) -> i32 {
+        for line in command.lines() {
+            if !self.handle_input(line).await {
+                break;
+            }
+        }
+
+        if let Some(ref bb) = self.black_box {
+            bb.release_session();
+        }
+
+        let code = self.last_exit_code.load(Ordering::Relaxed);
+        if code == EXIT_CODE_NONE {
+            0
+        } else {
+            code
+        }
     }
 
     /// REPL ループを実行する。
@@ -257,6 +300,11 @@ impl Shell {
         // Farewell メッセージ表示（AI goodbye で既に表示済みの場合はスキップ）
         if !self.farewell_shown {
             crate::cli::banner::print_goodbye();
+        }
+
+        // セッション終了: session_id を NULL に解放し、次回起動時に履歴を辿れるようにする
+        if let Some(ref bb) = self.black_box {
+            bb.release_session();
         }
 
         // 終了コードを決定

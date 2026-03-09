@@ -1,7 +1,7 @@
 # 🤵 Jarvish — The AI-Native Shell
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-[![version](https://img.shields.io/badge/version-1.2.1-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.2.1)
+[![version](https://img.shields.io/badge/version-1.3.0-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.3.0)
 
 > 🌐 [日本語版 README はこちら](docs/README_JA.md)
 
@@ -119,6 +119,7 @@ markdown_rendering = true     # Render AI responses as Markdown
 ai_pipe_max_chars = 50000     # Max characters for AI Pipe input (fail-fast on overflow)
 ai_redirect_max_chars = 50000 # Max characters for AI Redirect input (fail-fast on overflow)
 temperature = 0.5             # Response randomness
+ignore_auto_investigation_cmds = ["git log", "git diff"]  # Skip auto-investigation for these commands
 
 [alias]
 g = "git"                     # Command aliases (also manageable via builtins)
