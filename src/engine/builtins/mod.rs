@@ -177,7 +177,9 @@ mod tests {
     // ── 新規ビルトイン登録テスト ──
 
     #[test]
+    #[serial]
     fn pwd_is_alias_for_cwd() {
+        let _guard = CwdGuard::new();
         assert!(is_builtin("pwd"));
         let pwd_result = dispatch_builtin("pwd", &[]).unwrap();
         assert_eq!(pwd_result.exit_code, 0);
