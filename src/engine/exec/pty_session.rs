@@ -3,8 +3,8 @@
 //! 子プロセスをセッションリーダーとして起動し、PTY を制御端末として割り当てる。
 //! stdin は PTY 経由で転送し、stdout は PTY 経由でキャプチャする。
 
-use std::io::{self, IsTerminal};
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::io::{self, IsTerminal, Write};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -116,12 +116,24 @@ pub(super) fn run_single_command_pty_session(simple: &SimpleCommand) -> io::Resu
     // 12. stdin 転送スレッドを停止
     drop(shutdown_write);
 
-    // 13. ターミナル状態は terminal_guard の Drop で自動復元される
-
-    // 14. スレッドを join
+    // 13. スレッドを join
     let _ = stdin_handle.join();
     let capture = output_handle.join().unwrap_or_default();
     let stderr_bytes = stderr_handle.join().unwrap_or_default();
+
+    // 14. ターミナル状態を明示的に復元
+    drop(terminal_guard);
+
+    // 15. Alt screen プログラム (less, vim 等) 終了後、ターミナルに残る
+    // エスケープシーケンスの処理完了を待ち、stdin の残留 DSR 応答を破棄する。
+    // stdout.flush() で全シーケンスをターミナルに送出し、短い遅延で
+    // ターミナルの処理・応答生成を待ってから tcflush する。
+    if capture.used_alt_screen {
+        let _ = io::stdout().flush();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let _ =
+            nix::sys::termios::tcflush(io::stdin().as_fd(), nix::sys::termios::FlushArg::TCIFLUSH);
+    }
 
     debug!(
         command = %cmd,
