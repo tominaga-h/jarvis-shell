@@ -45,3 +45,17 @@ jobs:
           tar: unix # tar.gz形式で圧縮
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: ["build-release"]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bump Homebrew formula
+        uses: mislav/bump-homebrew-formula-action@v3
+        with:
+          formula-name: jarvish
+          homebrew-tap: tominaga-h/homebrew-tap
+          commit-message: "Bump jarvish to ${{ github.ref_name }}"
+        env:
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_BUMP_TOKEN }}

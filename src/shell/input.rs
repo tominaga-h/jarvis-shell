@@ -95,6 +95,14 @@ impl Shell {
             self.last_exit_code
                 .store(result.exit_code, Ordering::Relaxed);
         }
+
+        // 4.5. Alternate Screen 復元後、カーソルを旧プロンプト領域の下に押し下げる。
+        // ターミナルが復元した旧画面（旧プロンプト+コマンド）はそのまま残し、
+        // 追加の改行で reedline の新プロンプトが旧内容を上書きしないようにする。
+        if result.used_alt_screen {
+            println!();
+        }
+
         println!(); // 実行結果の後に空行を追加
 
         // 5. 履歴を記録（エイリアス展開前の入力を記録する）

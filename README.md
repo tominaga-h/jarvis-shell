@@ -73,9 +73,15 @@ Despite deep AI integration, Jarvish leverages Rust's strengths to deliver outst
 
 ### Prerequisites
 
-- **Rust** (Stable toolchain / Edition 2021)
 - **OpenAI API Key**
 - **NerdFont** (recommended for prompt icons)
+
+### Install via Homebrew (macOS)
+
+```bash
+brew tap tominaga-h/tap
+brew install tominaga-h/tap/jarvish
+```
 
 ### Install via Cargo
 
