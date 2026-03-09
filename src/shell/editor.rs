@@ -25,7 +25,11 @@ use crate::storage::BlackBoxHistory;
 /// # Returns
 /// `(Reedline, bool)` — `bool` はコマンド履歴の読み込みに成功したかどうか。
 /// `false` の場合、矢印キー履歴とオートサジェスト（ヒンター）は無効。
-pub fn build_editor(classifier: Arc<InputClassifier>, db_path: PathBuf) -> (Reedline, bool) {
+pub fn build_editor(
+    classifier: Arc<InputClassifier>,
+    db_path: PathBuf,
+    session_id: i64,
+) -> (Reedline, bool) {
     let completer = Box::new(JarvishCompleter::new());
     let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
 
@@ -47,7 +51,7 @@ pub fn build_editor(classifier: Arc<InputClassifier>, db_path: PathBuf) -> (Reed
 
     // コマンド履歴を BlackBox の SQLite テーブル (command_history) で管理。
     // DB オープンに失敗した場合は警告を出力し、履歴・ヒンターなしで動作を継続する。
-    let history_available = match BlackBoxHistory::open(db_path) {
+    let history_available = match BlackBoxHistory::open(db_path, session_id) {
         Ok(history) => {
             let hinter = Box::new(
                 DefaultHinter::default()

@@ -49,7 +49,7 @@ impl Shell {
     /// 新しい Shell インスタンスを作成する。
     ///
     /// 設定ファイル、入力分類器、エディタ、プロンプト、BlackBox、AI クライアントを初期化する。
-    pub fn new(logging_operational: bool) -> Self {
+    pub fn new(logging_operational: bool, session_id: i64) -> Self {
         // 設定ファイルの読み込み
         let config = JarvishConfig::load();
 
@@ -64,7 +64,8 @@ impl Shell {
         let data_dir = BlackBox::data_dir();
 
         let db_path = data_dir.join("history.db");
-        let (reedline, history_available) = editor::build_editor(Arc::clone(&classifier), db_path);
+        let (reedline, history_available) =
+            editor::build_editor(Arc::clone(&classifier), db_path, session_id);
 
         // 直前コマンドの終了コードを共有するアトミック変数
         // 初期値は EXIT_CODE_NONE（未設定）。コマンド実行時に実際の終了コードで上書きされる。
@@ -75,7 +76,7 @@ impl Shell {
 
         // Black Box（履歴永続化）の初期化
         // BlackBox::open() ではなく open_at() を使い、フォールバック時も同じパスを使用する
-        let black_box = match BlackBox::open_at(data_dir) {
+        let black_box = match BlackBox::open_at(data_dir, session_id) {
             Ok(bb) => {
                 info!("BlackBox initialized successfully");
                 Some(bb)
@@ -257,6 +258,11 @@ impl Shell {
         // Farewell メッセージ表示（AI goodbye で既に表示済みの場合はスキップ）
         if !self.farewell_shown {
             crate::cli::banner::print_goodbye();
+        }
+
+        // セッション終了: session_id を NULL に解放し、次回起動時に履歴を辿れるようにする
+        if let Some(ref bb) = self.black_box {
+            bb.release_session();
         }
 
         // 終了コードを決定

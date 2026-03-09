@@ -24,13 +24,23 @@ fn jst() -> FixedOffset {
 // JST タイマー
 // ---------------------------------------------------------------------------
 
-/// ログ行のタイムスタンプを JST で出力するタイマー
-struct JstTimer;
+/// ログ行のタイムスタンプを JST で出力し、セッションキーをプレフィックスとして付加するタイマー。
+///
+/// 複数の jarvish プロセスが同一ログファイルに書き込む場合に、
+/// どのログがどのプロセスに属するかを識別できるようにする。
+struct JstTimer {
+    session_key: String,
+}
 
 impl FormatTime for JstTimer {
     fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
         let now = Utc::now().with_timezone(&jst());
-        write!(w, "{}", now.format("%Y-%m-%dT%H:%M:%S%.3f+09:00"))
+        write!(
+            w,
+            "{} [{}]",
+            now.format("%Y-%m-%dT%H:%M:%S%.3f+09:00"),
+            self.session_key
+        )
     }
 }
 
@@ -114,6 +124,7 @@ fn log_dir() -> PathBuf {
 ///   `false` の場合、ログは sink（破棄）にフォールバックしている。
 pub fn init_logging(
     log_dir_override: Option<PathBuf>,
+    session_key: &str,
 ) -> (tracing_appender::non_blocking::WorkerGuard, bool) {
     let log_dir = log_dir_override.unwrap_or_else(log_dir);
 
@@ -150,7 +161,9 @@ pub fn init_logging(
     fmt()
         .with_env_filter(env_filter)
         .with_writer(non_blocking)
-        .with_timer(JstTimer) // タイムスタンプを JST で出力
+        .with_timer(JstTimer {
+            session_key: session_key.to_string(),
+        })
         .with_ansi(false) // ファイル出力には ANSI カラーコードを含めない
         .with_target(true) // ターゲット（モジュールパス）を表示
         .with_thread_ids(false)

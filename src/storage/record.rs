@@ -62,8 +62,8 @@ impl super::BlackBox {
 
             self.conn
                 .execute(
-                    "INSERT INTO command_history (command, cwd, exit_code, stdout_hash, stderr_hash, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT INTO command_history (command, cwd, exit_code, stdout_hash, stderr_hash, created_at, session_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     rusqlite::params![
                         command,
                         cwd,
@@ -71,6 +71,7 @@ impl super::BlackBox {
                         stdout_hash,
                         stderr_hash,
                         created_at,
+                        self.session_id,
                     ],
                 )
                 .context("failed to insert command history")?;
@@ -89,10 +90,20 @@ impl super::BlackBox {
                 exit_code   INTEGER NOT NULL,
                 stdout_hash TEXT,
                 stderr_hash TEXT,
-                created_at  TEXT    NOT NULL
+                created_at  TEXT    NOT NULL,
+                session_id  INTEGER
             );",
         )
         .context("failed to create command_history table")?;
+
+        // 既存 DB に session_id カラムがない場合に追加する
+        let has_session_id = conn
+            .prepare("SELECT session_id FROM command_history LIMIT 0")
+            .is_ok();
+        if !has_session_id {
+            conn.execute_batch("ALTER TABLE command_history ADD COLUMN session_id INTEGER;")
+                .context("failed to add session_id column")?;
+        }
 
         Ok(())
     }
