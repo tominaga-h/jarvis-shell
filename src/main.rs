@@ -19,6 +19,10 @@ struct Args {
     /// デバッグモード: ログを ./var/logs に出力する
     #[arg(long)]
     debug: bool,
+
+    /// 文字列をコマンドとして実行して終了する
+    #[arg(short = 'c', allow_hyphen_values = true)]
+    command: Option<String>,
 }
 
 #[tokio::main]
@@ -61,7 +65,11 @@ async fn main() {
     );
 
     let mut shell = shell::Shell::new(logging_ok, session_id);
-    let exit_code = shell.run().await;
+    let exit_code = if let Some(ref command) = args.command {
+        shell.run_command(command).await
+    } else {
+        shell.run().await
+    };
 
     info!(
         "\n\n==== [{}] J.A.R.V.I.S.H. SHUTTING DOWN ====\n\n",

@@ -217,6 +217,31 @@ impl Shell {
         CommandResult::success(summary)
     }
 
+    /// `-c` オプションで渡されたコマンド文字列を非対話的に実行する。
+    ///
+    /// REPL ループには入らず、文字列を行ごとに `handle_input()` で処理して終了する。
+    /// ウェルカムバナー・Farewell メッセージは表示しない。
+    ///
+    /// 戻り値: 最後に実行したコマンドの終了コード。
+    pub async fn run_command(&mut self, command: &str) -> i32 {
+        for line in command.lines() {
+            if !self.handle_input(line).await {
+                break;
+            }
+        }
+
+        if let Some(ref bb) = self.black_box {
+            bb.release_session();
+        }
+
+        let code = self.last_exit_code.load(Ordering::Relaxed);
+        if code == EXIT_CODE_NONE {
+            0
+        } else {
+            code
+        }
+    }
+
     /// REPL ループを実行する。
     ///
     /// ユーザー入力を受け取り、ビルトイン/コマンド/自然言語を処理する。
