@@ -119,6 +119,7 @@ markdown_rendering = true     # Render AI responses as Markdown
 ai_pipe_max_chars = 50000     # Max characters for AI Pipe input (fail-fast on overflow)
 ai_redirect_max_chars = 50000 # Max characters for AI Redirect input (fail-fast on overflow)
 temperature = 0.5             # Response randomness
+ignore_auto_investigation_cmds = ["git log", "git diff"]  # Skip auto-investigation for these commands
 
 [alias]
 g = "git"                     # Command aliases (also manageable via builtins)

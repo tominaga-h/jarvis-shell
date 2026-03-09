@@ -35,6 +35,8 @@ pub struct Shell {
     classifier: Arc<InputClassifier>,
     /// 設定ファイルで定義されたコマンドエイリアス
     aliases: HashMap<String, String>,
+    /// 異常終了時に自動調査をスキップするコマンドの前方一致パターン
+    ignore_auto_investigation_cmds: Vec<String>,
     /// pushd / popd / cd で管理されるディレクトリスタック
     dir_stack: Vec<PathBuf>,
     /// Farewell メッセージが既に表示済みかどうか（AI goodbye 等で表示済みの場合 true）
@@ -110,6 +112,7 @@ impl Shell {
             last_exit_code,
             classifier,
             aliases: config.alias,
+            ignore_auto_investigation_cmds: config.ai.ignore_auto_investigation_cmds,
             dir_stack: Vec::new(),
             farewell_shown: false,
             history_available,
@@ -163,14 +166,27 @@ impl Shell {
         if let Some(ref mut ai) = self.ai_client {
             ai.update_config(&config.ai);
         }
+        self.ignore_auto_investigation_cmds = config.ai.ignore_auto_investigation_cmds.clone();
 
         // [prompt] を反映
         self.prompt.update_config(config.prompt.clone());
 
         // サマリー出力（config.toml のセクション順: ai, alias, export, prompt）
+        let ignore_cmds_display = if config.ai.ignore_auto_investigation_cmds.is_empty() {
+            "none".to_string()
+        } else {
+            format!("{:?}", config.ai.ignore_auto_investigation_cmds)
+        };
         let summary = format!(
             "Loaded {}\n\
-             \x20 [ai]      model: {}, max_rounds: {}, markdown_rendering: {}, ai_pipe_max_chars: {}, ai_redirect_max_chars: {}, temperature: {}\n\
+             \x20 [ai]\n\
+             \x20\x20 model: {}\n\
+             \x20\x20 max_rounds: {}\n\
+             \x20\x20 markdown_rendering: {}\n\
+             \x20\x20 ai_pipe_max_chars: {}\n\
+             \x20\x20 ai_redirect_max_chars: {}\n\
+             \x20\x20 temperature: {}\n\
+             \x20\x20 ignore_auto_investigation_cmds: {}\n\
              \x20 [alias]   {} {}\n\
              \x20 [export]  {} {}\n\
              \x20 [prompt]  nerd_font: {}\n",
@@ -181,6 +197,7 @@ impl Shell {
             config.ai.ai_pipe_max_chars,
             config.ai.ai_redirect_max_chars,
             config.ai.temperature,
+            ignore_cmds_display,
             config.alias.len(),
             if config.alias.len() == 1 {
                 "entry"

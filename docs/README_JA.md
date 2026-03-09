@@ -119,6 +119,7 @@ markdown_rendering = true     # AIの回答をMarkdownで綺麗に表示
 ai_pipe_max_chars = 50000     # AIパイプへの入力文字数上限（超過時は安全にFail-fast）
 ai_redirect_max_chars = 50000 # AIリダイレクトへの入力文字数上限（超過時は安全にFail-fast）
 temperature = 0.5             # 回答のランダム性
+ignore_auto_investigation_cmds = ["git log", "git diff"]  # 自動調査をスキップするコマンド
 
 [alias]
 g = "git"                     # コマンドエイリアス（ビルトインでも管理可）

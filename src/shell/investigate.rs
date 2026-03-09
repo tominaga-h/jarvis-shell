@@ -13,6 +13,17 @@ use crate::engine::{execute, CommandResult, LoopAction};
 
 use super::Shell;
 
+/// コマンドが ignore リストのいずれかのパターンに前方一致するかを判定する。
+///
+/// パターンがコマンドと完全一致するか、コマンドが「パターン + スペース」で始まる場合に true。
+/// 例: パターン `"git log"` は `"git log"`, `"git log --oneline"` にマッチするが、
+///      `"git logx"` にはマッチしない。
+fn matches_ignore_pattern(line: &str, patterns: &[String]) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| line == pattern || line.starts_with(&format!("{pattern} ")))
+}
+
 impl Shell {
     /// コマンドが異常終了した場合にエラー調査を実行する。
     ///
@@ -28,6 +39,13 @@ impl Shell {
             Some(ref ai) => ai,
             None => return,
         };
+
+        // ignore_auto_investigation_cmds に前方一致するコマンドは調査をスキップ
+        // （Tool Call からの自動調査は常に実行する）
+        if !from_tool_call && matches_ignore_pattern(line, &self.ignore_auto_investigation_cmds) {
+            info!(command = %line, "Skipping investigation (matched ignore_auto_investigation_cmds)");
+            return;
+        }
 
         // 調査開始の判定
         let should_investigate = if from_tool_call {
@@ -78,5 +96,60 @@ impl Shell {
                 warn!(error = %e, "Error investigation failed");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn patterns(strs: &[&str]) -> Vec<String> {
+        strs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn empty_patterns_never_matches() {
+        assert!(!matches_ignore_pattern("git log", &[]));
+    }
+
+    #[test]
+    fn exact_match() {
+        let p = patterns(&["git log"]);
+        assert!(matches_ignore_pattern("git log", &p));
+    }
+
+    #[test]
+    fn prefix_match_with_args() {
+        let p = patterns(&["git log"]);
+        assert!(matches_ignore_pattern("git log --oneline", &p));
+    }
+
+    #[test]
+    fn no_match_without_word_boundary() {
+        let p = patterns(&["git log"]);
+        assert!(!matches_ignore_pattern("git logx", &p));
+    }
+
+    #[test]
+    fn broad_pattern_matches_all_subcommands() {
+        let p = patterns(&["git"]);
+        assert!(matches_ignore_pattern("git log", &p));
+        assert!(matches_ignore_pattern("git status", &p));
+        assert!(matches_ignore_pattern("git", &p));
+    }
+
+    #[test]
+    fn multiple_patterns() {
+        let p = patterns(&["git log", "make test"]);
+        assert!(matches_ignore_pattern("git log --oneline", &p));
+        assert!(matches_ignore_pattern("make test", &p));
+        assert!(!matches_ignore_pattern("cargo test", &p));
+    }
+
+    #[test]
+    fn no_partial_match_in_middle() {
+        let p = patterns(&["log"]);
+        assert!(!matches_ignore_pattern("git log", &p));
+        assert!(matches_ignore_pattern("log something", &p));
     }
 }
