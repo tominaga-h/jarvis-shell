@@ -82,3 +82,39 @@ pub fn write_file_tool() -> ChatCompletionTool {
         },
     }
 }
+
+/// search_replace ツールの定義
+pub fn search_replace_tool() -> ChatCompletionTool {
+    ChatCompletionTool {
+        r#type: ChatCompletionToolType::Function,
+        function: FunctionObject {
+            name: "search_replace".to_string(),
+            description: Some(
+                "Make a targeted edit to a file by replacing an exact string match. \
+                 Preferred over write_file for small, focused changes. \
+                 The old_string must match exactly one location in the file (including whitespace/indentation). \
+                 The path is relative to the user's current working directory."
+                    .to_string(),
+            ),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The file path to edit (relative to CWD)"
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "The exact string to find in the file (must be unique within the file)"
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "The replacement string"
+                    }
+                },
+                "required": ["path", "old_string", "new_string"]
+            })),
+            strict: None,
+        },
+    }
+}

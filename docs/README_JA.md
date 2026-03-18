@@ -1,7 +1,7 @@
 # 🤵 Jarvish — The AI-Native Shell
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-[![version](https://img.shields.io/badge/version-1.3.0-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.3.0)
+[![version](https://img.shields.io/badge/version-1.4.0-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.4.0)
 
 > 🌐 [English README](../README.md)
 
@@ -130,6 +130,9 @@ PATH = "/usr/local/bin:$PATH" # 起動時に展開される環境変数
 
 [prompt]
 nerd_font = true              # NerdFont 未インストールの場合は false に設定
+
+[completion]
+git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
 ```
 
 > **ヒント**: 設定を変更した後は、`source` コマンドで再起動せずに適用できます。

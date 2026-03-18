@@ -109,10 +109,14 @@ mod tests {
     use std::env;
     use std::fs;
 
+    use std::sync::{Arc, RwLock};
+
     use crate::cli::completer::JarvishCompleter;
+    use crate::config::CompletionConfig;
 
     fn test_completer() -> JarvishCompleter {
-        JarvishCompleter::new()
+        let commands = CompletionConfig::default().git_branch_commands;
+        JarvishCompleter::new(Arc::new(RwLock::new(commands)))
     }
 
     fn create_test_tree() -> (tempfile::TempDir, String) {

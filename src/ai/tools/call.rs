@@ -77,6 +77,17 @@ pub fn extract_shell_command(tool_calls: &[ToolCallAccumulator]) -> Option<Strin
     None
 }
 
+/// execute_shell_command 以外のツールコールをフィルタして返す。
+///
+/// `execute_shell_command` と同一ラウンドで返された `read_file` / `write_file` /
+/// `search_replace` 等を先に実行するために使用する。
+pub fn extract_non_shell_tools(tool_calls: &[ToolCallAccumulator]) -> Vec<&ToolCallAccumulator> {
+    tool_calls
+        .iter()
+        .filter(|tc| tc.function_name != "execute_shell_command")
+        .collect()
+}
+
 /// ToolCallAccumulator から ChatCompletionMessageToolCall を構築する（会話履歴に追加用）
 pub fn build_assistant_tool_calls(
     accumulators: &[ToolCallAccumulator],
@@ -161,5 +172,66 @@ mod tests {
         assert_eq!(result[0].id, "call_123");
         assert_eq!(result[0].function.name, "read_file");
         assert_eq!(result[0].function.arguments, r#"{"path": "test.txt"}"#);
+    }
+
+    #[test]
+    fn extract_non_shell_tools_filters_shell_command() {
+        let tool_calls = vec![
+            ToolCallAccumulator {
+                id: "call_1".to_string(),
+                function_name: "write_file".to_string(),
+                arguments: r#"{"path": "a.txt", "content": "x"}"#.to_string(),
+            },
+            ToolCallAccumulator {
+                id: "call_2".to_string(),
+                function_name: "execute_shell_command".to_string(),
+                arguments: r#"{"command": "make build"}"#.to_string(),
+            },
+            ToolCallAccumulator {
+                id: "call_3".to_string(),
+                function_name: "search_replace".to_string(),
+                arguments: r#"{"path": "b.txt", "old_string": "x", "new_string": "y"}"#.to_string(),
+            },
+        ];
+
+        let non_shell = extract_non_shell_tools(&tool_calls);
+        assert_eq!(non_shell.len(), 2);
+        assert_eq!(non_shell[0].function_name, "write_file");
+        assert_eq!(non_shell[1].function_name, "search_replace");
+    }
+
+    #[test]
+    fn extract_non_shell_tools_empty_when_only_shell() {
+        let tool_calls = vec![ToolCallAccumulator {
+            id: "call_1".to_string(),
+            function_name: "execute_shell_command".to_string(),
+            arguments: r#"{"command": "ls"}"#.to_string(),
+        }];
+
+        let non_shell = extract_non_shell_tools(&tool_calls);
+        assert!(non_shell.is_empty());
+    }
+
+    #[test]
+    fn mixed_write_and_shell_command_extracts_both() {
+        let tool_calls = vec![
+            ToolCallAccumulator {
+                id: "call_1".to_string(),
+                function_name: "write_file".to_string(),
+                arguments: r#"{"path": "fix.ts", "content": "fixed"}"#.to_string(),
+            },
+            ToolCallAccumulator {
+                id: "call_2".to_string(),
+                function_name: "execute_shell_command".to_string(),
+                arguments: r#"{"command": "make build"}"#.to_string(),
+            },
+        ];
+
+        let cmd = extract_shell_command(&tool_calls);
+        assert_eq!(cmd, Some("make build".to_string()));
+
+        let non_shell = extract_non_shell_tools(&tool_calls);
+        assert_eq!(non_shell.len(), 1);
+        assert_eq!(non_shell[0].function_name, "write_file");
     }
 }

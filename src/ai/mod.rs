@@ -7,4 +7,4 @@ mod types;
 
 pub use client::JarvisAI;
 #[allow(unused_imports)]
-pub use types::{AiResponse, ConversationResult, ConversationState};
+pub use types::{AiResponse, ConversationOrigin, ConversationResult, ConversationState};

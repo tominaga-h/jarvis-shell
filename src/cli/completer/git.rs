@@ -11,24 +11,12 @@ fn current_branch() -> Option<String> {
     head.shorthand().map(str::to_string)
 }
 
-/// ブランチ名補完を提供する git サブコマンド
-const GIT_BRANCH_SUBCOMMANDS: &[&str] = &[
-    "checkout",
-    "switch",
-    "merge",
-    "rebase",
-    "branch",
-    "diff",
-    "log",
-    "cherry-pick",
-    "reset",
-    "push",
-];
-
 impl super::JarvishCompleter {
     /// Git サブコマンドに応じたブランチ名補完を試みる。
     /// Git 関連の補完が適用できた場合は `Some(suggestions)` を返し、
     /// 適用外の場合は `None` を返す。
+    ///
+    /// 補完対象サブコマンドは `config.toml` の `[completion].git_branch_commands` で設定可能。
     pub(super) fn try_complete_git(
         &self,
         tokens: &[&str],
@@ -42,13 +30,15 @@ impl super::JarvishCompleter {
 
         let subcmd = tokens[1];
 
-        if GIT_BRANCH_SUBCOMMANDS.contains(&subcmd) {
+        let commands = self.git_branch_commands.read().ok()?;
+
+        if commands.iter().any(|c| c == subcmd) {
             return Some(self.complete_git_branch(partial, span));
         }
 
         if let Some(resolved) = self.resolve_git_alias(subcmd) {
             let main_cmd = resolved.split_whitespace().next().unwrap_or("");
-            if GIT_BRANCH_SUBCOMMANDS.contains(&main_cmd) {
+            if commands.iter().any(|c| c == main_cmd) {
                 return Some(self.complete_git_branch(partial, span));
             }
         }
@@ -146,14 +136,18 @@ impl super::JarvishCompleter {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, RwLock};
+
     use reedline::Span;
     use serial_test::serial;
     use std::env;
 
     use crate::cli::completer::JarvishCompleter;
+    use crate::config::CompletionConfig;
 
     fn test_completer() -> JarvishCompleter {
-        JarvishCompleter::new()
+        let commands = CompletionConfig::default().git_branch_commands;
+        JarvishCompleter::new(Arc::new(RwLock::new(commands)))
     }
 
     fn create_test_git_repo() -> tempfile::TempDir {

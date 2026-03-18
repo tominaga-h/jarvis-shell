@@ -5,7 +5,7 @@
 
 use std::sync::atomic::Ordering;
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::ai::AiResponse;
 use crate::cli::jarvis::{jarvis_ask_investigate, jarvis_notice};
@@ -59,44 +59,100 @@ impl Shell {
             return;
         }
 
-        // BlackBox から最新コンテキストを取得（失敗したコマンドも含む）
-        let context = self
+        // Tool Call 由来の失敗で既存の会話コンテキストがある場合は、
+        // 新規調査ではなく会話を継続する。これにより AI は前回の修正試行を
+        // 把握した上で別のアプローチを試みることができる。
+        if from_tool_call {
+            if let Some(mut conv) = self.conversation_state.take() {
+                debug!("Continuing existing conversation for error investigation");
+
+                let error_msg = build_error_follow_up(line, result);
+
+                match ai.continue_conversation(&mut conv, &error_msg).await {
+                    Ok(response) => {
+                        self.handle_investigation_response(response, Some(conv));
+                        return;
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Conversation continuation for investigation failed, falling back to new investigation");
+                    }
+                }
+            }
+        }
+
+        // 新規調査（会話コンテキストがない場合、または会話継続が失敗した場合）
+        let bb_context = self
             .black_box
             .as_ref()
             .and_then(|bb| bb.get_recent_context(5).ok())
             .unwrap_or_default();
 
-        match ai.investigate_error(line, result, &context).await {
-            Ok(conv_result) => match conv_result.response {
-                AiResponse::Command(ref fix_cmd) => {
-                    // AI が修正コマンドを提案 → 実行
-                    jarvis_notice(fix_cmd);
-                    let fix_result = execute(fix_cmd);
-                    self.last_exit_code
-                        .store(fix_result.exit_code, Ordering::Relaxed);
-                    println!();
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        let context = format!("Current working directory: {cwd}\n\n{bb_context}");
 
-                    // 修正コマンドの結果も履歴に記録
-                    if fix_result.action == LoopAction::Continue {
-                        if let Some(ref bb) = self.black_box {
-                            if let Err(e) = bb.record(fix_cmd, &fix_result) {
-                                warn!("Failed to record fix command history: {e}");
-                            }
-                        }
-                    }
-                }
-                AiResponse::NaturalLanguage(_) => {
-                    // 会話コンテキストを保存
-                    self.conversation_state = Some(conv_result.conversation);
-                    // AI が自然言語で説明 → ストリーミング表示済み
-                    println!();
-                }
-            },
+        match ai.investigate_error(line, result, &context).await {
+            Ok(conv_result) => {
+                let response = conv_result.response.clone();
+                self.handle_investigation_response(response, Some(conv_result.conversation));
+            }
             Err(e) => {
                 warn!(error = %e, "Error investigation failed");
             }
         }
     }
+
+    /// 調査結果の AI レスポンスを処理する共通ヘルパー。
+    fn handle_investigation_response(
+        &mut self,
+        response: AiResponse,
+        conversation: Option<crate::ai::ConversationState>,
+    ) {
+        match response {
+            AiResponse::Command(ref fix_cmd) => {
+                jarvis_notice(fix_cmd);
+                let fix_result = execute(fix_cmd);
+                self.last_exit_code
+                    .store(fix_result.exit_code, Ordering::Relaxed);
+                println!();
+
+                if fix_result.action == LoopAction::Continue {
+                    if let Some(ref bb) = self.black_box {
+                        if let Err(e) = bb.record(fix_cmd, &fix_result) {
+                            warn!("Failed to record fix command history: {e}");
+                        }
+                    }
+                }
+
+                // 修正コマンド実行後も会話コンテキストを保持し、
+                // 再失敗時の会話継続に備える
+                self.conversation_state = conversation;
+            }
+            AiResponse::NaturalLanguage(_) => {
+                self.conversation_state = conversation;
+                println!();
+            }
+        }
+    }
+}
+
+/// ツール実行コマンドの失敗情報をフォローアップメッセージとして構築する。
+fn build_error_follow_up(command: &str, result: &CommandResult) -> String {
+    let mut msg = format!(
+        "The fix command I just ran has failed.\n\
+         Command: {command}\n\
+         Exit code: {}\n",
+        result.exit_code
+    );
+    if !result.stdout.is_empty() {
+        msg.push_str(&format!("\nstdout:\n{}\n", result.stdout));
+    }
+    if !result.stderr.is_empty() {
+        msg.push_str(&format!("\nstderr:\n{}\n", result.stderr));
+    }
+    msg.push_str("\nPlease investigate and try a different approach to fix this.");
+    msg
 }
 
 #[cfg(test)]

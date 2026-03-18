@@ -3,6 +3,21 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.4.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.4.0) - 2026-03-19
+
+### Added
+
+- AI の賢さ改善: プロンプトの改善、再調査時のコンテキスト引き継ぎ、`search_replace` ツールの追加 ([#85](https://github.com/tominaga-h/jarvis-shell/issues/85))
+- ブランチ補完の設定可能化: `completion.git_branch_commands` でブランチ補完対象の Git サブコマンドをカスタマイズ可能に ([#84](https://github.com/tominaga-h/jarvis-shell/issues/84), [#86](https://github.com/tominaga-h/jarvis-shell/issues/86))
+
+### Fixed
+
+- `extract_shell_command` のショートサーキット処理を修正 ([#85](https://github.com/tominaga-h/jarvis-shell/issues/85))
+
+### Changed
+
+- AI のコンテキスト認識を改善
+
 ## [v1.3.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.3.0) - 2026-03-09
 
 ### Added
