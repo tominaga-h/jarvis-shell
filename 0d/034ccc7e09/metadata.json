@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "0d034ccc7e09",
+  "strategy": "manual-commit",
+  "branch": "develop",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "README.md",
+    "docs/README_JA.md",
+    "src/cli/completer/git.rs",
+    "src/cli/completer/mod.rs",
+    "src/cli/completer/path.rs",
+    "src/config/defaults.rs",
+    "src/config/mod.rs",
+    "src/shell/editor.rs",
+    "src/shell/mod.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0d/034ccc7e09/0/metadata.json",
+      "transcript": "/0d/034ccc7e09/0/full.jsonl",
+      "content_hash": "/0d/034ccc7e09/0/content_hash.txt",
+      "prompt": "/0d/034ccc7e09/0/prompt.txt"
+    }
+  ]
+}

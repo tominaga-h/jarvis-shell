@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "0d034ccc7e09",
+  "session_id": "da95fb40-8c6e-4c6d-9876-ebe71fc8ded0",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-18T11:53:49.527259Z",
+  "branch": "develop",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "README.md",
+    "docs/README_JA.md",
+    "src/cli/completer/git.rs",
+    "src/cli/completer/mod.rs",
+    "src/cli/completer/path.rs",
+    "src/config/defaults.rs",
+    "src/config/mod.rs",
+    "src/shell/editor.rs",
+    "src/shell/mod.rs"
+  ],
+  "agent": "Cursor",
+  "model": "claude-opus-4-6",
+  "turn_id": "b6530997155e",
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-18T11:53:49.46883Z",
+    "agent_lines": 146,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 146,
+    "agent_percentage": 100
+  }
+}
