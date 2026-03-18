@@ -81,11 +81,16 @@ impl Shell {
         }
 
         // 新規調査（会話コンテキストがない場合、または会話継続が失敗した場合）
-        let context = self
+        let bb_context = self
             .black_box
             .as_ref()
             .and_then(|bb| bb.get_recent_context(5).ok())
             .unwrap_or_default();
+
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        let context = format!("Current working directory: {cwd}\n\n{bb_context}");
 
         match ai.investigate_error(line, result, &context).await {
             Ok(conv_result) => {

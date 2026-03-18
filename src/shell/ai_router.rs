@@ -5,7 +5,7 @@
 
 use tracing::{debug, warn};
 
-use crate::ai::AiResponse;
+use crate::ai::{AiResponse, ConversationOrigin};
 use crate::cli::jarvis::jarvis_notice;
 use crate::engine::{execute, CommandResult};
 
@@ -41,37 +41,100 @@ impl Shell {
     /// 既存の会話コンテキストがある場合は継続会話、なければ新規会話を開始する。
     /// AI が無効な場合はコマンドとして直接実行にフォールバックする。
     pub(super) async fn route_to_ai(&mut self, line: &str) -> AiRoutingResult {
-        let ai = match self.ai_client {
-            Some(ref ai) => ai,
-            None => {
-                debug!(ai_enabled = false, "AI disabled, executing directly");
-                return AiRoutingResult {
-                    result: execute(line),
-                    from_tool_call: false,
-                    should_update_exit_code: true,
-                    executed_command: None,
-                };
-            }
-        };
+        if self.ai_client.is_none() {
+            debug!(ai_enabled = false, "AI disabled, executing directly");
+            return AiRoutingResult {
+                result: execute(line),
+                from_tool_call: false,
+                should_update_exit_code: true,
+                executed_command: None,
+            };
+        }
 
         debug!(ai_enabled = true, "Routing natural language to AI");
 
-        // 既存の会話コンテキストがある場合は継続、なければ新規会話
+        // 既存の会話コンテキストがある場合は継続、なければ新規会話。
+        // ただしエラー調査由来の会話は自然言語入力に流用しない。
         let existing_conv = self.conversation_state.take();
 
         if let Some(mut conv) = existing_conv {
-            // === 会話継続 ===
-            debug!(input = %line, "Continuing existing conversation");
+            if conv.origin == ConversationOrigin::Investigation {
+                debug!("Discarding investigation conversation, starting fresh");
+            } else {
+                // === 会話継続 ===
+                debug!(input = %line, "Continuing existing conversation");
+                let ai = self.ai_client.as_ref().unwrap();
 
-            match ai.continue_conversation(&mut conv, line).await {
-                Ok(AiResponse::Command(ref cmd)) => {
+                match ai.continue_conversation(&mut conv, line).await {
+                    Ok(AiResponse::Command(ref cmd)) => {
+                        debug!(
+                            ai_response = "Command",
+                            command = %cmd,
+                            "AI continued conversation with a command"
+                        );
+                        let result = execute_ai_command(cmd);
+                        self.conversation_state = Some(conv);
+                        return AiRoutingResult {
+                            result,
+                            from_tool_call: true,
+                            should_update_exit_code: true,
+                            executed_command: Some(cmd.clone()),
+                        };
+                    }
+                    Ok(AiResponse::NaturalLanguage(ref text)) => {
+                        debug!(
+                            ai_response = "NaturalLanguage",
+                            response_length = text.len(),
+                            "AI continued conversation with natural language"
+                        );
+                        self.conversation_state = Some(conv);
+                        return AiRoutingResult {
+                            result: CommandResult::success(text.clone()),
+                            from_tool_call: false,
+                            should_update_exit_code: false,
+                            executed_command: None,
+                        };
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            input = %line,
+                            "Conversation continuation failed, falling back to new conversation"
+                        );
+                    }
+                }
+            }
+        }
+
+        // === 新規会話 ===
+        self.start_new_ai_conversation(line).await
+    }
+
+    /// BlackBox コンテキストを取得して新規 AI 会話を開始する。
+    async fn start_new_ai_conversation(&mut self, line: &str) -> AiRoutingResult {
+        let ai = self.ai_client.as_ref().unwrap();
+        let bb_context = self
+            .black_box
+            .as_ref()
+            .and_then(|bb| bb.get_recent_context(5).ok())
+            .unwrap_or_default();
+
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        let context = format!("Current working directory: {cwd}\n\n{bb_context}");
+
+        debug!(context_length = context.len(), cwd = %cwd, "Context retrieved for AI");
+
+        match ai.process_input(line, &context).await {
+            Ok(conv_result) => match conv_result.response {
+                AiResponse::Command(ref cmd) => {
                     debug!(
                         ai_response = "Command",
                         command = %cmd,
-                        "AI continued conversation with a command"
+                        "AI interpreted natural language as a command"
                     );
                     let result = execute_ai_command(cmd);
-                    self.conversation_state = Some(conv);
                     AiRoutingResult {
                         result,
                         from_tool_call: true,
@@ -79,92 +142,32 @@ impl Shell {
                         executed_command: Some(cmd.clone()),
                     }
                 }
-                Ok(AiResponse::NaturalLanguage(ref text)) => {
+                AiResponse::NaturalLanguage(ref text) => {
                     debug!(
                         ai_response = "NaturalLanguage",
                         response_length = text.len(),
-                        "AI continued conversation with natural language"
+                        "AI responded with natural language"
                     );
-                    // 会話コンテキストを維持
-                    self.conversation_state = Some(conv);
+                    self.conversation_state = Some(conv_result.conversation);
                     AiRoutingResult {
                         result: CommandResult::success(text.clone()),
                         from_tool_call: false,
-                        // コマンド未実行のため終了コードは更新しない
                         should_update_exit_code: false,
                         executed_command: None,
                     }
                 }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        input = %line,
-                        "Conversation continuation failed, falling back to direct execution"
-                    );
-                    AiRoutingResult {
-                        result: execute(line),
-                        from_tool_call: false,
-                        should_update_exit_code: true,
-                        executed_command: None,
-                    }
-                }
-            }
-        } else {
-            // === 新規会話 ===
-            // BlackBox から直近 5 件のコマンド履歴をコンテキストとして取得
-            let context = self
-                .black_box
-                .as_ref()
-                .and_then(|bb| bb.get_recent_context(5).ok())
-                .unwrap_or_default();
-
-            debug!(context_length = context.len(), "Context retrieved for AI");
-
-            match ai.process_input(line, &context).await {
-                Ok(conv_result) => match conv_result.response {
-                    AiResponse::Command(ref cmd) => {
-                        debug!(
-                            ai_response = "Command",
-                            command = %cmd,
-                            "AI interpreted natural language as a command"
-                        );
-                        let result = execute_ai_command(cmd);
-                        AiRoutingResult {
-                            result,
-                            from_tool_call: true,
-                            should_update_exit_code: true,
-                            executed_command: Some(cmd.clone()),
-                        }
-                    }
-                    AiResponse::NaturalLanguage(ref text) => {
-                        debug!(
-                            ai_response = "NaturalLanguage",
-                            response_length = text.len(),
-                            "AI responded with natural language"
-                        );
-                        // 会話コンテキストを保存
-                        self.conversation_state = Some(conv_result.conversation);
-                        AiRoutingResult {
-                            result: CommandResult::success(text.clone()),
-                            from_tool_call: false,
-                            // コマンド未実行のため終了コードは更新しない
-                            should_update_exit_code: false,
-                            executed_command: None,
-                        }
-                    }
-                },
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        input = %line,
-                        "AI processing failed, falling back to direct execution"
-                    );
-                    AiRoutingResult {
-                        result: execute(line),
-                        from_tool_call: false,
-                        should_update_exit_code: true,
-                        executed_command: None,
-                    }
+            },
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    input = %line,
+                    "AI processing failed, falling back to direct execution"
+                );
+                AiRoutingResult {
+                    result: execute(line),
+                    from_tool_call: false,
+                    should_update_exit_code: true,
+                    executed_command: None,
                 }
             }
         }

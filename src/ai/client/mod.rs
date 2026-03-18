@@ -24,7 +24,7 @@ use crate::config::AiConfig;
 use crate::engine::CommandResult;
 
 use super::prompts::{ERROR_INVESTIGATION_PROMPT, SYSTEM_PROMPT};
-use super::types::{AiResponse, ConversationResult, ConversationState};
+use super::types::{AiResponse, ConversationOrigin, ConversationResult, ConversationState};
 
 /// テキストのみのアシスタントメッセージを構築する。
 fn build_text_assistant_message(text: String) -> ChatCompletionRequestMessage {
@@ -133,7 +133,10 @@ impl JarvisAI {
         let response = self.run_agent_loop(&mut messages).await?;
         Ok(ConversationResult {
             response,
-            conversation: ConversationState { messages },
+            conversation: ConversationState {
+                messages,
+                origin: ConversationOrigin::NaturalLanguage,
+            },
         })
     }
 
@@ -186,7 +189,10 @@ impl JarvisAI {
         let response = self.run_agent_loop(&mut messages).await?;
         Ok(ConversationResult {
             response,
-            conversation: ConversationState { messages },
+            conversation: ConversationState {
+                messages,
+                origin: ConversationOrigin::Investigation,
+            },
         })
     }
 

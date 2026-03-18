@@ -11,9 +11,20 @@ pub enum AiResponse {
     NaturalLanguage(String),
 }
 
+/// 会話の発生元。エラー調査由来の会話を自然言語入力に流用しないための区別に使用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationOrigin {
+    /// 自然言語入力から開始された会話
+    NaturalLanguage,
+    /// エラー調査から開始された会話
+    Investigation,
+}
+
 /// 会話の状態を保持する構造体。会話コンテキストの継続に使用。
 pub struct ConversationState {
     pub(crate) messages: Vec<ChatCompletionRequestMessage>,
+    /// この会話がどこで開始されたか
+    pub origin: ConversationOrigin,
 }
 
 /// AI との会話結果。応答と会話コンテキスト（継続用）を含む。
