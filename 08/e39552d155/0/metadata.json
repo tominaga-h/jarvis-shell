@@ -1,0 +1,36 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "08e39552d155",
+  "session_id": "731957ef-af28-4b9f-8057-d4a79569e25d",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-18T14:03:02.517537Z",
+  "branch": "develop",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "src/ai/client/agent.rs",
+    "src/ai/prompts.rs",
+    "src/ai/tools/call.rs",
+    "src/ai/tools/definitions.rs",
+    "src/ai/tools/executor.rs",
+    "src/ai/tools/mod.rs",
+    "src/cli/jarvis.rs",
+    "src/shell/investigate.rs"
+  ],
+  "agent": "Cursor",
+  "model": "claude-opus-4-6",
+  "turn_id": "98702231691f",
+  "session_metrics": {
+    "turn_count": 10,
+    "context_tokens": 232344,
+    "context_window_size": 200000
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-18T14:03:01.998061Z",
+    "agent_lines": 380,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 380,
+    "agent_percentage": 100
+  }
+}

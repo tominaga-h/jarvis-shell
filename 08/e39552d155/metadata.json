@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "08e39552d155",
+  "strategy": "manual-commit",
+  "branch": "develop",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "src/ai/client/agent.rs",
+    "src/ai/prompts.rs",
+    "src/ai/tools/call.rs",
+    "src/ai/tools/definitions.rs",
+    "src/ai/tools/executor.rs",
+    "src/ai/tools/mod.rs",
+    "src/cli/jarvis.rs",
+    "src/shell/investigate.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/08/e39552d155/0/metadata.json",
+      "transcript": "/08/e39552d155/0/full.jsonl",
+      "content_hash": "/08/e39552d155/0/content_hash.txt",
+      "prompt": "/08/e39552d155/0/prompt.txt"
+    }
+  ]
+}
