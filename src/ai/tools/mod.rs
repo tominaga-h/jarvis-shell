@@ -14,5 +14,6 @@ pub fn build_tools() -> Vec<ChatCompletionTool> {
         definitions::shell_command_tool(),
         definitions::read_file_tool(),
         definitions::write_file_tool(),
+        definitions::search_replace_tool(),
     ]
 }

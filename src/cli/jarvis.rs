@@ -47,6 +47,12 @@ pub fn jarvis_write_file(path: &str) -> ProgressBar {
     create_spinner("📝 {spinner} Writing file: {msg}", path)
 }
 
+/// Jarvis がファイルを部分置換するときに使う共通関数。
+/// 呼び出し元で `finish_and_clear()` を呼んでスピナーを停止すること。
+pub fn jarvis_search_replace(path: &str) -> ProgressBar {
+    create_spinner("🔧 {spinner} Patching file: {msg}", path)
+}
+
 /// AI 処理中に表示するスピナーを生成・開始する。
 /// `{msg}` を含むテンプレートにより、進捗メッセージを動的に更新できる。
 pub fn jarvis_spinner() -> ProgressBar {

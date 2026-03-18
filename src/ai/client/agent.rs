@@ -92,6 +92,21 @@ impl super::JarvisAI {
             }
 
             if let Some(cmd) = tools::call::extract_shell_command(&stream_result.tool_calls) {
+                // execute_shell_command と同時に返された他のツール（read_file, write_file,
+                // search_replace 等）を先に実行する。これにより、AI が「ファイル修正 → ビルド」
+                // を1ラウンドで返した場合でもファイル修正が確実に適用される。
+                let non_shell = tools::call::extract_non_shell_tools(&stream_result.tool_calls);
+                for tc in &non_shell {
+                    let result = tools::executor::execute_tool(&tc.function_name, &tc.arguments);
+                    debug!(
+                        tool = %tc.function_name,
+                        tool_call_id = %tc.id,
+                        result_length = result.len(),
+                        round = round,
+                        "Pre-command tool executed locally"
+                    );
+                }
+
                 info!(
                     response_type = "Command",
                     command = %cmd,
