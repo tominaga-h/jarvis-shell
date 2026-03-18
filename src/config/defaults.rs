@@ -30,6 +30,9 @@ impl super::JarvishConfig {
 
 [prompt]
 # nerd_font = true  # false にすると NerdFont アイコンを使わない
+
+[completion]
+# git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
 "#;
 
         if let Some(parent) = path.parent() {

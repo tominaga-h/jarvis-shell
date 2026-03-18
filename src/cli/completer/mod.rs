@@ -13,7 +13,7 @@ mod path;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use reedline::{Completer, Span, Suggestion};
 
@@ -21,15 +21,20 @@ use reedline::{Completer, Span, Suggestion};
 ///
 /// `$PATH` の走査はキャッシュレスだが、Git エイリアスの解決結果は
 /// CWD ごとにインメモリキャッシュする（`includeIf` 等のディレクトリ依存設定に対応）。
+///
+/// `git_branch_commands` は `Shell` と共有され、`source` コマンドで動的に更新される。
 pub struct JarvishCompleter {
     /// CWD ごとの Git エイリアスマップ: `{ CWD: { "co": "checkout", "b": "branch", ... } }`
     git_aliases_cache: RwLock<HashMap<PathBuf, HashMap<String, String>>>,
+    /// ブランチ名補完を提供する git サブコマンド（config.toml で設定可能）
+    pub(super) git_branch_commands: Arc<RwLock<Vec<String>>>,
 }
 
 impl JarvishCompleter {
-    pub fn new() -> Self {
+    pub fn new(git_branch_commands: Arc<RwLock<Vec<String>>>) -> Self {
         Self {
             git_aliases_cache: RwLock::new(HashMap::new()),
+            git_branch_commands,
         }
     }
 
@@ -74,8 +79,11 @@ mod tests {
     use std::env;
     use std::fs;
 
+    use crate::config::CompletionConfig;
+
     fn test_completer() -> JarvishCompleter {
-        JarvishCompleter::new()
+        let commands = CompletionConfig::default().git_branch_commands;
+        JarvishCompleter::new(Arc::new(RwLock::new(commands)))
     }
 
     fn create_test_tree() -> (tempfile::TempDir, String) {

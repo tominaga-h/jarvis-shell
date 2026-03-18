@@ -4,7 +4,7 @@
 //! reedline エディタを構築する。
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use nu_ansi_term::{Color, Style};
 use reedline::{
@@ -29,8 +29,9 @@ pub fn build_editor(
     classifier: Arc<InputClassifier>,
     db_path: PathBuf,
     session_id: i64,
+    git_branch_commands: Arc<RwLock<Vec<String>>>,
 ) -> (Reedline, bool) {
-    let completer = Box::new(JarvishCompleter::new());
+    let completer = Box::new(JarvishCompleter::new(git_branch_commands));
     let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
 
     let mut keybindings = default_emacs_keybindings();

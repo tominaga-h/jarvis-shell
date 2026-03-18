@@ -11,7 +11,7 @@ mod investigate;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use reedline::{Reedline, Signal};
 use tracing::{info, warn};
@@ -45,6 +45,8 @@ pub struct Shell {
     history_available: bool,
     /// ロギングシステムがファイルに書き込み可能か
     logging_operational: bool,
+    /// ブランチ名補完対象の git サブコマンド（JarvishCompleter と共有）
+    git_branch_commands: Arc<RwLock<Vec<String>>>,
 }
 
 impl Shell {
@@ -65,9 +67,16 @@ impl Shell {
         // データディレクトリを一度だけ決定し、エディタ履歴と BlackBox の両方で共有する。
         let data_dir = BlackBox::data_dir();
 
+        let git_branch_commands =
+            Arc::new(RwLock::new(config.completion.git_branch_commands.clone()));
+
         let db_path = data_dir.join("history.db");
-        let (reedline, history_available) =
-            editor::build_editor(Arc::clone(&classifier), db_path, session_id);
+        let (reedline, history_available) = editor::build_editor(
+            Arc::clone(&classifier),
+            db_path,
+            session_id,
+            Arc::clone(&git_branch_commands),
+        );
 
         // 直前コマンドの終了コードを共有するアトミック変数
         // 初期値は EXIT_CODE_NONE（未設定）。コマンド実行時に実際の終了コードで上書きされる。
@@ -117,6 +126,7 @@ impl Shell {
             farewell_shown: false,
             history_available,
             logging_operational,
+            git_branch_commands,
         }
     }
 
@@ -171,7 +181,12 @@ impl Shell {
         // [prompt] を反映
         self.prompt.update_config(config.prompt.clone());
 
-        // サマリー出力（config.toml のセクション順: ai, alias, export, prompt）
+        // [completion] を反映
+        if let Ok(mut cmds) = self.git_branch_commands.write() {
+            *cmds = config.completion.git_branch_commands.clone();
+        }
+
+        // サマリー出力（config.toml のセクション順: ai, alias, export, prompt, completion）
         let ignore_cmds_display = if config.ai.ignore_auto_investigation_cmds.is_empty() {
             "none".to_string()
         } else {
@@ -189,7 +204,8 @@ impl Shell {
              \x20\x20 ignore_auto_investigation_cmds: {}\n\
              \x20 [alias]   {} {}\n\
              \x20 [export]  {} {}\n\
-             \x20 [prompt]  nerd_font: {}\n",
+             \x20 [prompt]  nerd_font: {}\n\
+             \x20 [completion]  git_branch_commands: {} {}\n",
             path.display(),
             config.ai.model,
             config.ai.max_rounds,
@@ -211,6 +227,12 @@ impl Shell {
                 "entries"
             },
             config.prompt.nerd_font,
+            config.completion.git_branch_commands.len(),
+            if config.completion.git_branch_commands.len() == 1 {
+                "command"
+            } else {
+                "commands"
+            },
         );
         print!("{summary}");
 

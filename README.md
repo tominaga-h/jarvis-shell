@@ -130,6 +130,9 @@ PATH = "/usr/local/bin:$PATH" # Environment variables expanded on startup
 
 [prompt]
 nerd_font = true              # Set to false if NerdFont is not installed
+
+[completion]
+git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
 ```
 
 > **Tip**: After changing settings, you can apply them without restarting using the `source` command:

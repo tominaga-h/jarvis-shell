@@ -24,6 +24,9 @@
 //!
 //! [prompt]
 //! nerd_font = true
+//!
+//! [completion]
+//! git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
 //! ```
 
 mod defaults;
@@ -46,6 +49,8 @@ pub struct JarvishConfig {
     pub export: HashMap<String, String>,
     /// プロンプト表示設定
     pub prompt: PromptConfig,
+    /// 補完設定
+    pub completion: CompletionConfig,
 }
 
 /// AI 関連の設定
@@ -96,6 +101,37 @@ impl Default for PromptConfig {
     }
 }
 
+/// 補完に関する設定
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CompletionConfig {
+    /// ブランチ名補完を提供する git サブコマンド
+    pub git_branch_commands: Vec<String>,
+}
+
+impl Default for CompletionConfig {
+    fn default() -> Self {
+        Self {
+            git_branch_commands: [
+                "checkout",
+                "switch",
+                "merge",
+                "rebase",
+                "branch",
+                "diff",
+                "log",
+                "cherry-pick",
+                "reset",
+                "push",
+                "fetch",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        }
+    }
+}
+
 impl JarvishConfig {
     /// 設定ファイルを読み込む。
     ///
@@ -122,6 +158,7 @@ impl JarvishConfig {
                         alias_count = config.alias.len(),
                         export_count = config.export.len(),
                         nerd_font = config.prompt.nerd_font,
+                        git_branch_commands = config.completion.git_branch_commands.len(),
                         "Config loaded successfully"
                     );
                     config
@@ -183,6 +220,15 @@ mod tests {
         assert!(config.alias.is_empty());
         assert!(config.export.is_empty());
         assert!(config.prompt.nerd_font);
+        assert!(config
+            .completion
+            .git_branch_commands
+            .contains(&"checkout".to_string()));
+        assert!(config
+            .completion
+            .git_branch_commands
+            .contains(&"fetch".to_string()));
+        assert_eq!(config.completion.git_branch_commands.len(), 11);
     }
 
     #[test]
@@ -321,9 +367,43 @@ EDITOR = "vim"
         assert!(content.contains("[ai]"));
         assert!(content.contains("[alias]"));
         assert!(content.contains("[export]"));
+        assert!(content.contains("[completion]"));
 
         let config: JarvishConfig = toml::from_str(&content).unwrap();
         assert_eq!(config.ai.model, "gpt-4o");
         assert!(config.alias.is_empty());
+    }
+
+    #[test]
+    fn parse_completion_config_custom_commands() {
+        let toml = r#"
+[completion]
+git_branch_commands = ["checkout", "fetch", "pull"]
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(
+            config.completion.git_branch_commands,
+            vec!["checkout", "fetch", "pull"]
+        );
+    }
+
+    #[test]
+    fn parse_completion_config_empty_commands() {
+        let toml = r#"
+[completion]
+git_branch_commands = []
+"#;
+        let config = load_from_str(toml);
+        assert!(config.completion.git_branch_commands.is_empty());
+    }
+
+    #[test]
+    fn parse_no_completion_section_uses_default() {
+        let config = load_from_str("");
+        assert_eq!(config.completion.git_branch_commands.len(), 11);
+        assert!(config
+            .completion
+            .git_branch_commands
+            .contains(&"fetch".to_string()));
     }
 }
