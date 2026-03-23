@@ -30,6 +30,7 @@ impl super::JarvishConfig {
 
 [prompt]
 # nerd_font = true  # false にすると NerdFont アイコンを使わない
+# starship = false   # true にすると Starship プロンプトを使用（要: starship コマンド + ~/.config/starship.toml）
 
 [completion]
 # git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]

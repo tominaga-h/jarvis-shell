@@ -24,6 +24,7 @@
 //!
 //! [prompt]
 //! nerd_font = true
+//! starship = false
 //!
 //! [completion]
 //! git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
@@ -93,11 +94,16 @@ impl Default for AiConfig {
 pub struct PromptConfig {
     /// NerdFont アイコンを使用するか（false の場合は ASCII/Unicode フォールバック）
     pub nerd_font: bool,
+    /// Starship プロンプトを使用するか（要: starship コマンド + starship.toml）
+    pub starship: bool,
 }
 
 impl Default for PromptConfig {
     fn default() -> Self {
-        Self { nerd_font: true }
+        Self {
+            nerd_font: true,
+            starship: false,
+        }
     }
 }
 
@@ -158,6 +164,7 @@ impl JarvishConfig {
                         alias_count = config.alias.len(),
                         export_count = config.export.len(),
                         nerd_font = config.prompt.nerd_font,
+                        starship = config.prompt.starship,
                         git_branch_commands = config.completion.git_branch_commands.len(),
                         "Config loaded successfully"
                     );
@@ -220,6 +227,7 @@ mod tests {
         assert!(config.alias.is_empty());
         assert!(config.export.is_empty());
         assert!(config.prompt.nerd_font);
+        assert!(!config.prompt.starship);
         assert!(config
             .completion
             .git_branch_commands
@@ -249,6 +257,7 @@ EDITOR = "vim"
 
 [prompt]
 nerd_font = false
+starship = true
 "#;
         let config = load_from_str(toml);
         assert_eq!(config.ai.model, "gpt-4o-mini");
@@ -262,6 +271,7 @@ nerd_font = false
         assert_eq!(config.alias.get("ll").unwrap(), "ls -la");
         assert_eq!(config.export.get("EDITOR").unwrap(), "vim");
         assert!(!config.prompt.nerd_font);
+        assert!(config.prompt.starship);
     }
 
     #[test]
