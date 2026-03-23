@@ -1,0 +1,16 @@
+プロンプトのカスタマイズ機能を作りたいです。
+実現方法としては、有名なstarshipをサポートすることです。
+starshipコマンドが存在し、且つ `~/.config/starship.toml` が存在すれば、プロンプトをstarshipのプロンプトに変更できる。
+通常は `starship init <shell>` で初期用のスクリプトを出力してシェルに設定しますが、現状jarvishはスクリプトを作れる機能がないので、シェル自体がサポートするようにしたいです。
+
+まだどうやって実装すべきか分かっていないので、要件定義しながらプランを構築したいです。
+
+---
+
+続けて
+
+---
+
+Implement the plan as specified, it is attached for your reference. Do NOT edit the plan file itself.
+
+To-do's from the plan have already been created. Do not create them again. Mark them as in_progress as you work, starting with the first one. Don't stop until you have completed all the to-dos.
