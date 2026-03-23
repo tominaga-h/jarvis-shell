@@ -3,18 +3,12 @@
   "checkpoint_id": "4f7d2f8bd710",
   "session_id": "379d38a3-5d85-4092-8451-f6da244f8e83",
   "strategy": "manual-commit",
-  "created_at": "2026-03-23T15:13:47.493346Z",
+  "created_at": "2026-03-23T15:14:01.07226Z",
   "branch": "feature/support_starship",
   "checkpoints_count": 1,
   "files_touched": [
     "README.md",
-    "docs/README_JA.md",
-    "src/cli/prompt/mod.rs",
-    "src/cli/prompt/starship.rs",
-    "src/config/defaults.rs",
-    "src/config/mod.rs",
-    "src/shell/input.rs",
-    "src/shell/mod.rs"
+    "docs/README_JA.md"
   ],
   "agent": "Cursor",
   "model": "claude-opus-4-6",
@@ -23,12 +17,12 @@
     "turn_count": 3
   },
   "initial_attribution": {
-    "calculated_at": "2026-03-23T15:13:47.429554Z",
-    "agent_lines": 360,
+    "calculated_at": "2026-03-23T15:14:01.004679Z",
+    "agent_lines": 4,
     "human_added": 0,
     "human_modified": 0,
-    "human_removed": 4,
-    "total_committed": 360,
+    "human_removed": 0,
+    "total_committed": 4,
     "agent_percentage": 100
   }
 }
