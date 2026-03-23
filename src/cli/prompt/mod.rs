@@ -1,9 +1,10 @@
 mod git;
+pub mod starship;
 
 use std::borrow::Cow;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use chrono::Local;
@@ -12,6 +13,7 @@ use reedline::{Color, Prompt, PromptEditMode, PromptHistorySearch, PromptHistory
 use super::color::{cyan, green, red, white, yellow};
 use crate::config::PromptConfig;
 use git::{current_git_branch_at, format_branch_label, format_git_status_at};
+use starship::StarshipPrompt;
 
 /// `last_exit_code` が未設定（コマンド未実行）であることを示すセンチネル値。
 /// `AtomicI32` は `Option<i32>` を直接保持できないため、
@@ -86,11 +88,6 @@ impl JarvisPrompt {
             config,
             git_state: Arc::new(RwLock::new(AsyncGitState::Outdated)),
         }
-    }
-
-    /// プロンプト設定を更新する（`source` コマンドによる設定再読み込み用）。
-    pub fn update_config(&mut self, config: PromptConfig) {
-        self.config = config;
     }
 
     /// Git ステータスを即座にバックグラウンドスレッドで再取得する。
@@ -240,6 +237,91 @@ impl Prompt for JarvisPrompt {
             PromptHistorySearchStatus::Failing => "(failed) ",
         };
         Cow::Owned(format!("{prefix}(search: '{}') ", history_search.term))
+    }
+}
+
+/// ビルトインプロンプトと Starship プロンプトを切り替える列挙型。
+///
+/// `Shell` のプロンプトフィールドとして保持され、
+/// `reedline::Prompt` の各メソッドを内部バリアントに委譲する。
+pub enum ShellPrompt {
+    Builtin(JarvisPrompt),
+    Starship(StarshipPrompt),
+}
+
+impl ShellPrompt {
+    /// ビルトインプロンプト（デフォルト）を構築する。
+    pub fn builtin(last_exit_code: Arc<AtomicI32>, config: PromptConfig) -> Self {
+        Self::Builtin(JarvisPrompt::new(last_exit_code, config))
+    }
+
+    /// Starship プロンプトを構築する。
+    pub fn starship(
+        last_exit_code: Arc<AtomicI32>,
+        cmd_duration_ms: Arc<AtomicU64>,
+        starship_path: PathBuf,
+    ) -> Self {
+        Self::Starship(StarshipPrompt::new(
+            last_exit_code,
+            cmd_duration_ms,
+            starship_path,
+        ))
+    }
+
+    /// Git ステータスをバックグラウンドで再取得する。
+    ///
+    /// Starship モードでは Starship 自身が Git 情報を描画するため no-op。
+    pub fn refresh_git_status(&self) {
+        if let Self::Builtin(ref p) = self {
+            p.refresh_git_status();
+        }
+    }
+}
+
+impl Prompt for ShellPrompt {
+    fn render_prompt_left(&self) -> Cow<'_, str> {
+        match self {
+            Self::Builtin(p) => p.render_prompt_left(),
+            Self::Starship(p) => p.render_prompt_left(),
+        }
+    }
+
+    fn get_prompt_color(&self) -> Color {
+        match self {
+            Self::Builtin(p) => p.get_prompt_color(),
+            Self::Starship(p) => p.get_prompt_color(),
+        }
+    }
+
+    fn render_prompt_right(&self) -> Cow<'_, str> {
+        match self {
+            Self::Builtin(p) => p.render_prompt_right(),
+            Self::Starship(p) => p.render_prompt_right(),
+        }
+    }
+
+    fn render_prompt_indicator(&self, edit_mode: PromptEditMode) -> Cow<'_, str> {
+        match self {
+            Self::Builtin(p) => p.render_prompt_indicator(edit_mode),
+            Self::Starship(p) => p.render_prompt_indicator(edit_mode),
+        }
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+        match self {
+            Self::Builtin(p) => p.render_prompt_multiline_indicator(),
+            Self::Starship(p) => p.render_prompt_multiline_indicator(),
+        }
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        history_search: PromptHistorySearch,
+    ) -> Cow<'_, str> {
+        match self {
+            Self::Builtin(p) => p.render_prompt_history_search_indicator(history_search),
+            Self::Starship(p) => p.render_prompt_history_search_indicator(history_search),
+        }
     }
 }
 
