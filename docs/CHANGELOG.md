@@ -3,6 +3,16 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.5.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.5.0) - 2026-03-24
+
+### Added
+
+- Starship プロンプト連携: `prompt.starship = true` で Starship をプロンプトとしてネイティブサポート ([#57](https://github.com/tominaga-h/jarvis-shell/issues/57))
+
+### Changed
+
+- プロンプトモジュールのリファクタリング: `mod.rs` から `JarvisPrompt` を専用ファイルに分割
+
 ## [v1.4.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.4.0) - 2026-03-19
 
 ### Added
