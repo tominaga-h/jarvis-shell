@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "4e30a9838d27",
+  "session_id": "baf3be39-0c1e-4265-ba72-b318dd1e764b",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-23T15:28:57.255726Z",
+  "branch": "develop",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "Cargo.toml",
+    "README.md",
+    "docs/CHANGELOG.md",
+    "docs/README_JA.md",
+    "docs/release/v1.5.0.md"
+  ],
+  "agent": "Cursor",
+  "model": "claude-opus-4-6",
+  "turn_id": "f781a14d9a95",
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-23T15:28:57.206851Z",
+    "agent_lines": 36,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 36,
+    "agent_percentage": 100
+  }
+}

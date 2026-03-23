@@ -1,0 +1,22 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "4e30a9838d27",
+  "strategy": "manual-commit",
+  "branch": "develop",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "Cargo.toml",
+    "README.md",
+    "docs/CHANGELOG.md",
+    "docs/README_JA.md",
+    "docs/release/v1.5.0.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/4e/30a9838d27/0/metadata.json",
+      "transcript": "/4e/30a9838d27/0/full.jsonl",
+      "content_hash": "/4e/30a9838d27/0/content_hash.txt",
+      "prompt": "/4e/30a9838d27/0/prompt.txt"
+    }
+  ]
+}
