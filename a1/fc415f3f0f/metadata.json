@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "a1fc415f3f0f",
+  "strategy": "manual-commit",
+  "branch": "feature/support_starship",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "src/cli/prompt/jarvis.rs",
+    "src/cli/prompt/mod.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a1/fc415f3f0f/0/metadata.json",
+      "transcript": "/a1/fc415f3f0f/0/full.jsonl",
+      "content_hash": "/a1/fc415f3f0f/0/content_hash.txt",
+      "prompt": "/a1/fc415f3f0f/0/prompt.txt"
+    }
+  ]
+}

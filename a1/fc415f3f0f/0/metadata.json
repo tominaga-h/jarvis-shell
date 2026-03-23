@@ -1,0 +1,28 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "a1fc415f3f0f",
+  "session_id": "436c0049-a72f-432b-aaf6-9e476799342f",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-23T15:22:36.377593Z",
+  "branch": "feature/support_starship",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "src/cli/prompt/jarvis.rs",
+    "src/cli/prompt/mod.rs"
+  ],
+  "agent": "Cursor",
+  "model": "claude-opus-4-6",
+  "turn_id": "e57d4f7a1b31",
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-23T15:22:36.303964Z",
+    "agent_lines": 244,
+    "human_added": 0,
+    "human_modified": 1,
+    "human_removed": 0,
+    "total_committed": 245,
+    "agent_percentage": 99.59183673469387
+  }
+}
