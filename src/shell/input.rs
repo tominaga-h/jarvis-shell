@@ -4,12 +4,15 @@
 //! 適切な実行パスに振り分ける。
 
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use tracing::{debug, info, warn};
 
 use reedline::HistoryItem;
 
 use std::path::PathBuf;
+
+use crate::cli::prompt::starship::CMD_DURATION_NONE;
 
 use crate::engine::builtins::{alias, cd, dirstack, source, unalias, which_type};
 use crate::engine::classifier::{is_ai_goodbye_response, InputType};
@@ -58,7 +61,8 @@ impl Shell {
         let input_type = self.classifier.classify(&line);
         debug!(input = %line, classification = ?input_type, "Input classified");
 
-        // 3. 入力タイプに応じて実行
+        // 3. 入力タイプに応じて実行（実行時間を計測）
+        let start = Instant::now();
         let (result, from_tool_call, should_update_exit_code, executed_command) = match input_type {
             InputType::Goodbye => {
                 // Goodbye → シェル終了（farewell メッセージは run() 側で表示）
@@ -88,6 +92,8 @@ impl Shell {
                 )
             }
         };
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        self.cmd_duration_ms.store(elapsed_ms, Ordering::Relaxed);
 
         // 4. プロンプト表示用に終了コードを更新
         // AI の NaturalLanguage 応答時はコマンド未実行のためスキップ
@@ -153,6 +159,8 @@ impl Shell {
         // プロンプト表示用に終了コードを更新
         self.last_exit_code
             .store(result.exit_code, Ordering::Relaxed);
+        self.cmd_duration_ms
+            .store(CMD_DURATION_NONE, Ordering::Relaxed);
         println!(); // 実行結果の後に空行を追加
 
         match result.action {

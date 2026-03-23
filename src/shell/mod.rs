@@ -10,14 +10,15 @@ mod investigate;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use reedline::{Reedline, Signal};
 use tracing::{info, warn};
 
 use crate::ai::{ConversationState, JarvisAI};
-use crate::cli::prompt::{JarvisPrompt, EXIT_CODE_NONE};
+use crate::cli::prompt::starship::CMD_DURATION_NONE;
+use crate::cli::prompt::{ShellPrompt, EXIT_CODE_NONE};
 use crate::config::JarvishConfig;
 use crate::engine::classifier::InputClassifier;
 use crate::engine::expand;
@@ -27,11 +28,13 @@ use crate::storage::BlackBox;
 /// エディタ、AI クライアント、履歴ストレージ、会話状態を保持する。
 pub struct Shell {
     editor: Reedline,
-    prompt: JarvisPrompt,
+    prompt: ShellPrompt,
     ai_client: Option<JarvisAI>,
     black_box: Option<BlackBox>,
     conversation_state: Option<ConversationState>,
     last_exit_code: Arc<AtomicI32>,
+    /// 直前コマンドの実行時間（ミリ秒）。Starship プロンプトの `--cmd-duration` に使用。
+    cmd_duration_ms: Arc<AtomicU64>,
     classifier: Arc<InputClassifier>,
     /// 設定ファイルで定義されたコマンドエイリアス
     aliases: HashMap<String, String>,
@@ -81,8 +84,13 @@ impl Shell {
         // 直前コマンドの終了コードを共有するアトミック変数
         // 初期値は EXIT_CODE_NONE（未設定）。コマンド実行時に実際の終了コードで上書きされる。
         let last_exit_code = Arc::new(AtomicI32::new(EXIT_CODE_NONE));
+        let cmd_duration_ms = Arc::new(AtomicU64::new(CMD_DURATION_NONE));
 
-        let prompt = JarvisPrompt::new(Arc::clone(&last_exit_code), config.prompt.clone());
+        let prompt = Self::build_prompt(
+            &config,
+            Arc::clone(&last_exit_code),
+            Arc::clone(&cmd_duration_ms),
+        );
         prompt.refresh_git_status();
 
         // Black Box（履歴永続化）の初期化
@@ -119,6 +127,7 @@ impl Shell {
             black_box,
             conversation_state: None,
             last_exit_code,
+            cmd_duration_ms,
             classifier,
             aliases: config.alias,
             ignore_auto_investigation_cmds: config.ai.ignore_auto_investigation_cmds,
@@ -150,6 +159,59 @@ impl Shell {
         }
     }
 
+    /// 設定と環境に基づいてプロンプトを構築する。
+    ///
+    /// `[prompt] starship = true` かつ `starship` コマンドと設定ファイルが
+    /// 存在する場合は Starship プロンプトを返し、それ以外はビルトインを返す。
+    fn build_prompt(
+        config: &JarvishConfig,
+        last_exit_code: Arc<AtomicI32>,
+        cmd_duration_ms: Arc<AtomicU64>,
+    ) -> ShellPrompt {
+        if config.prompt.starship {
+            if let Some(path) = Self::detect_starship() {
+                info!(starship_path = %path.display(), "Starship prompt enabled");
+                return ShellPrompt::starship(last_exit_code, cmd_duration_ms, path);
+            }
+            eprintln!(
+                "jarvish: warning: starship = true but starship command or config not found, \
+                 falling back to builtin prompt"
+            );
+        }
+        ShellPrompt::builtin(last_exit_code, config.prompt.clone())
+    }
+
+    /// Starship の利用可否を検出する。
+    ///
+    /// 条件:
+    /// 1. `starship` コマンドが PATH 上に存在する
+    /// 2. `STARSHIP_CONFIG` 環境変数のパス、または `~/.config/starship.toml` が存在する
+    ///
+    /// 両方満たせば starship バイナリのパスを返す。
+    fn detect_starship() -> Option<PathBuf> {
+        let starship_path = which::which("starship").ok()?;
+
+        let config_path = std::env::var("STARSHIP_CONFIG")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::var("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(".config/starship.toml")
+            });
+
+        if config_path.exists() {
+            Some(starship_path)
+        } else {
+            info!(
+                config_path = %config_path.display(),
+                "Starship config file not found"
+            );
+            None
+        }
+    }
+
     /// 指定されたパスから設定ファイルを再読み込みし、Shell の状態に反映する。
     ///
     /// `source` ビルトインコマンドから呼び出される。
@@ -178,8 +240,13 @@ impl Shell {
         }
         self.ignore_auto_investigation_cmds = config.ai.ignore_auto_investigation_cmds.clone();
 
-        // [prompt] を反映
-        self.prompt.update_config(config.prompt.clone());
+        // [prompt] を反映（starship フラグ変更時はプロンプト自体を入れ替え）
+        self.prompt = Self::build_prompt(
+            &config,
+            Arc::clone(&self.last_exit_code),
+            Arc::clone(&self.cmd_duration_ms),
+        );
+        self.prompt.refresh_git_status();
 
         // [completion] を反映
         if let Ok(mut cmds) = self.git_branch_commands.write() {
@@ -204,7 +271,7 @@ impl Shell {
              \x20\x20 ignore_auto_investigation_cmds: {}\n\
              \x20 [alias]   {} {}\n\
              \x20 [export]  {} {}\n\
-             \x20 [prompt]  nerd_font: {}\n\
+             \x20 [prompt]  nerd_font: {}, starship: {}\n\
              \x20 [completion]  git_branch_commands: {} {}\n",
             path.display(),
             config.ai.model,
@@ -227,6 +294,7 @@ impl Shell {
                 "entries"
             },
             config.prompt.nerd_font,
+            config.prompt.starship,
             config.completion.git_branch_commands.len(),
             if config.completion.git_branch_commands.len() == 1 {
                 "command"

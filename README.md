@@ -1,7 +1,7 @@
 # 🤵 Jarvish — The AI-Native Shell
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-[![version](https://img.shields.io/badge/version-1.4.0-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.4.0)
+[![version](https://img.shields.io/badge/version-1.5.0-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.5.0)
 
 > 🌐 [日本語版 README はこちら](docs/README_JA.md)
 
@@ -27,6 +27,7 @@ The days of copy-pasting errors into a browser to ask AI are over. Just ask Jarv
   - [Uncompromising "Blazing Fast" Shell UX](#4-uncompromising-blazing-fast-shell-ux)
 - [Install](#-install)
 - [Setup and Configuration](#️-setup-and-configuration)
+  - [Starship Prompt Integration](#starship-prompt-integration)
 - [Architecture](#️-architecture)
 - [Development](#-development)
 
@@ -68,6 +69,7 @@ Despite deep AI integration, Jarvish leverages Rust's strengths to deliver outst
 - **Async Background Prompt**: Git status scanning runs in a separate thread (using the Stale-While-Revalidate pattern), achieving **zero UI jitter** regardless of repository size.
 - **Fish-like Autocomplete**: Real-time syntax highlighting with powerful auto-completion for PATH binaries and file paths.
 - **Full PTY Support**: Interactive programs like `vim` and `top` work natively.
+- **Starship Integration**: Native support for [Starship](https://starship.rs/) prompt — use your existing Starship configuration as-is.
 
 ## 🚀 Install
 
@@ -130,6 +132,7 @@ PATH = "/usr/local/bin:$PATH" # Environment variables expanded on startup
 
 [prompt]
 nerd_font = true              # Set to false if NerdFont is not installed
+starship = false              # Set to true to use Starship prompt (requires: starship command + ~/.config/starship.toml)
 
 [completion]
 git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
@@ -140,6 +143,27 @@ git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff"
 > ```bash
 > source ~/.config/jarvish/config.toml
 > ```
+
+### Starship Prompt Integration
+
+Jarvish natively supports [Starship](https://starship.rs/) as an alternative prompt. When enabled, Jarvish calls `starship prompt` directly — no init scripts needed.
+
+**Prerequisites:**
+
+1. The `starship` command is installed and available in your PATH
+2. A Starship config file exists at `~/.config/starship.toml` (or the path specified by the `STARSHIP_CONFIG` environment variable)
+
+**Setup:**
+
+```toml
+# ~/.config/jarvish/config.toml
+[prompt]
+starship = true
+```
+
+Jarvish passes `--status`, `--cmd-duration`, and `--terminal-width` to `starship prompt`, so modules like `character`, `cmd_duration`, and `status` work as expected.
+
+If `starship = true` is set but the prerequisites are not met, Jarvish falls back to the built-in prompt with a warning.
 
 ## 🏗️ Architecture
 
