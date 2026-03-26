@@ -3,6 +3,12 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.6.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.6.0) - 2026-03-26
+
+### Added
+
+- タイポ補正: 存在しないコマンド入力時に PATH 上の類似コマンドを提示する zsh 互換機能を追加（Damerau-Levenshtein 距離による転置検出対応）([#83](https://github.com/tominaga-h/jarvis-shell/issues/83))
+
 ## [v1.5.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.5.0) - 2026-03-24
 
 ### Added

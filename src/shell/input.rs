@@ -14,10 +14,12 @@ use std::path::PathBuf;
 
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 
+use crate::cli::jarvis::{jarvis_ask_typo_correction, TypoAction};
 use crate::engine::builtins::{alias, cd, dirstack, source, unalias, which_type};
 use crate::engine::classifier::{is_ai_goodbye_response, InputType};
 use crate::engine::dispatch::{AiPipeMode, AiPipeRequest};
 use crate::engine::expand;
+use crate::engine::typo;
 use crate::engine::{execute, try_builtin, try_execute_ai_pipe, CommandResult, LoopAction};
 
 use super::Shell;
@@ -60,6 +62,20 @@ impl Shell {
         // 2. アルゴリズムで入力を分類（AI を呼ばず瞬時に判定）
         let input_type = self.classifier.classify(&line);
         debug!(input = %line, classification = ?input_type, "Input classified");
+
+        // 2.5. タイポ補正チェック（NaturalLanguage 判定かつコマンド名らしい入力に限定）
+        let (line, input_type) = if input_type == InputType::NaturalLanguage {
+            match check_typo_correction(&line) {
+                TypoCorrectionOutcome::UseCommand(corrected) => {
+                    let new_type = self.classifier.classify(&corrected);
+                    (corrected, new_type)
+                }
+                TypoCorrectionOutcome::Abort => return true,
+                TypoCorrectionOutcome::Proceed => (line, InputType::NaturalLanguage),
+            }
+        } else {
+            (line, input_type)
+        };
 
         // 3. 入力タイプに応じて実行（実行時間を計測）
         let start = Instant::now();
@@ -306,5 +322,40 @@ impl Shell {
                 CommandResult::error(msg, 1)
             }
         }
+    }
+}
+
+// ── タイポ補正 ──
+
+/// タイポ補正チェックの結果
+enum TypoCorrectionOutcome {
+    /// 補正されたコマンドラインで実行する
+    UseCommand(String),
+    /// 補正せず通常の処理を続ける
+    Proceed,
+    /// 実行を中止してプロンプトに戻る
+    Abort,
+}
+
+/// 入力ラインに対してタイポ補正を試みる。
+///
+/// 先頭トークンがコマンド名らしく、PATH 上に近似コマンドが存在する場合に
+/// ユーザーへ確認を求め、応答に応じた `TypoCorrectionOutcome` を返す。
+fn check_typo_correction(line: &str) -> TypoCorrectionOutcome {
+    let first_token = line.split_whitespace().next().unwrap_or("");
+    if !typo::is_command_like(first_token) {
+        return TypoCorrectionOutcome::Proceed;
+    }
+    let Some(suggestion) = typo::find_correction(first_token) else {
+        return TypoCorrectionOutcome::Proceed;
+    };
+    match jarvis_ask_typo_correction(first_token, &suggestion) {
+        TypoAction::Accept => {
+            // 先頭トークンを補正候補で置き換える（残りの引数はそのまま）
+            let rest = &line[first_token.len()..];
+            TypoCorrectionOutcome::UseCommand(format!("{suggestion}{rest}"))
+        }
+        TypoAction::Reject => TypoCorrectionOutcome::Proceed,
+        TypoAction::Abort => TypoCorrectionOutcome::Abort,
     }
 }
