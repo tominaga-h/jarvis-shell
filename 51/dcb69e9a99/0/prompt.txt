@@ -1,0 +1,82 @@
+`palmo-sousai` リポジトリだとjarvishが重くなります。以下のログから原因を調査して
+2026-03-26T09:19:24.865+09:00 [c45558]  INFO jarvish: src/main.rs:62: 
+
+==== J.A.R.V.I.S.H. STARTED at [c45558] ====
+
+2026-03-26T09:19:24.865+09:00 [c45558] DEBUG jarvish::config: src/config/mod.rs:148: Loading config file path=/Users/mad-tmng/.config/jarvish/config.toml
+2026-03-26T09:19:24.882+09:00 [c45558]  INFO jarvish::config: src/config/mod.rs:158: Config loaded successfully path=/Users/mad-tmng/.config/jarvish/config.toml model=gpt-4o max_rounds=10 markdown_rendering=true ignore_auto_investigation_cmds=3 alias_count=9 export_count=3 nerd_font=true starship=true git_branch_commands=11
+2026-03-26T09:19:24.884+09:00 [c45558]  INFO jarvish::shell: src/shell/mod.rs:154: Applying export from config masked=OPENAI_API_KEY=***
+2026-03-26T09:19:24.884+09:00 [c45558]  INFO jarvish::shell: src/shell/mod.rs:154: Applying export from config masked=SHELL=/usr/local/bin/jarvish
+2026-03-26T09:19:24.884+09:00 [c45558]  INFO jarvish::shell: src/shell/mod.rs:154: Applying export from config masked=PATH=/usr/.local/bin:/Users/mad-tmng/local/src/google-cloud-sdk/bin:/Users/mad-tmng/Library/pnpm:/Users/mad-tmng/.local/share/mise/installs/go/1.26.0/bin:/Users/mad-tmng/.local/share/mise/installs/node/24.4.0/bin:/Users/mad-tmng/.local/share/mise/installs/python/3.13.7/bin:/Users/mad-tmng/.local/bin:/usr/local/opt/php@8.3/bin:/Users/mad-tmng/local/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/Library/Apple/usr/bin:/Users/mad-tmng/.cargo/bin:/Applications/Warp.app/Contents/Resources/bin
+2026-03-26T09:19:24.884+09:00 [c45558]  INFO jarvish::engine::classifier: src/engine/classifier/mod.rs:47: InputClassifier initialized (TTL-cached PATH resolution, TTL=5s)
+2026-03-26T09:19:24.909+09:00 [c45558]  INFO jarvish::shell: src/shell/mod.rs:173: Starship prompt enabled starship_path=/usr/local/bin/starship
+2026-03-26T09:19:24.910+09:00 [c45558]  INFO jarvish::shell: src/shell/mod.rs:100: BlackBox initialized successfully
+2026-03-26T09:19:25.188+09:00 [c45558]  INFO jarvish::shell: src/shell/mod.rs:113: AI client initialized successfully
+2026-03-26T09:19:25.435+09:00 [c45558] DEBUG jarvish::cli::prompt::starship: src/cli/prompt/starship.rs:72: starship prompt executed extra_args=["--continuation"] status=-2147483648 duration_ms=18446744073709551615 output_len=13
+2026-03-26T09:19:25.952+09:00 [c45558] DEBUG jarvish::cli::prompt::starship: src/cli/prompt/starship.rs:72: starship prompt executed extra_args=[] status=-2147483648 duration_ms=18446744073709551615 output_len=448
+2026-03-26T09:19:25.963+09:00 [c45558] DEBUG jarvish::cli::prompt::starship: src/cli/prompt/starship.rs:72: starship prompt executed extra_args=["--right"] status=-2147483648 duration_ms=18446744073709551615 output_len=0
+2026-03-26T09:19:26.813+09:00 [c45558] DEBUG jarvish::engine::classifier: src/engine/classifier/mod.rs:103: Classified as NaturalLanguage input=l reason="default"
+2026-03-26T09:19:26.824+09:00 [c45558] DEBUG jarvish::cli::prompt::starship: src/cli/prompt/starship.rs:72: starship prompt executed extra_args=["--continuation"] status=-2147483648 duration_ms=18446744073709551615 output_len=13
+2026-03-26T09:19:26.869+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:19:27.339+09:00 [c45558] DEBUG jarvish::cli::prompt::starship: src/cli/prompt/starship.rs:72: starship prompt executed extra_args=[] status=-2147483648 duration_ms=18446744073709551615 output_len=448
+2026-03-26T09:19:27.351+09:00 [c45558] DEBUG jarvish::cli::prompt::starship: src/cli/prompt/starship.rs:72: starship prompt executed extra_args=["--right"] status=-2147483648 duration_ms=18446744073709551615 output_len=0
+2026-03-26T09:19:27.352+09:00 [c45558] DEBUG jarvish::engine::classifier: src/engine/classifier/mod.rs:94: Classified as Command input=ls first_token=ls reason="path_lookup"
+2026-03-26T09:19:27.362+09:00 [c45558] DEBUG jarvish::cli::prompt::starship: src/cli/prompt/starship.rs:72: starship prompt executed extra_args=["--continuation"] status=-2147483648 duration_ms=18446744073709551615 output_len=13
+2026-03-26T09:19:27.878+09:00 [c45558] DEBUG jarvish::cli::prompt::starship: src/cli/prompt/starship.rs:72: starship prompt executed extra_args=[] status=-2147483648 duration_ms=18446744073709551615 output_len=448
+2026-03-26T09:19:27.890+09:00 [c45558] DEBUG jarvish::cli::prompt::starship: src/cli/prompt/starship.rs:72: starship prompt executed extra_args=["--right"] status=-2147483648 duration_ms=18446744073709551615 output_len=0
+2026-03-26T09:19:27.890+09:00 [c45558]  INFO jarvish::shell::input: src/shell/input.rs:30: 
+
+==== USER INPUT RECEIVED, START PROCESS ====
+2026-03-26T09:19:27.890+09:00 [c45558] DEBUG jarvish::shell::input: src/shell/input.rs:42: Alias expanded original=ls expanded=eza --icons -F
+2026-03-26T09:19:27.890+09:00 [c45558] DEBUG jarvish::shell::input: src/shell/input.rs:48: User input received input=eza --icons -F
+2026-03-26T09:19:27.890+09:00 [c45558] DEBUG jarvish::engine::dispatch: src/engine/dispatch/mod.rs:29: try_builtin check command=eza is_builtin=false
+2026-03-26T09:19:27.891+09:00 [c45558] DEBUG jarvish::engine::classifier: src/engine/classifier/mod.rs:94: Classified as Command input=eza --icons -F first_token=eza reason="path_lookup"
+2026-03-26T09:19:27.891+09:00 [c45558] DEBUG jarvish::shell::input: src/shell/input.rs:62: Input classified input=eza --icons -F classification=Command
+2026-03-26T09:19:27.891+09:00 [c45558] DEBUG jarvish::shell::input: src/shell/input.rs:80: Executing as command (no AI) input=eza --icons -F
+2026-03-26T09:19:27.891+09:00 [c45558] DEBUG jarvish::engine::dispatch: src/engine/dispatch/mod.rs:121: execute() parsed command list pipeline_count=1 first_cmd=eza
+2026-03-26T09:19:27.891+09:00 [c45558] DEBUG jarvish::engine::exec: src/engine/exec/mod.rs:30: Running pipeline pipeline_length=1
+2026-03-26T09:19:27.891+09:00 [c45558] DEBUG jarvish::engine::exec::pty_session: src/engine/exec/pty_session.rs:35: Spawning external command (PTY session) command=eza args=["--icons", "-F"]
+2026-03-26T09:19:27.906+09:00 [c45558] DEBUG jarvish::engine::exec::pty_session: src/engine/exec/pty_session.rs:138: External command completed (PTY session) command=eza exit_code=0 stdout_size=1649 stderr_size=0 used_alt_screen=false
+2026-03-26T09:19:27.906+09:00 [c45558] DEBUG jarvish::storage::record: src/storage/record.rs:20: Recording command result to BlackBox command=ls exit_code=0 stdout_len=1649 stderr_len=0 used_alt_screen=false
+2026-03-26T09:19:27.907+09:00 [c45558]  INFO jarvish::shell::input: src/shell/input.rs:141: 
+==== FINISHED PROCESS ====
+
+
+2026-03-26T09:19:27.917+09:00 [c45558] DEBUG jarvish::cli::prompt::starship: src/cli/prompt/starship.rs:72: starship prompt executed extra_args=["--continuation"] status=0 duration_ms=15 output_len=13
+2026-03-26T09:19:28.434+09:00 [c45558] DEBUG jarvish::cli::prompt::starship: src/cli/prompt/starship.rs:72: starship prompt executed extra_args=[] status=0 duration_ms=15 output_len=448
+2026-03-26T09:19:28.445+09:00 [c45558] DEBUG jarvish::cli::prompt::starship: src/cli/prompt/starship.rs:72: starship prompt executed extra_args=["--right"] status=0 duration_ms=15 output_len=0
+2026-03-26T09:19:28.874+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.5%
+2026-03-26T09:19:30.879+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.1%
+2026-03-26T09:19:32.879+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:19:34.880+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:19:36.881+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:19:38.882+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:19:40.887+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:19:42.890+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:19:44.894+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:19:46.897+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:19:48.899+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:19:50.901+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:19:52.906+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:19:54.906+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:19:56.906+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:19:58.909+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:20:00.910+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:20:02.913+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:20:04.918+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:20:06.921+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:20:08.921+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:20:10.922+09:00 [c45558] DEBUG jarvish::logging: src/logging.rs:220: [CPU Monitor] CPU usage: 0.0%
+2026-03-26T09:20:12.925+09:00 [c45558] DEBUG j
+
+---
+
+プランモードにしてプランを構築して
+
+---
+
+実行して
+
+---
+
+testやclippyを実行するときは `make check` を実行して

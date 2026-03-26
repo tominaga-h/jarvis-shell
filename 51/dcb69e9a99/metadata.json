@@ -1,0 +1,20 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "51dcb69e9a99",
+  "strategy": "manual-commit",
+  "branch": "develop",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "src/cli/prompt/mod.rs",
+    "src/cli/prompt/starship.rs",
+    "src/engine/typo.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/51/dcb69e9a99/0/metadata.json",
+      "transcript": "/51/dcb69e9a99/0/full.jsonl",
+      "content_hash": "/51/dcb69e9a99/0/content_hash.txt",
+      "prompt": "/51/dcb69e9a99/0/prompt.txt"
+    }
+  ]
+}
