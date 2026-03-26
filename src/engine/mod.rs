@@ -8,6 +8,7 @@ pub mod parser;
 mod pty;
 mod redirect;
 mod terminal;
+pub mod typo;
 
 pub use dispatch::{execute, try_builtin, try_execute_ai_pipe};
 

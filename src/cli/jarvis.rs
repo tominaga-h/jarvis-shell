@@ -123,6 +123,49 @@ pub fn render_markdown(text: &str) {
     skin.print_text(text);
 }
 
+/// タイポ補正に対するユーザーの応答
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypoAction {
+    /// y / Enter: 補正されたコマンドを実行する
+    Accept,
+    /// n: 補正せず通常の処理を続ける
+    Reject,
+    /// a / e: 実行を中止する
+    Abort,
+}
+
+/// タイポ補正の候補をユーザーに提示する。
+///
+/// `🤵 jarvish: correct '{typo}' to '{suggestion}' [nyae]? ` と表示し、
+/// ユーザーの入力に応じて `TypoAction` を返す。
+///
+/// - `y` / Enter (空行): Accept
+/// - `n`: Reject
+/// - `a` / `e`: Abort
+pub fn jarvis_ask_typo_correction(typo: &str, suggestion: &str) -> TypoAction {
+    print!(
+        "🤵 {} {} {} {}",
+        white("jarvish: correct"),
+        red(&format!("'{typo}'")),
+        white(&format!("to '{suggestion}'")),
+        white("[nyae]? "),
+    );
+    let _ = io::stdout().flush();
+
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return TypoAction::Reject;
+    }
+
+    println!();
+
+    match input.trim().to_lowercase().as_str() {
+        "" | "y" | "yes" => TypoAction::Accept,
+        "a" | "e" => TypoAction::Abort,
+        _ => TypoAction::Reject,
+    }
+}
+
 /// コマンド異常終了時にユーザーへ調査の可否を確認する。
 ///
 /// 「調査しますか？ [Y/n]: 」と表示し、ユーザーが `Y`/`y`/空行（Enter）を
