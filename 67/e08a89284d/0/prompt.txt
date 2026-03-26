@@ -1,0 +1,17 @@
+/issues
+
+---
+
+claude, jarvishをリリースしたら全く違うリポジトリのhomebrew-tapリポジトリのFormulaを更新したいんだけど、できる？
+
+---
+
+releaseスキルに組み込みたいな。リポジトリは$HOME/lab/homebrew-tapで、Formulaは$HOME/lab/homebrew-tap/Formula/jarvish.rbだよ。更新時はバージョンとSHA256の値だけ書き換えてコミット・プッシュしてる
+
+---
+
+gh runで調べてみて
+
+---
+
+Bにして
