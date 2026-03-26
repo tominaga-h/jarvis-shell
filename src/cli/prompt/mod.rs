@@ -47,8 +47,9 @@ impl ShellPrompt {
     ///
     /// Starship モードでは Starship 自身が Git 情報を描画するため no-op。
     pub fn refresh_git_status(&self) {
-        if let Self::Builtin(ref p) = self {
-            p.refresh_git_status();
+        match self {
+            Self::Builtin(ref p) => p.refresh_git_status(),
+            Self::Starship(ref p) => p.mark_dirty(),
         }
     }
 }
