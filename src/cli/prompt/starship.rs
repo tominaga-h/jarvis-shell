@@ -34,6 +34,8 @@ pub struct StarshipPrompt {
     last_exit_code: Arc<AtomicI32>,
     cmd_duration_ms: Arc<AtomicU64>,
     starship_path: PathBuf,
+    /// Starship のセッション追跡用キー（`STARSHIP_SESSION_KEY` として子プロセスに渡す）。
+    session_key: String,
     /// キーストローク中の再実行を防ぐプロンプト出力キャッシュ。
     /// `None` = ダーティ（次回 render 時に全種を一括再生成）。
     cache: Mutex<Option<PromptCache>>,
@@ -49,6 +51,7 @@ impl StarshipPrompt {
             last_exit_code,
             cmd_duration_ms,
             starship_path,
+            session_key: format!("{:x}", rand::random::<u64>()),
             cache: Mutex::new(None),
         }
     }
@@ -69,6 +72,12 @@ impl StarshipPrompt {
 
         let mut cmd = Command::new(&self.starship_path);
         cmd.arg("prompt");
+
+        // 親シェル由来の STARSHIP_SHELL（例: "zsh"）を上書きし、
+        // 生の ANSI エスケープシーケンスを出力させる。
+        // Zsh 形式 %{...%} や Bash 形式 \[...\] は reedline が解釈できない。
+        cmd.env("STARSHIP_SHELL", "");
+        cmd.env("STARSHIP_SESSION_KEY", &self.session_key);
 
         for arg in extra_args {
             cmd.arg(arg);
