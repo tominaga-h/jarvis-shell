@@ -129,6 +129,10 @@ ll = "eza --icons -la"
 
 [export]
 PATH = "/usr/local/bin:$PATH" # Environment variables expanded on startup
+# ⚠️ Caution: Setting SHELL = "/usr/local/bin/jarvish" causes external tools
+# (Cursor, VS Code, etc.) to use jarvish as their subshell, which may trigger
+# mass AI auto-investigations on tool hook failures.
+# Keep SHELL set to bash/zsh if you only use jarvish as an interactive shell.
 
 [prompt]
 nerd_font = true              # Set to false if NerdFont is not installed

@@ -3,6 +3,7 @@
 //! コマンドが異常終了した場合に、AI にエラーの原因と修正案を調査させる。
 //! Tool Call からの失敗は自動調査、ユーザー直接入力は確認プロンプト後に調査する。
 
+use std::io::IsTerminal;
 use std::sync::atomic::Ordering;
 
 use tracing::{debug, info, warn};
@@ -40,6 +41,13 @@ impl Shell {
             None => return,
         };
 
+        // 非対話モード（-c オプション等）ではユーザー確認ができないため調査をスキップ。
+        // stdin が EOF を返すと jarvis_ask_investigate が自動承認してしまう問題を防ぐ。
+        if !from_tool_call && !std::io::stdin().is_terminal() {
+            info!("Skipping investigation (non-interactive mode)");
+            return;
+        }
+
         // ignore_auto_investigation_cmds に前方一致するコマンドは調査をスキップ
         // （Tool Call からの自動調査は常に実行する）
         if !from_tool_call && matches_ignore_pattern(line, &self.ignore_auto_investigation_cmds) {
@@ -75,6 +83,7 @@ impl Shell {
                     }
                     Err(e) => {
                         warn!(error = %e, "Conversation continuation for investigation failed, falling back to new investigation");
+                        eprintln!("jarvish: investigation follow-up failed: {e}");
                     }
                 }
             }
@@ -99,6 +108,7 @@ impl Shell {
             }
             Err(e) => {
                 warn!(error = %e, "Error investigation failed");
+                eprintln!("jarvish: investigation failed: {e}");
             }
         }
     }
