@@ -3,6 +3,18 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.6.1](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.6.1) - 2026-04-01
+
+### Fixed
+
+- 非対話モード（`-c` オプション）実行時に自動調査が暴走し、AI 失敗時にカスケード障害が発生する問題を修正
+- Starship プロンプトのレンダリングが崩れるバグを修正
+
+### Changed
+
+- Starship プロンプトのキャッシュ実装によりプロンプト描画パフォーマンスを向上
+- リリースコマンド実行時に Homebrew Formula の更新ステップを追加
+
 ## [v1.6.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.6.0) - 2026-03-26
 
 ### Added
