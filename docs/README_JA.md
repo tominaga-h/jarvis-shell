@@ -1,7 +1,7 @@
 # 🤵 Jarvish — The AI-Native Shell
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-[![version](https://img.shields.io/badge/version-1.6.0-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.6.0)
+[![version](https://img.shields.io/badge/version-1.6.1-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.6.1)
 
 > 🌐 [English README](../README.md)
 
@@ -129,6 +129,10 @@ ll = "eza --icons -la"
 
 [export]
 PATH = "/usr/local/bin:$PATH" # 起動時に展開される環境変数
+# ⚠️ SHELL = "/usr/local/bin/jarvish" の設定に注意:
+# 外部ツール（Cursor, VS Code 等）がサブシェルとして jarvish を使用するようになり、
+# ツール呼び出しフックの失敗が AI 自動調査を大量発火させる可能性があります。
+# 対話的シェルとしてのみ jarvish を使用する場合は SHELL を bash/zsh のままにしてください。
 
 [prompt]
 nerd_font = true              # NerdFont 未インストールの場合は false に設定

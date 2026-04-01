@@ -66,6 +66,21 @@
    - `make release`
    - `gh release upload <タグ> ./target/release/jarvish`
    - `cargo publish`
+6. **Homebrew Formula の更新**
+   ```bash
+   gh run watch --exit-status -R tominaga-h/jarvis-shell
+   gh release download <タグ> -R tominaga-h/jarvis-shell --pattern "jarvish-aarch64-apple-darwin.tar.gz" -D /tmp
+   shasum -a 256 /tmp/jarvish-aarch64-apple-darwin.tar.gz | awk '{print $1}'
+   ```
+   取得した SHA256 を使って `~/lab/homebrew-tap/Formula/jarvish.rb` の `version` と `sha256` を書き換える。
+   ```bash
+   cd ~/lab/homebrew-tap
+   git add Formula/jarvish.rb
+   git commit -m "Bump jarvish to <タグ>"
+   git push origin main
+   cd -
+   ```
+
 
 #### フォールバック手順（ユーザーが NG を返した場合）
 
@@ -96,4 +111,15 @@ gh release create <タグ> --notes-file docs/release/<タグ>.md
 make release
 gh release upload <タグ> ./target/release/jarvish
 cargo publish
+
+# Homebrew Formula の更新
+gh run watch --exit-status -R tominaga-h/jarvis-shell
+gh release download <タグ> -R tominaga-h/jarvis-shell --pattern "jarvish-aarch64-apple-darwin.tar.gz" -D /tmp
+SHA256=$(shasum -a 256 /tmp/jarvish-aarch64-apple-darwin.tar.gz | awk '{print $1}')
+# ~/lab/homebrew-tap/Formula/jarvish.rb の version と sha256 を手動で書き換えてから:
+cd ~/lab/homebrew-tap
+git add Formula/jarvish.rb
+git commit -m "Bump jarvish to <タグ>"
+git push origin main
+cd -
 ```

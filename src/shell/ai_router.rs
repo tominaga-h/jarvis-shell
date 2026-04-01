@@ -39,14 +39,16 @@ impl Shell {
     /// 自然言語入力を AI にルーティングする。
     ///
     /// 既存の会話コンテキストがある場合は継続会話、なければ新規会話を開始する。
-    /// AI が無効な場合はコマンドとして直接実行にフォールバックする。
+    /// AI が無効な場合や処理失敗時はエラーメッセージを返す。
     pub(super) async fn route_to_ai(&mut self, line: &str) -> AiRoutingResult {
         if self.ai_client.is_none() {
-            debug!(ai_enabled = false, "AI disabled, executing directly");
+            debug!(ai_enabled = false, "AI disabled, returning error");
+            let msg = "jarvish: AI is not available (API key not configured)\n".to_string();
+            eprint!("{msg}");
             return AiRoutingResult {
-                result: execute(line),
+                result: CommandResult::error(msg, 1),
                 from_tool_call: false,
-                should_update_exit_code: true,
+                should_update_exit_code: false,
                 executed_command: None,
             };
         }
@@ -161,12 +163,14 @@ impl Shell {
                 warn!(
                     error = %e,
                     input = %line,
-                    "AI processing failed, falling back to direct execution"
+                    "AI processing failed"
                 );
+                let msg = format!("jarvish: AI processing failed: {e}\n");
+                eprint!("{msg}");
                 AiRoutingResult {
-                    result: execute(line),
+                    result: CommandResult::error(msg, 1),
                     from_tool_call: false,
-                    should_update_exit_code: true,
+                    should_update_exit_code: false,
                     executed_command: None,
                 }
             }

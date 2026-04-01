@@ -27,6 +27,11 @@ impl super::JarvishConfig {
 
 [export]
 # PATH = "/usr/local/bin:$PATH"
+#
+# ⚠️ SHELL = "/usr/local/bin/jarvish" の設定に注意:
+# 外部ツール（Cursor, VS Code 等）がサブシェルとして jarvish を使用するようになり、
+# ツール呼び出しフックの失敗が AI 自動調査を大量発火させる可能性があります。
+# 対話的シェルとしてのみ jarvish を使用する場合は SHELL を bash/zsh のままにしてください。
 
 [prompt]
 # nerd_font = true  # false にすると NerdFont アイコンを使わない

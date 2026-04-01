@@ -1,7 +1,7 @@
 # 🤵 Jarvish — The AI-Native Shell
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-[![version](https://img.shields.io/badge/version-1.6.0-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.6.0)
+[![version](https://img.shields.io/badge/version-1.6.1-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.6.1)
 
 > 🌐 [日本語版 README はこちら](docs/README_JA.md)
 
@@ -129,6 +129,10 @@ ll = "eza --icons -la"
 
 [export]
 PATH = "/usr/local/bin:$PATH" # Environment variables expanded on startup
+# ⚠️ Caution: Setting SHELL = "/usr/local/bin/jarvish" causes external tools
+# (Cursor, VS Code, etc.) to use jarvish as their subshell, which may trigger
+# mass AI auto-investigations on tool hook failures.
+# Keep SHELL set to bash/zsh if you only use jarvish as an interactive shell.
 
 [prompt]
 nerd_font = true              # Set to false if NerdFont is not installed

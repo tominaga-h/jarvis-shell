@@ -28,3 +28,6 @@ var/logs/*
 
 # curosr
 .cursor/*.log
+
+.avengers
+.claude
