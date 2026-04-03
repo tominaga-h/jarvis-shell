@@ -37,8 +37,16 @@ fn is_homebrew_install() -> bool {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(|s| s.to_string()))
-        .map(|s| s.contains("/Cellar/") || s.contains("/homebrew/"))
+        .map(|s| is_homebrew_path(&s))
         .unwrap_or(false)
+}
+
+/// パス文字列が Homebrew インストールのパスパターンに一致するか判定する。
+///
+/// Intel Mac: `/usr/local/Cellar/jarvish/...`
+/// Apple Silicon: `/opt/homebrew/Cellar/jarvish/...`
+fn is_homebrew_path(exe_path: &str) -> bool {
+    exe_path.contains("/Cellar/") || exe_path.contains("/homebrew/")
 }
 
 /// Homebrew インストールの場合の更新ハンドリング。
@@ -156,6 +164,12 @@ fn update_flag_path() -> Option<std::path::PathBuf> {
 /// フラグファイルには新しいバージョン番号を書き込む。
 /// 兄弟プロセスは次のプロンプト表示時にこのファイルを検出し、
 /// ユーザーに `restart` コマンドの実行を促す。
+/// テスト用にフラグファイルを書き込む公開ヘルパー。
+#[cfg(test)]
+pub fn write_update_flag_for_test(version: &str) {
+    write_update_flag(version);
+}
+
 fn write_update_flag(version: &str) {
     let Some(path) = update_flag_path() else {
         return;
@@ -267,9 +281,22 @@ mod tests {
         assert!(path.to_str().unwrap().contains("update-ready"));
     }
 
+    /// フラグファイルテスト用のロック。
+    /// 並列テスト実行時にフラグファイルの競合を防ぐ。
+    use std::sync::Mutex;
+    static FLAG_FILE_LOCK: Mutex<()> = Mutex::new(());
+
+    fn cleanup_flag_file() {
+        if let Some(path) = update_flag_path() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
     #[test]
     fn write_and_check_update_flag() {
-        // フラグファイルを書き込み、check_update_flag で読み取れることを確認
+        let _lock = FLAG_FILE_LOCK.lock().unwrap();
+        cleanup_flag_file();
+
         write_update_flag("1.8.0");
         let msg = check_update_flag();
         assert!(msg.is_some());
@@ -282,10 +309,107 @@ mod tests {
 
     #[test]
     fn check_update_flag_returns_none_when_no_file() {
-        // フラグファイルが存在しない場合は None
-        // (前のテストで削除済み、または初回実行時)
-        let path = update_flag_path().unwrap();
-        let _ = std::fs::remove_file(&path); // 念のため削除
+        let _lock = FLAG_FILE_LOCK.lock().unwrap();
+        cleanup_flag_file();
         assert!(check_update_flag().is_none());
+    }
+
+    #[test]
+    fn check_update_flag_ignores_empty_file() {
+        let _lock = FLAG_FILE_LOCK.lock().unwrap();
+        cleanup_flag_file();
+
+        let path = update_flag_path().unwrap();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, "");
+        assert!(check_update_flag().is_none());
+    }
+
+    #[test]
+    fn check_update_flag_trims_whitespace() {
+        let _lock = FLAG_FILE_LOCK.lock().unwrap();
+        cleanup_flag_file();
+
+        write_update_flag("  1.9.0\n");
+        let msg = check_update_flag();
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("v1.9.0"));
+    }
+
+    // ── is_homebrew_path ──
+
+    #[test]
+    fn homebrew_intel_mac_path() {
+        assert!(is_homebrew_path(
+            "/usr/local/Cellar/jarvish/1.7.0/bin/jarvish"
+        ));
+    }
+
+    #[test]
+    fn homebrew_apple_silicon_path() {
+        assert!(is_homebrew_path(
+            "/opt/homebrew/Cellar/jarvish/1.7.0/bin/jarvish"
+        ));
+    }
+
+    #[test]
+    fn homebrew_generic_homebrew_path() {
+        assert!(is_homebrew_path(
+            "/home/linuxbrew/.linuxbrew/homebrew/bin/jarvish"
+        ));
+    }
+
+    #[test]
+    fn non_homebrew_cargo_path() {
+        assert!(!is_homebrew_path("/Users/user/.cargo/bin/jarvish"));
+    }
+
+    #[test]
+    fn non_homebrew_usr_local_bin() {
+        assert!(!is_homebrew_path("/usr/local/bin/jarvish"));
+    }
+
+    #[test]
+    fn non_homebrew_target_debug() {
+        assert!(!is_homebrew_path(
+            "/Users/user/project/target/debug/jarvish"
+        ));
+    }
+
+    // ── is_newer_version edge cases ──
+
+    #[test]
+    fn newer_version_major_bump_from_zero() {
+        assert!(is_newer_version("0.9.9", "1.0.0"));
+    }
+
+    #[test]
+    fn newer_version_partial_parts() {
+        // パーツ数が異なる場合
+        assert!(is_newer_version("1.0", "1.0.1"));
+    }
+
+    #[test]
+    fn newer_version_with_non_numeric_ignored() {
+        // 非数値パーツは filter_map で除外される
+        assert!(is_newer_version("1.0.0", "2.0.0"));
+    }
+
+    // ── perform_update error path (mock なし、ユニットレベル) ──
+
+    #[test]
+    fn write_update_flag_creates_file() {
+        let _lock = FLAG_FILE_LOCK.lock().unwrap();
+        cleanup_flag_file();
+
+        write_update_flag("1.10.0");
+        let path = update_flag_path().unwrap();
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "1.10.0");
+
+        cleanup_flag_file();
     }
 }
