@@ -4,3 +4,4 @@ pub mod completer;
 pub mod highlighter;
 pub mod jarvis;
 pub mod prompt;
+pub mod update_check;

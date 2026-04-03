@@ -3,6 +3,19 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.8.3](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.8.3) - 2026-04-03
+
+### Fixed
+
+- `sigusr1_handler_can_be_reregistered` テストのスリープ時間を延長し CI でのフレーキーテストを解消
+
+### Changed
+
+- Claude コマンドファイルに frontmatter メタデータを追加
+- 開発サイクル（実装→完了の必須フロー）を CLAUDE.md に明文化
+- Cargo.lock の依存パッケージバージョンを同期
+- 不要な `.claude/settings.json` を削除
+
 ## [v1.6.3](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.6.3) - 2026-04-03
 
 ### Fixed

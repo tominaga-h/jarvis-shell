@@ -1,16 +1,10 @@
-mod ai;
-mod cli;
-mod config;
-mod engine;
-mod logging;
-mod shell;
-mod storage;
-
 use std::path::PathBuf;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
 use rand::Rng;
-use tracing::info;
+use tracing::{info, warn};
+
+use jarvish::{engine, logging, shell};
 
 /// Next Generation AI Integrated Shell
 #[derive(Parser)]
@@ -65,8 +59,8 @@ async fn main() {
     );
 
     let mut shell = shell::Shell::new(logging_ok, session_id);
-    let exit_code = if let Some(ref command) = args.command {
-        shell.run_command(command).await
+    let (exit_code, action) = if let Some(ref command) = args.command {
+        (shell.run_command(command).await, engine::LoopAction::Exit)
     } else {
         shell.run().await
     };
@@ -75,6 +69,17 @@ async fn main() {
         "\n\n==== [{}] J.A.R.V.I.S.H. SHUTTING DOWN ====\n\n",
         session_key
     );
+
+    // Restart アクション: exec() でプロセスを置換
+    if action == engine::LoopAction::Restart {
+        // _guard を明示的にドロップしてログをフラッシュ
+        drop(_guard);
+        let err = shell.exec_restart();
+        // exec() が失敗した場合のみここに到達
+        warn!(error = %err, "exec_restart failed");
+        eprintln!("jarvish: restart failed: {err}");
+        std::process::exit(1);
+    }
 
     std::process::exit(exit_code);
 }

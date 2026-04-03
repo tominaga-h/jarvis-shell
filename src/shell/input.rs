@@ -188,6 +188,11 @@ impl Shell {
                 info!("Exit command received");
                 false
             }
+            LoopAction::Restart => {
+                info!("Restart command received");
+                self.restart_requested.store(true, Ordering::Relaxed);
+                false
+            }
         }
     }
 

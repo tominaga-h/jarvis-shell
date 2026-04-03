@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(gh issue:*)",
-      "Bash(make check:*)",
-      "Bash(cargo test:*)"
-    ]
-  }
-}

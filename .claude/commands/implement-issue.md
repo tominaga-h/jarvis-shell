@@ -1,3 +1,8 @@
+---
+description: GitHub Issue の内容を読み取り実装する
+argument-hint: "<issue-number>"
+---
+
 指定した番号の GitHub Issue の内容を読み取り、その機能をコードベースに実装する。
 
 引数: `$ARGUMENTS` (Issue 番号)

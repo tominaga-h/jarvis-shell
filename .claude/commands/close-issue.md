@@ -1,3 +1,8 @@
+---
+description: 指定した番号の GitHub Issue をクローズする
+argument-hint: "<issue-number>"
+---
+
 指定した番号の GitHub Issue をクローズする。
 
 ## 手順

@@ -14,10 +14,12 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("history", "Display or manage command history"),
     ("popd", "Pop directory from stack and change to it"),
     ("pushd", "Push directory onto stack and change to it"),
+    ("restart", "Restart the shell process"),
     ("source", "Load a configuration file (TOML)"),
     ("type", "Display information about command type"),
     ("unalias", "Remove aliases"),
     ("unset", "Remove environment variables"),
+    ("update", "Update jarvish to the latest version"),
     ("which", "Locate a command (builtin, alias, or external)"),
 ];
 
