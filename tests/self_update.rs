@@ -3,12 +3,14 @@
 //! ここでは jarvish の内部モジュールにはアクセスせず、
 //! シグナルハンドリングやプロセス管理のシステムレベルの挙動をテストする。
 
+use serial_test::serial;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// SIGUSR1 を自プロセスに送信して AtomicBool フラグが更新されることを確認する。
 /// Shell::register_sigusr1_handler と同等のロジックを再現してテストする。
 #[test]
+#[serial]
 fn sigusr1_sets_restart_flag() {
     let flag = Arc::new(AtomicBool::new(false));
     let flag_clone = Arc::clone(&flag);
@@ -82,6 +84,7 @@ fn args_skip_first_excludes_binary_name() {
 
 /// SIGUSR1 ハンドラを再登録しても前回のハンドラが上書きされることを確認。
 #[test]
+#[serial]
 fn sigusr1_handler_can_be_reregistered() {
     static FLAG_A: AtomicBool = AtomicBool::new(false);
     static FLAG_B: AtomicBool = AtomicBool::new(false);
