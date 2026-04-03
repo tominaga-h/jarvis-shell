@@ -87,3 +87,46 @@ impl CommandResult {
         }
     }
 }
+
+#[cfg(test)]
+mod loop_action_tests {
+    use super::*;
+
+    #[test]
+    fn restart_is_distinct_from_continue_and_exit() {
+        assert_ne!(LoopAction::Restart, LoopAction::Continue);
+        assert_ne!(LoopAction::Restart, LoopAction::Exit);
+        assert_ne!(LoopAction::Continue, LoopAction::Exit);
+    }
+
+    #[test]
+    fn command_result_restart_fields() {
+        let result = CommandResult::restart();
+        assert_eq!(result.action, LoopAction::Restart);
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.is_empty());
+        assert!(result.stderr.is_empty());
+        assert!(!result.used_alt_screen);
+    }
+
+    #[test]
+    fn command_result_success_is_continue() {
+        let result = CommandResult::success("output".to_string());
+        assert_eq!(result.action, LoopAction::Continue);
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn command_result_exit_with_is_exit() {
+        let result = CommandResult::exit_with(42);
+        assert_eq!(result.action, LoopAction::Exit);
+        assert_eq!(result.exit_code, 42);
+    }
+
+    #[test]
+    fn command_result_error_is_continue() {
+        let result = CommandResult::error("err".to_string(), 1);
+        assert_eq!(result.action, LoopAction::Continue);
+        assert_eq!(result.exit_code, 1);
+    }
+}
