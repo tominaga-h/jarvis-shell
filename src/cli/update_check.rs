@@ -309,6 +309,69 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ── build_notification edge cases ──
+
+    #[test]
+    fn notification_with_v_prefix_on_both() {
+        // current は v プレフィックスなし（CARGO_PKG_VERSION 由来）
+        // latest は v プレフィックスあり（GitHub API 由来）
+        let result = build_notification("1.6.3", "v1.7.0");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        // "vv1.7.0" にならないことを確認
+        assert!(!msg.contains("vv"));
+    }
+
+    #[test]
+    fn notification_pre_release_parts_ignored() {
+        // 非数値パーツは filter_map で無視される
+        // "1.7.0-beta" → [1, 7, 0]（"-beta" は u32 parse 失敗で除外）
+        let result = build_notification("1.7.0", "1.8.0-beta");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn notification_empty_version_returns_none() {
+        // 空文字列 → パーツなし → latest_parts <= current_parts → None
+        assert!(build_notification("1.0.0", "").is_none());
+    }
+
+    // ── cache serialization ──
+
+    #[test]
+    fn cache_serialization_roundtrip() {
+        let cache = UpdateCache {
+            checked_at: 1700000000,
+            latest_version: "1.8.0".to_string(),
+        };
+        let json = serde_json::to_string(&cache).unwrap();
+        let loaded: UpdateCache = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.checked_at, 1700000000);
+        assert_eq!(loaded.latest_version, "1.8.0");
+    }
+
+    #[test]
+    fn cache_missing_field_returns_error() {
+        // checked_at フィールドが欠落
+        let json = r#"{"latest_version": "1.8.0"}"#;
+        let result: Result<UpdateCache, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cache_extra_field_is_ignored() {
+        let json = r#"{"checked_at": 1700000000, "latest_version": "1.8.0", "extra": true}"#;
+        let result: Result<UpdateCache, _> = serde_json::from_str(json);
+        assert!(result.is_ok());
+    }
+
+    // ── CACHE_TTL_SECS ──
+
+    #[test]
+    fn cache_ttl_is_24_hours() {
+        assert_eq!(CACHE_TTL_SECS, 86400);
+    }
+
     // ── fetch_latest_version（GitHub API 依存 → ignore）──
 
     #[test]

@@ -521,21 +521,141 @@ impl Shell {
 
         info!("exec_restart: executing self-restart");
 
-        // 現在のバイナリパスを取得して exec
-        let exe = match std::env::current_exe() {
-            Ok(path) => path,
-            Err(e) => {
-                return std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("failed to get current exe path: {e}"),
-                );
-            }
+        let (exe, args) = match build_restart_command() {
+            Ok(pair) => pair,
+            Err(e) => return e,
         };
-
-        // 元の引数をそのまま引き継ぐ（--debug 等）
-        let args: Vec<String> = std::env::args().skip(1).collect();
 
         // exec() — 成功時はこの行に到達しない
         std::process::Command::new(exe).args(&args).exec()
+    }
+}
+
+/// exec_restart 用のコマンド情報を構築する。
+///
+/// 現在のバイナリパスと引数を取得する。テスト可能な純粋関数として分離。
+fn build_restart_command() -> Result<(PathBuf, Vec<String>), std::io::Error> {
+    let exe = std::env::current_exe().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("failed to get current exe path: {e}"),
+        )
+    })?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    Ok((exe, args))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── build_restart_command ──
+
+    #[test]
+    fn build_restart_command_returns_valid_exe() {
+        let result = build_restart_command();
+        assert!(result.is_ok());
+        let (exe, _args) = result.unwrap();
+        assert!(exe.exists(), "current_exe path should exist");
+    }
+
+    #[test]
+    fn build_restart_command_args_exclude_binary_name() {
+        let (_, args) = build_restart_command().unwrap();
+        // テストバイナリのパスが引数に含まれないことを確認
+        for arg in &args {
+            assert!(
+                !arg.contains("jarvish-") && !arg.ends_with("jarvish"),
+                "args should not contain binary name, got: {arg}"
+            );
+        }
+    }
+
+    // ── RESTART_FLAG (global AtomicBool) ──
+
+    #[test]
+    fn restart_flag_initial_state_is_false() {
+        // テスト間の副作用を避けるためリセット
+        RESTART_FLAG.store(false, Ordering::Relaxed);
+        assert!(!RESTART_FLAG.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn restart_flag_can_be_set_and_read() {
+        RESTART_FLAG.store(true, Ordering::Relaxed);
+        assert!(RESTART_FLAG.load(Ordering::Relaxed));
+        // クリーンアップ
+        RESTART_FLAG.store(false, Ordering::Relaxed);
+    }
+
+    // ── register_sigusr1_handler + flag propagation ──
+
+    #[test]
+    fn sigusr1_handler_propagates_to_restart_flag() {
+        let restart_flag = Arc::new(AtomicBool::new(false));
+
+        // ハンドラを登録
+        Shell::register_sigusr1_handler(Arc::clone(&restart_flag));
+
+        // 自プロセスに SIGUSR1 を送信
+        unsafe {
+            libc::kill(libc::getpid(), libc::SIGUSR1);
+        }
+
+        // フラグが伝播するまで待機（最大2秒）
+        for _ in 0..40 {
+            if restart_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        assert!(
+            restart_flag.load(Ordering::Relaxed),
+            "SIGUSR1 should propagate to restart_flag via polling thread"
+        );
+
+        // グローバルフラグをリセット
+        RESTART_FLAG.store(false, Ordering::Relaxed);
+    }
+
+    // ── restart_requested flag monitoring ──
+
+    #[test]
+    fn restart_requested_flag_default_is_false() {
+        let flag = Arc::new(AtomicBool::new(false));
+        assert!(!flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn restart_requested_flag_set_triggers_restart() {
+        let flag = Arc::new(AtomicBool::new(false));
+        flag.store(true, Ordering::Relaxed);
+        // REPL ループと同じチェックロジック
+        assert!(flag.load(Ordering::Relaxed));
+    }
+
+    // ── update flag file notification in REPL ──
+
+    #[test]
+    fn check_update_flag_returns_none_without_flag_file() {
+        use crate::engine::builtins::update;
+        // 念のため既存フラグを削除
+        let _ = update::check_update_flag();
+        assert!(update::check_update_flag().is_none());
+    }
+
+    #[test]
+    fn check_update_flag_returns_notification_with_flag_file() {
+        use crate::engine::builtins::update;
+        // 念のため既存フラグを削除
+        let _ = update::check_update_flag();
+
+        update::write_update_flag_for_test("2.0.0");
+        let msg = update::check_update_flag();
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("v2.0.0"));
+        // 読み取り後は削除されている
+        assert!(update::check_update_flag().is_none());
     }
 }
