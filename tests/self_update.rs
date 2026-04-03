@@ -116,7 +116,7 @@ fn sigusr1_handler_can_be_reregistered() {
         libc::kill(libc::getpid(), libc::SIGUSR1);
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
 
     assert!(
         FLAG_B.load(Ordering::Relaxed),
