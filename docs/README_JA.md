@@ -26,6 +26,7 @@
   - ["The Black Box"](#3-the-black-box完全記憶型ストレージ)
   - [妥協のない「爆速」シェル UX](#4-妥協のない爆速シェル-ux)
 - [インストール](#-インストール)
+- [アップデート](#-アップデート)
 - [セットアップと設定](#️-セットアップと設定)
   - [Starship プロンプト連携](#starship-プロンプト連携)
 - [アーキテクチャ](#️-アーキテクチャ)
@@ -98,6 +99,29 @@ git clone https://github.com/tominaga-h/jarvis-shell.git
 cd jarvis-shell
 cargo install --path .
 ```
+
+## 🔄 アップデート
+
+Jarvish にはビルトインの `update` コマンドがあり、最新バージョンへの自己更新が可能です。
+
+```bash
+update            # GitHub Releases から最新バージョンに更新
+update --check    # 新しいバージョンがあるか確認（インストールはしない）
+```
+
+Homebrew でインストールされている場合は自動検知し、`brew upgrade jarvish` の使用を案内します。
+
+### ローカルバイナリからのアップデート
+
+ソースからビルドする開発者向けに、ローカルのビルド済みバイナリからの更新もサポートしています：
+
+```bash
+update --local                    # デフォルトパス（target/release/jarvish）を使用
+update --local /path/to/jarvish   # カスタムパスのバイナリを使用
+update --check --local            # ローカルバイナリのバージョンを確認（インストールはしない）
+```
+
+更新が成功すると、jarvish は新しいバージョンを適用するために自動的に再起動します。
 
 ## ⚙️ セットアップと設定
 
