@@ -26,6 +26,7 @@ The days of copy-pasting errors into a browser to ask AI are over. Just ask Jarv
   - ["The Black Box" (Total Recall Storage)](#3-the-black-box-total-recall-storage)
   - [Uncompromising "Blazing Fast" Shell UX](#4-uncompromising-blazing-fast-shell-ux)
 - [Install](#-install)
+- [Updating](#-updating)
 - [Setup and Configuration](#️-setup-and-configuration)
   - [Starship Prompt Integration](#starship-prompt-integration)
 - [Architecture](#️-architecture)
@@ -98,6 +99,29 @@ git clone https://github.com/tominaga-h/jarvis-shell.git
 cd jarvis-shell
 cargo install --path .
 ```
+
+## 🔄 Updating
+
+Jarvish has a built-in `update` command that updates itself to the latest version.
+
+```bash
+update            # Update to the latest version from GitHub Releases
+update --check    # Check if a newer version is available (without installing)
+```
+
+If jarvish was installed via Homebrew, the command will detect this and guide you to use `brew upgrade jarvish` instead.
+
+### Updating from a Local Binary
+
+For developers who build from source, you can update from a locally compiled binary:
+
+```bash
+update --local                    # Use default path (target/release/jarvish)
+update --local /path/to/jarvish   # Use a custom binary path
+update --check --local            # Check the local binary version without installing
+```
+
+After a successful update, jarvish automatically restarts to apply the new version.
 
 ## ⚙️ Setup and Configuration
 

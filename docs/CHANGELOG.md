@@ -16,6 +16,64 @@
 - Cargo.lock の依存パッケージバージョンを同期
 - 不要な `.claude/settings.json` を削除
 
+## [v1.8.2](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.8.2) - 2026-04-03
+
+### Fixed
+
+- `lib.rs` 作成によりテスト実行問題を修正
+- `perform_local_update` のテストを安全化 ([#19](https://github.com/tominaga-h/jarvis-shell/issues/19))
+
+### Changed
+
+- Cargo.lock の依存パッケージバージョンを同期
+
+## [v1.8.1](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.8.1) - 2026-04-03
+
+### Added
+
+- `update --local` のテスト 5 件を追加（Fury 監査指摘対応）
+
+## [v1.8.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.8.0) - 2026-04-03
+
+### Added
+
+- `update --local` オプションを追加: ローカルバイナリからの更新機能（デフォルトパス `target/release/jarvish` またはカスタムパス指定）
+
+## [v1.7.3](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.7.3) - 2026-04-03
+
+### Added
+
+- テストカバレッジ強化: P0/P1 項目に 27 テストを追加（累計 477 テスト）
+
+## [v1.7.2](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.7.2) - 2026-04-03
+
+### Fixed
+
+- `update --check` の semver 比較バグを修正 ([#31](https://github.com/tominaga-h/jarvis-shell/issues/31))
+
+### Changed
+
+- SIGUSR1 による自動再起動を廃止し、フラグファイル通知方式に変更（安定性向上）([#31](https://github.com/tominaga-h/jarvis-shell/issues/31))
+
+## [v1.7.1](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.7.1) - 2026-04-03
+
+### Added
+
+- 自己更新・再起動メカニズムのテストを追加 ([#31](https://github.com/tominaga-h/jarvis-shell/issues/31))
+
+## [v1.7.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.7.0) - 2026-04-03
+
+### Added
+
+- `update` ビルトインコマンドを追加: GitHub Releases からの自己更新機能 ([#31](https://github.com/tominaga-h/jarvis-shell/issues/31))
+- `update --check` オプション: インストールせずに新バージョンの有無を確認
+- Homebrew インストールの自動検知と `brew upgrade` への案内
+- 更新完了後の自動再起動
+
+### Changed
+
+- release コマンドの homebrew-tap 記述を変更
+
 ## [v1.6.3](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.6.3) - 2026-04-03
 
 ### Fixed
