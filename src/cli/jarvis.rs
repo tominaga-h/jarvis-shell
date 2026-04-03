@@ -134,6 +134,31 @@ pub enum TypoAction {
     Abort,
 }
 
+/// SIGINT を無視した状態で stdin から 1 行読み取る。
+///
+/// Ctrl+C が押されてもプロセスは終了せず、エラーまたは空文字列として返る。
+/// 読み取り完了後に SIGINT ハンドラをデフォルトに復元する。
+fn read_line_ignoring_sigint() -> Option<String> {
+    // SAFETY: SIG_IGN / SIG_DFL は POSIX 標準のシグナルハンドラ定数。
+    // sigaction はシグナルハンドラの設定/復元のみを行い、メモリ安全性に影響しない。
+    unsafe {
+        let mut old_action: libc::sigaction = std::mem::zeroed();
+        let mut new_action: libc::sigaction = std::mem::zeroed();
+        new_action.sa_sigaction = libc::SIG_IGN;
+        libc::sigaction(libc::SIGINT, &new_action, &mut old_action);
+
+        let mut input = String::new();
+        let result = io::stdin().read_line(&mut input);
+
+        libc::sigaction(libc::SIGINT, &old_action, std::ptr::null_mut());
+
+        match result {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(input),
+        }
+    }
+}
+
 /// タイポ補正の候補をユーザーに提示する。
 ///
 /// `🤵 jarvish: correct '{typo}' to '{suggestion}' [nyae]? ` と表示し、
@@ -142,6 +167,7 @@ pub enum TypoAction {
 /// - `y` / Enter (空行): Accept
 /// - `n`: Reject
 /// - `a` / `e`: Abort
+/// - Ctrl+C: Abort
 pub fn jarvis_ask_typo_correction(typo: &str, suggestion: &str) -> TypoAction {
     print!(
         "🤵 {} {} {} {}",
@@ -152,10 +178,10 @@ pub fn jarvis_ask_typo_correction(typo: &str, suggestion: &str) -> TypoAction {
     );
     let _ = io::stdout().flush();
 
-    let mut input = String::new();
-    if io::stdin().read_line(&mut input).is_err() {
-        return TypoAction::Reject;
-    }
+    let Some(input) = read_line_ignoring_sigint() else {
+        println!();
+        return TypoAction::Abort;
+    };
 
     println!();
 
@@ -169,7 +195,7 @@ pub fn jarvis_ask_typo_correction(typo: &str, suggestion: &str) -> TypoAction {
 /// コマンド異常終了時にユーザーへ調査の可否を確認する。
 ///
 /// 「調査しますか？ [Y/n]: 」と表示し、ユーザーが `Y`/`y`/空行（Enter）を
-/// 入力した場合に `true` を返す。それ以外は `false`。
+/// 入力した場合に `true` を返す。それ以外（Ctrl+C 含む）は `false`。
 pub fn jarvis_ask_investigate(exit_code: i32) -> bool {
     print!(
         "🤵 Sir, {} {}",
@@ -180,10 +206,10 @@ pub fn jarvis_ask_investigate(exit_code: i32) -> bool {
     );
     let _ = io::stdout().flush();
 
-    let mut input = String::new();
-    if io::stdin().read_line(&mut input).is_err() {
+    let Some(input) = read_line_ignoring_sigint() else {
+        println!();
         return false;
-    }
+    };
 
     println!();
 

@@ -355,7 +355,7 @@ fn check_typo_correction(line: &str) -> TypoCorrectionOutcome {
             let rest = &line[first_token.len()..];
             TypoCorrectionOutcome::UseCommand(format!("{suggestion}{rest}"))
         }
-        TypoAction::Reject => TypoCorrectionOutcome::Proceed,
+        TypoAction::Reject => TypoCorrectionOutcome::Abort,
         TypoAction::Abort => TypoCorrectionOutcome::Abort,
     }
 }
