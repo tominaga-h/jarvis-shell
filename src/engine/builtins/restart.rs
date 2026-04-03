@@ -41,4 +41,25 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("restart"));
     }
+
+    #[test]
+    fn restart_ignores_extra_args() {
+        // 不明な引数はエラー
+        let result = execute(&["--unknown"]);
+        assert_eq!(result.action, LoopAction::Continue);
+        assert_ne!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn restart_stdout_is_empty() {
+        // restart コマンドの CommandResult は stdout を持たない
+        let result = execute(&[]);
+        assert!(result.stdout.is_empty());
+    }
+
+    #[test]
+    fn restart_stderr_is_empty() {
+        let result = execute(&[]);
+        assert!(result.stderr.is_empty());
+    }
 }

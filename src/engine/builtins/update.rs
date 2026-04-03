@@ -186,8 +186,47 @@ mod tests {
 
     #[test]
     fn is_homebrew_detects_cellar() {
-        // 現在のバイナリが /Cellar/ を含まなければ false
-        // （テスト環境では Homebrew 経由でないはず）
+        // テスト環境では Homebrew 経由でないはず
         assert!(!is_homebrew_install());
+    }
+
+    #[test]
+    fn update_check_flag_does_not_restart() {
+        // --check はバージョン確認のみ。restart しない。
+        // GitHub API に接続するため CI で不安定になる可能性があるが、
+        // LoopAction が Restart でないことを確認する。
+        let result = execute(&["--check"]);
+        assert_ne!(result.action, LoopAction::Restart);
+    }
+
+    #[test]
+    fn homebrew_update_returns_guidance() {
+        // handle_homebrew_update(false) は案内メッセージを返す
+        let result = handle_homebrew_update(false);
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("brew upgrade jarvish"));
+        assert_eq!(result.action, LoopAction::Continue);
+    }
+
+    #[test]
+    fn homebrew_check_returns_guidance() {
+        let result = handle_homebrew_update(true);
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("brew outdated jarvish"));
+        assert_eq!(result.action, LoopAction::Continue);
+    }
+
+    #[test]
+    #[ignore]
+    fn get_latest_release_version_succeeds() {
+        // GitHub API 依存。手動実行用。
+        let result = get_latest_release_version();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn notify_sibling_does_not_panic() {
+        // 兄弟プロセスがいなくてもパニックしない
+        notify_sibling_processes();
     }
 }

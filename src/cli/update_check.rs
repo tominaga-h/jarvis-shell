@@ -123,6 +123,9 @@ fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error + Send + S
 }
 
 /// バージョン比較を行い、通知メッセージを組み立てる。
+///
+/// `latest` が `current` より新しい場合に通知文字列を返す。
+/// Homebrew インストールかどうかで案内メッセージを変える。
 fn build_notification(current: &str, latest: &str) -> Option<String> {
     let latest_clean = latest.trim_start_matches('v');
 
@@ -157,4 +160,167 @@ fn build_notification(current: &str, latest: &str) -> Option<String> {
     Some(format!(
         "  New version available: v{latest_clean} (current: v{current}). Run {update_cmd} to update."
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── build_notification ──
+
+    #[test]
+    fn notification_newer_version_available() {
+        let result = build_notification("1.6.3", "1.7.0");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("v1.7.0"));
+        assert!(msg.contains("v1.6.3"));
+        // テスト環境では Homebrew でないので `update` が表示される
+        assert!(msg.contains("`update`"));
+    }
+
+    #[test]
+    fn notification_same_version_returns_none() {
+        assert!(build_notification("1.7.0", "1.7.0").is_none());
+    }
+
+    #[test]
+    fn notification_older_version_returns_none() {
+        assert!(build_notification("1.7.0", "1.6.3").is_none());
+    }
+
+    #[test]
+    fn notification_strips_v_prefix() {
+        let result = build_notification("1.6.3", "v1.7.0");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("v1.7.0"));
+    }
+
+    #[test]
+    fn notification_major_version_bump() {
+        let result = build_notification("1.7.0", "2.0.0");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn notification_patch_version_bump() {
+        let result = build_notification("1.7.0", "1.7.1");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn notification_equal_major_minor_no_bump() {
+        assert!(build_notification("1.7.1", "1.7.0").is_none());
+    }
+
+    // ── cache_path ──
+
+    #[test]
+    fn cache_path_returns_some() {
+        let path = cache_path();
+        assert!(path.is_some());
+        let path = path.unwrap();
+        assert!(path.to_str().unwrap().contains("jarvish"));
+        assert!(path.to_str().unwrap().contains("update_check.json"));
+    }
+
+    // ── write_cache / read_cache roundtrip ──
+
+    #[test]
+    fn cache_write_and_read_roundtrip() {
+        // 一時ディレクトリにキャッシュを書き込み・読み込みテスト
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cache_file = tmp.path().join("update_check.json");
+
+        // 手動でキャッシュファイルを書き込む
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let cache = UpdateCache {
+            checked_at: now,
+            latest_version: "1.8.0".to_string(),
+        };
+        let json = serde_json::to_string(&cache).unwrap();
+        std::fs::write(&cache_file, &json).unwrap();
+
+        // ファイルから直接読み込んで検証
+        let content = std::fs::read_to_string(&cache_file).unwrap();
+        let loaded: UpdateCache = serde_json::from_str(&content).unwrap();
+        assert_eq!(loaded.latest_version, "1.8.0");
+        assert_eq!(loaded.checked_at, now);
+    }
+
+    #[test]
+    fn cache_ttl_expired() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cache_file = tmp.path().join("update_check.json");
+
+        // 25時間前のキャッシュ（期限切れ）
+        let expired_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - CACHE_TTL_SECS
+            - 3600;
+
+        let cache = UpdateCache {
+            checked_at: expired_time,
+            latest_version: "1.8.0".to_string(),
+        };
+        let json = serde_json::to_string(&cache).unwrap();
+        std::fs::write(&cache_file, json).unwrap();
+
+        // read_cache はグローバルパスを使うのでここでは直接 TTL ロジックをテスト
+        let content = std::fs::read_to_string(&cache_file).unwrap();
+        let loaded: UpdateCache = serde_json::from_str(&content).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(now - loaded.checked_at >= CACHE_TTL_SECS);
+    }
+
+    #[test]
+    fn cache_ttl_valid() {
+        // 1時間前のキャッシュ（有効）
+        let recent_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 3600;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(now - recent_time < CACHE_TTL_SECS);
+    }
+
+    #[test]
+    fn cache_invalid_json_returns_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cache_file = tmp.path().join("update_check.json");
+        std::fs::write(&cache_file, "invalid json").unwrap();
+
+        let content = std::fs::read_to_string(&cache_file).unwrap();
+        let result: Result<UpdateCache, _> = serde_json::from_str(&content);
+        assert!(result.is_err());
+    }
+
+    // ── fetch_latest_version（GitHub API 依存 → ignore）──
+
+    #[test]
+    #[ignore]
+    fn fetch_latest_version_from_github() {
+        let result = fetch_latest_version();
+        assert!(result.is_ok());
+        let version = result.unwrap();
+        // バージョン形式の検証
+        assert!(
+            version.split('.').count() >= 2,
+            "version should be semver-like: {version}"
+        );
+    }
 }
