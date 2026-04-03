@@ -10,7 +10,7 @@ mod restart;
 pub(crate) mod source;
 pub(crate) mod unalias;
 mod unset;
-mod update;
+pub(crate) mod update;
 pub(crate) mod which_type;
 
 use super::CommandResult;
