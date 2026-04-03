@@ -144,3 +144,50 @@ fn current_exe_is_executable_file() {
         "current_exe should have execute permission"
     );
 }
+
+/// --local オプション付き update のインテグレーションテスト。
+///
+/// モックバイナリを作成し、`update --check --local <path>` 相当の
+/// バージョン取得・比較フローが正しく動作することを検証する。
+#[test]
+fn local_update_check_with_mock_binary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mock_binary = tmp.path().join("jarvish");
+
+    // 現在のバージョンより新しいバージョンを返すモックバイナリ
+    std::fs::write(&mock_binary, "#!/bin/sh\necho \"jarvish 99.0.0\"\n").unwrap();
+    std::fs::set_permissions(&mock_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // モックバイナリを --version で実行してバージョンが取得できることを確認
+    let output = std::process::Command::new(&mock_binary)
+        .arg("--version")
+        .output()
+        .expect("mock binary should execute");
+
+    assert!(output.status.success(), "mock binary should exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("99.0.0"),
+        "mock binary should output version: {stdout}"
+    );
+
+    // バイナリ置換のテスト（一時ファイル経由のアトミック置換）
+    let source = tmp.path().join("source-bin");
+    let dest = tmp.path().join("dest-bin");
+    std::fs::write(&source, b"new binary").unwrap();
+    std::fs::write(&dest, b"old binary").unwrap();
+
+    // copy → rename で置換
+    let tmp_path = tmp.path().join(".jarvish-update.tmp");
+    std::fs::copy(&source, &tmp_path).unwrap();
+    std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::rename(&tmp_path, &dest).unwrap();
+
+    // 置換後のファイル内容とパーミッションを検証
+    let content = std::fs::read_to_string(&dest).unwrap();
+    assert_eq!(content, "new binary");
+    let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755);
+}

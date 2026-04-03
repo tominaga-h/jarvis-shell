@@ -750,4 +750,93 @@ mod tests {
     fn default_local_binary_path_is_release() {
         assert_eq!(DEFAULT_LOCAL_BINARY, "target/release/jarvish");
     }
+
+    // ── Fury 監査指摘: 追加テスト ──
+
+    #[test]
+    fn get_local_binary_version_success_with_mock_binary() {
+        // シェルスクリプトでバイナリをモックし、バージョン文字列の正常取得を検証
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mock_binary = tmp.path().join("mock-jarvish");
+        std::fs::write(&mock_binary, "#!/bin/sh\necho \"jarvish 99.1.0\"\n").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let result = get_local_binary_version(&mock_binary);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(result.unwrap(), "99.1.0");
+    }
+
+    #[test]
+    fn perform_local_update_older_binary_skips_update() {
+        // 現在のバージョンより古いバイナリの場合に置換がスキップされることを検証
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mock_binary = tmp.path().join("old-jarvish");
+        // 現在のバージョンより明確に古いバージョンを返すモック
+        std::fs::write(&mock_binary, "#!/bin/sh\necho \"jarvish 0.0.1\"\n").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let result = perform_local_update(&mock_binary);
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.action, LoopAction::Continue); // restart しない
+        assert!(result.stdout.contains("not newer"));
+    }
+
+    #[test]
+    fn replace_binary_sets_executable_permission() {
+        // 置換後のファイルが 0o755 であることを検証
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path().join("source");
+        let dest = tmp.path().join("dest");
+
+        std::fs::write(&source, b"binary content").unwrap();
+        std::fs::write(&dest, b"old content").unwrap();
+
+        let result = replace_binary(&source, &dest);
+        assert!(result.is_ok());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = std::fs::metadata(&dest).unwrap();
+            let mode = metadata.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755, "replaced binary should have 0o755 permissions");
+        }
+    }
+
+    #[test]
+    fn perform_local_update_success_returns_restart() {
+        // 置換成功後に restart アクションを返し、フラグファイルが作成されることを検証
+        let _lock = FLAG_FILE_LOCK.lock().unwrap();
+        cleanup_flag_file();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mock_binary = tmp.path().join("new-jarvish");
+        // 十分に大きいバージョン番号で「新しい」と判定させる
+        std::fs::write(&mock_binary, "#!/bin/sh\necho \"jarvish 99.99.99\"\n").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let result = perform_local_update(&mock_binary);
+        assert_eq!(result.action, LoopAction::Restart);
+        assert_eq!(result.exit_code, 0);
+
+        // フラグファイルが作成されていることを確認
+        let flag_msg = check_update_flag();
+        assert!(flag_msg.is_some(), "update flag should be written");
+        assert!(flag_msg.unwrap().contains("v99.99.99"));
+    }
 }
