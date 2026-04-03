@@ -81,6 +81,20 @@ Debug mode: `jarvish --debug` writes logs to `./var/logs/`.
 - Each file (module) must have a single, clear responsibility (a data structure with its behavior, or a specific algorithm).
 - Large files (e.g. `mod.rs`, `client.rs`, `exec.rs`) must be reorganized into directories with submodules, grouped by feature.
 
+### Development Cycle (実装 → 完了の必須フロー)
+
+新機能の実装・バグ修正は以下の順序で進めること。ステップを飛ばしてはならない。
+
+1. **実装**: コードを実装し、ユニットテスト・インテグレーションテストを同時に追加する
+2. **品質検証**: レビュアーによる実装の品質検証（コード品質、設計適合性）
+3. **テストコード追加**: 検証で不足が指摘されたテストを追加する
+4. **テストチェック**: `make check`（fmt + clippy + test）を全パスさせる
+5. **テストカバレッジ調査**: 追加したテストのカバレッジを調査し、未テストの重要ロジックパスがないか確認する。不足があればステップ3に戻る
+6. **完了**: コミット → develop マージ → タグ → push
+
+- テストカバレッジ調査で不足が見つかった場合、テスト追加 → 再調査のサイクルを回すこと
+- `make check` が通らない限り、マージに進んではならない
+
 ### Miscellaneous
 
 - Markdown filenames under the `docs/` folder must always be ALL UPPERCASE (e.g. `OVERVIEW.md`, `CHANGELOG.md`).
