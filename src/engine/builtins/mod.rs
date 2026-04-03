@@ -6,9 +6,11 @@ mod exit;
 mod export;
 mod help;
 mod history;
+mod restart;
 pub(crate) mod source;
 pub(crate) mod unalias;
 mod unset;
+mod update;
 pub(crate) mod which_type;
 
 use super::CommandResult;
@@ -45,9 +47,11 @@ pub fn is_builtin(cmd: &str) -> bool {
             | "help"
             | "popd"
             | "pushd"
+            | "restart"
             | "source"
             | "unalias"
             | "unset"
+            | "update"
             | "history"
             | "which"
             | "type"
@@ -79,6 +83,8 @@ pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
         "popd" => Some(dirstack::execute_popd(args, &mut Vec::new())),
         "unset" => Some(unset::execute(args)),
         "history" => Some(history::execute(args)),
+        "restart" => Some(restart::execute(args)),
+        "update" => Some(update::execute(args)),
         "which" => Some(which_type::execute_which(
             args,
             &std::collections::HashMap::new(),
