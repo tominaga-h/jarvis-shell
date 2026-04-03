@@ -387,6 +387,12 @@ impl Shell {
         }
 
         loop {
+            // 別プロセスの update コマンドによるフラグファイルを検出し、通知を表示
+            if let Some(notification) = crate::engine::builtins::update::check_update_flag() {
+                println!("  {notification}");
+                println!();
+            }
+
             // SIGUSR1 による再起動リクエストがフラグに残っている場合（コマンド実行中に受信した場合）
             if self.restart_requested.load(Ordering::Relaxed) {
                 info!("Deferred restart triggered (SIGUSR1 received during command execution)");
