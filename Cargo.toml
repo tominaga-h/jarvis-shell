@@ -1,6 +1,6 @@
 [package]
 name = "jarvish"
-version = "1.6.1"
+version = "1.6.2"
 edition = "2021"
 rust-version = "1.75"
 description = "Next Generation AI Integrated Shell inspired by J.A.R.V.I.S. on Marvel's Iron Man"
