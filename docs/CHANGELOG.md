@@ -3,6 +3,17 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.6.3](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.6.3) - 2026-04-03
+
+### Fixed
+
+- タイポ補正プロンプトで n (Reject) を選択すると AI が走ってしまう問題を修正
+- タイポ補正・自動調査の確認プロンプトで Ctrl+C を押すとシェルプロセスが終了する問題を修正
+
+### Changed
+
+- `read_line_ignoring_sigint()` ヘルパーを導入し、対話プロンプトでの SIGINT ハンドリングを共通化
+
 ## [v1.6.1](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.6.1) - 2026-04-01
 
 ### Fixed
