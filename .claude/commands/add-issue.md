@@ -1,3 +1,8 @@
+---
+description: GitHub Issue を新規登録する
+argument-hint: "<issue-title>"
+---
+
 ユーザーが入力した内容を GitHub Issue として登録する。
 
 ## 手順

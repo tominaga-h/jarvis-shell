@@ -1,3 +1,8 @@
+---
+description: GitHub Issue の一覧をマイルストーン付きで表示する
+argument-hint: "[closed|all]"
+---
+
 GitHub Issue の一覧をマイルストーン付きで表示する。
 
 引数: `$ARGUMENTS` (省略可。`closed` または `all` を指定できる)
