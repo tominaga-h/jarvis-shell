@@ -10,11 +10,18 @@ mod investigate;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use reedline::{Reedline, Signal};
 use tracing::{info, warn};
+
+use std::sync::atomic::AtomicBool as StaticAtomicBool;
+
+/// SIGUSR1 シグナルハンドラが設定するグローバルフラグ。
+/// シグナルハンドラ内では async-signal-safe な操作のみ許可されるため、
+/// `AtomicBool::store` を使用する。
+static RESTART_FLAG: StaticAtomicBool = StaticAtomicBool::new(false);
 
 use crate::ai::{ConversationState, JarvisAI};
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
@@ -22,6 +29,7 @@ use crate::cli::prompt::{ShellPrompt, EXIT_CODE_NONE};
 use crate::config::JarvishConfig;
 use crate::engine::classifier::InputClassifier;
 use crate::engine::expand;
+use crate::engine::LoopAction;
 use crate::storage::BlackBox;
 
 /// Jarvis Shell の状態を管理する構造体。
@@ -50,6 +58,9 @@ pub struct Shell {
     logging_operational: bool,
     /// ブランチ名補完対象の git サブコマンド（JarvishCompleter と共有）
     git_branch_commands: Arc<RwLock<Vec<String>>>,
+    /// SIGUSR1 受信時に再起動をリクエストするフラグ。
+    /// コマンド実行中・PTY 使用中は即座に再起動せず、次の REPL idle 時に遅延実行する。
+    restart_requested: Arc<AtomicBool>,
 }
 
 impl Shell {
@@ -136,6 +147,7 @@ impl Shell {
             history_available,
             logging_operational,
             git_branch_commands,
+            restart_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -336,12 +348,12 @@ impl Shell {
     ///
     /// ユーザー入力を受け取り、ビルトイン/コマンド/自然言語を処理する。
     /// Ctrl-D、exit コマンド、または goodbye 入力で終了する。
+    /// SIGUSR1 受信時は再起動を行う。
     ///
-    /// 戻り値: シェルの終了コード。
-    /// - 通常: 直前に実行したコマンドの終了コードを返す（bash/zsh と同じ挙動）
-    /// - `exit N`: 引数で指定された終了コード
-    /// - REPL 内部エラー: `1`
-    pub async fn run(&mut self) -> i32 {
+    /// 戻り値: `(終了コード, LoopAction)` のタプル。
+    /// - `LoopAction::Exit`: 通常終了
+    /// - `LoopAction::Restart`: exec() による再起動が必要
+    pub async fn run(&mut self) -> (i32, LoopAction) {
         let mut offline = Vec::new();
         if !self.logging_operational {
             offline.push("Logging offline");
@@ -357,13 +369,51 @@ impl Shell {
         }
         crate::cli::banner::print_welcome(&offline);
 
+        // バックグラウンドでバージョンチェックを実行（24時間キャッシュ付き）
+        let update_check = tokio::spawn(crate::cli::update_check::check_for_update_notification());
+
         let mut repl_error = false;
+        let mut action = LoopAction::Exit;
+
+        // SIGUSR1 ハンドラの登録（AtomicBool フラグを共有）
+        Self::register_sigusr1_handler(Arc::clone(&self.restart_requested));
+
+        // 最初のプロンプト表示前にバージョンチェック結果を表示（最大1秒待機）
+        if let Ok(Ok(Some(notification))) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), update_check).await
+        {
+            println!("{notification}");
+            println!();
+        }
 
         loop {
+            // SIGUSR1 による再起動リクエストがフラグに残っている場合（コマンド実行中に受信した場合）
+            if self.restart_requested.load(Ordering::Relaxed) {
+                info!("Deferred restart triggered (SIGUSR1 received during command execution)");
+                println!("Restarting jarvish (deferred SIGUSR1)...");
+                action = LoopAction::Restart;
+                break;
+            }
+
             let signal = tokio::task::block_in_place(|| self.editor.read_line(&self.prompt));
+
+            // read_line の完了後にシグナルフラグをチェック
+            if self.restart_requested.load(Ordering::Relaxed) {
+                info!("SIGUSR1 received during read_line: restarting shell");
+                println!("\nRestarting jarvish (SIGUSR1)...");
+                action = LoopAction::Restart;
+                break;
+            }
+
             match signal {
                 Ok(Signal::Success(line)) => {
-                    if !self.handle_input(&line).await {
+                    let result = self.handle_input(&line).await;
+                    if !result {
+                        // handle_input が false を返した場合、restart か exit かを判別
+                        // restart ビルトインが呼ばれた場合は last action を確認
+                        if self.restart_requested.load(Ordering::Relaxed) {
+                            action = LoopAction::Restart;
+                        }
                         break;
                     }
                     self.prompt.refresh_git_status();
@@ -387,8 +437,8 @@ impl Shell {
             }
         }
 
-        // Farewell メッセージ表示（AI goodbye で既に表示済みの場合はスキップ）
-        if !self.farewell_shown {
+        // Farewell メッセージ表示（再起動時と AI goodbye 表示済みの場合はスキップ）
+        if action != LoopAction::Restart && !self.farewell_shown {
             crate::cli::banner::print_goodbye();
         }
 
@@ -398,7 +448,7 @@ impl Shell {
         }
 
         // 終了コードを決定
-        if repl_error {
+        let exit_code = if repl_error {
             1
         } else {
             let code = self.last_exit_code.load(Ordering::Relaxed);
@@ -407,6 +457,79 @@ impl Shell {
             } else {
                 code
             }
+        };
+
+        (exit_code, action)
+    }
+
+    /// SIGUSR1 シグナルハンドラを登録する。
+    ///
+    /// 受信時に `RESTART_FLAG` グローバルフラグを立てる。
+    /// reedline の `read_line()` は同期ブロッキング呼び出しのため、
+    /// シグナルハンドラでフラグを立て、次の REPL ループイテレーションでチェックする。
+    fn register_sigusr1_handler(restart_flag: Arc<AtomicBool>) {
+        extern "C" fn handle_sigusr1(_: libc::c_int) {
+            // シグナルハンドラ内では async-signal-safe な操作のみ許可
+            RESTART_FLAG.store(true, Ordering::Relaxed);
         }
+
+        // グローバルフラグをリセット
+        RESTART_FLAG.store(false, Ordering::Relaxed);
+
+        // グローバル RESTART_FLAG を Shell の restart_requested に転送するスレッド
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if RESTART_FLAG.load(Ordering::Relaxed) {
+                restart_flag.store(true, Ordering::Relaxed);
+                break;
+            }
+        });
+
+        // libc の sigaction で SIGUSR1 ハンドラを登録
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = handle_sigusr1 as *const () as usize;
+            sa.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut sa.sa_mask);
+
+            if libc::sigaction(libc::SIGUSR1, &sa, std::ptr::null_mut()) == 0 {
+                info!("SIGUSR1 handler registered for self-restart");
+            } else {
+                let e = std::io::Error::last_os_error();
+                warn!(error = %e, "Failed to register SIGUSR1 handler");
+                eprintln!("jarvish: warning: SIGUSR1 handler unavailable: {e}");
+            }
+        }
+    }
+
+    /// exec() によるプロセス再起動を実行する。
+    ///
+    /// クリーンアップ後、現在のバイナリで exec() を呼び出しプロセスを置換する。
+    /// 成功時はこの関数から戻らない。失敗時はエラーを返す。
+    pub fn exec_restart(&mut self) -> std::io::Error {
+        use std::os::unix::process::CommandExt;
+
+        // stdout/stderr をフラッシュ
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+
+        info!("exec_restart: executing self-restart");
+
+        // 現在のバイナリパスを取得して exec
+        let exe = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(e) => {
+                return std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("failed to get current exe path: {e}"),
+                );
+            }
+        };
+
+        // 元の引数をそのまま引き継ぐ（--debug 等）
+        let args: Vec<String> = std::env::args().skip(1).collect();
+
+        // exec() — 成功時はこの行に到達しない
+        std::process::Command::new(exe).args(&args).exec()
     }
 }

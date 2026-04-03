@@ -19,6 +19,8 @@ pub enum LoopAction {
     Continue,
     /// ループを終了する（exit コマンド等）
     Exit,
+    /// プロセスを再起動する（restart コマンド、SIGUSR1 受信時）
+    Restart,
 }
 
 /// コマンド実行の結果を格納する構造体。
@@ -70,6 +72,17 @@ impl CommandResult {
             stderr: String::new(),
             exit_code,
             action: LoopAction::Exit,
+            used_alt_screen: false,
+        }
+    }
+
+    /// Restart アクションを返すヘルパー
+    pub fn restart() -> Self {
+        Self {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            action: LoopAction::Restart,
             used_alt_screen: false,
         }
     }
