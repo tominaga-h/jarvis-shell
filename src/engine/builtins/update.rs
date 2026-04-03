@@ -266,6 +266,24 @@ fn check_for_local_updates(binary_path: &Path) -> CommandResult {
 
 /// ローカルバイナリで現在の実行バイナリを置換する（`update --local`）。
 fn perform_local_update(binary_path: &Path) -> CommandResult {
+    // 現在の実行バイナリのパスを取得
+    let current_exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(e) => {
+            let msg = format!("Failed to get current exe path: {e}\n");
+            eprint!("{msg}");
+            return CommandResult::error(msg, 1);
+        }
+    };
+
+    perform_local_update_to(binary_path, &current_exe)
+}
+
+/// ローカルバイナリで指定されたバイナリを置換する。
+///
+/// `perform_local_update` から呼び出される。置換先を引数で受け取ることで
+/// テスト時に実テストバイナリを破壊しない。
+fn perform_local_update_to(binary_path: &Path, dest: &Path) -> CommandResult {
     let current = env!("CARGO_PKG_VERSION");
     println!("Current version: v{current}");
 
@@ -301,19 +319,9 @@ fn perform_local_update(binary_path: &Path) -> CommandResult {
         return CommandResult::success(msg);
     }
 
-    // 現在の実行バイナリのパスを取得
-    let current_exe = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(e) => {
-            let msg = format!("Failed to get current exe path: {e}\n");
-            eprint!("{msg}");
-            return CommandResult::error(msg, 1);
-        }
-    };
-
-    // バイナリを置換（self_replace を使用）
-    println!("Replacing {} ...", current_exe.display());
-    if let Err(e) = replace_binary(binary_path, &current_exe) {
+    // バイナリを置換
+    println!("Replacing {} ...", dest.display());
+    if let Err(e) = replace_binary(binary_path, dest) {
         let msg = format!("Update failed: {e}\n");
         eprint!("{msg}");
         return CommandResult::error(msg, 1);
@@ -693,7 +701,9 @@ mod tests {
 
     #[test]
     fn perform_local_binary_not_found() {
-        let result = perform_local_update(Path::new("/nonexistent/jarvish"));
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dest = tmp.path().join("dest");
+        let result = perform_local_update_to(Path::new("/nonexistent/jarvish"), &dest);
         assert_ne!(result.exit_code, 0);
         assert!(result.stderr.contains("not found"));
     }
@@ -776,6 +786,7 @@ mod tests {
         // 現在のバージョンより古いバイナリの場合に置換がスキップされることを検証
         let tmp = tempfile::TempDir::new().unwrap();
         let mock_binary = tmp.path().join("old-jarvish");
+        let dest = tmp.path().join("dest");
         // 現在のバージョンより明確に古いバージョンを返すモック
         std::fs::write(&mock_binary, "#!/bin/sh\necho \"jarvish 0.0.1\"\n").unwrap();
 
@@ -785,7 +796,7 @@ mod tests {
             std::fs::set_permissions(&mock_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let result = perform_local_update(&mock_binary);
+        let result = perform_local_update_to(&mock_binary, &dest);
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.action, LoopAction::Continue); // restart しない
         assert!(result.stdout.contains("not newer"));
@@ -816,13 +827,17 @@ mod tests {
     #[test]
     fn perform_local_update_success_returns_restart() {
         // 置換成功後に restart アクションを返し、フラグファイルが作成されることを検証
+        // perform_local_update_to を使い、テストバイナリ自体を破壊しないようにする
         let _lock = FLAG_FILE_LOCK.lock().unwrap();
         cleanup_flag_file();
 
         let tmp = tempfile::TempDir::new().unwrap();
         let mock_binary = tmp.path().join("new-jarvish");
+        let dest_binary = tmp.path().join("dest-jarvish");
+
         // 十分に大きいバージョン番号で「新しい」と判定させる
         std::fs::write(&mock_binary, "#!/bin/sh\necho \"jarvish 99.99.99\"\n").unwrap();
+        std::fs::write(&dest_binary, b"old binary").unwrap();
 
         #[cfg(unix)]
         {
@@ -830,9 +845,13 @@ mod tests {
             std::fs::set_permissions(&mock_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let result = perform_local_update(&mock_binary);
+        // perform_local_update_to で一時ファイルに置換（テストバイナリを壊さない）
+        let result = perform_local_update_to(&mock_binary, &dest_binary);
         assert_eq!(result.action, LoopAction::Restart);
         assert_eq!(result.exit_code, 0);
+
+        // 置換先のファイルが更新されていることを確認
+        assert!(dest_binary.exists());
 
         // フラグファイルが作成されていることを確認
         let flag_msg = check_update_flag();

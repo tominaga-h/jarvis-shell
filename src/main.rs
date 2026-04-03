@@ -1,16 +1,10 @@
-mod ai;
-mod cli;
-mod config;
-mod engine;
-mod logging;
-mod shell;
-mod storage;
-
 use std::path::PathBuf;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
 use rand::Rng;
 use tracing::{info, warn};
+
+use jarvish::{engine, logging, shell};
 
 /// Next Generation AI Integrated Shell
 #[derive(Parser)]

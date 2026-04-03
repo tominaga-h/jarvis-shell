@@ -42,6 +42,12 @@ pub struct InputClassifier {
     path_cache: Mutex<HashMap<String, (bool, Instant)>>,
 }
 
+impl Default for InputClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InputClassifier {
     pub fn new() -> Self {
         info!(
