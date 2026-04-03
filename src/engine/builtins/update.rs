@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use clap::Parser;
 
 use crate::engine::CommandResult;
@@ -9,17 +11,31 @@ struct UpdateArgs {
     /// Check for updates without installing
     #[arg(long)]
     check: bool,
+
+    /// Update from a local binary instead of GitHub Releases.
+    /// Optionally specify the path to the binary (default: target/release/jarvish).
+    #[arg(long)]
+    local: Option<Option<String>>,
 }
 
-/// update: GitHub Releases から最新バイナリをダウンロードし、
-/// 自プロセスを更新・再起動する。兄弟プロセスにはフラグファイルで通知する。
+/// update: GitHub Releases またはローカルバイナリから更新する。
 ///
+/// `--local` オプションでローカルビルドのバイナリを使った更新が可能。
 /// Homebrew でインストールされている場合は `brew upgrade jarvish` を案内する。
 pub(super) fn execute(args: &[&str]) -> CommandResult {
     let parsed = match super::parse_args::<UpdateArgs>("update", args) {
         Ok(a) => a,
         Err(result) => return result,
     };
+
+    // --local が指定された場合はローカルバイナリから更新
+    if let Some(local_path) = parsed.local {
+        let path = resolve_local_binary_path(local_path.as_deref());
+        if parsed.check {
+            return check_for_local_updates(&path);
+        }
+        return perform_local_update(&path);
+    }
 
     if is_homebrew_install() {
         return handle_homebrew_update(parsed.check);
@@ -152,6 +168,202 @@ fn perform_update() -> CommandResult {
         print!("{msg}");
         CommandResult::success(msg)
     }
+}
+
+/// ローカルバイナリのデフォルトパス
+const DEFAULT_LOCAL_BINARY: &str = "target/release/jarvish";
+
+/// ローカルバイナリのパスを解決する。
+///
+/// 引数が指定されていればそのまま使い、未指定の場合はデフォルトパスを返す。
+fn resolve_local_binary_path(specified: Option<&str>) -> PathBuf {
+    match specified {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(DEFAULT_LOCAL_BINARY),
+    }
+}
+
+/// ローカルバイナリのバージョンを `--version` 実行で取得する。
+///
+/// 出力例: `jarvish 1.8.0` → `"1.8.0"` を返す。
+fn get_local_binary_version(binary_path: &Path) -> Result<String, String> {
+    let output = std::process::Command::new(binary_path)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("Failed to execute {}: {e}", binary_path.display()))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "{} --version exited with {}",
+            binary_path.display(),
+            output.status
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // "jarvish 1.8.0" → "1.8.0"
+    parse_version_from_output(&stdout)
+        .ok_or_else(|| format!("Could not parse version from: {}", stdout.trim()))
+}
+
+/// `--version` 出力からバージョン番号を抽出する。
+///
+/// `"jarvish 1.8.0\n"` → `Some("1.8.0")`
+fn parse_version_from_output(output: &str) -> Option<String> {
+    let trimmed = output.trim();
+    // "jarvish X.Y.Z" or "X.Y.Z" のどちらも対応
+    let version_str = trimmed.rsplit_once(' ').map(|(_, v)| v).unwrap_or(trimmed);
+    let version = version_str.trim_start_matches('v');
+    // 数字で始まるか確認（バージョン番号の妥当性チェック）
+    if version.starts_with(|c: char| c.is_ascii_digit()) {
+        Some(version.to_string())
+    } else {
+        None
+    }
+}
+
+/// ローカルバイナリのバージョンを確認する（`--check --local`）。
+fn check_for_local_updates(binary_path: &Path) -> CommandResult {
+    let current = env!("CARGO_PKG_VERSION");
+    println!("Current version: v{current}");
+
+    if !binary_path.exists() {
+        let msg = format!(
+            "Local binary not found: {}\n\
+             Run `cargo build --release` to build.\n",
+            binary_path.display()
+        );
+        eprint!("{msg}");
+        return CommandResult::error(msg, 1);
+    }
+
+    println!("Checking local binary: {}", binary_path.display());
+
+    match get_local_binary_version(binary_path) {
+        Ok(local_version) => {
+            let local_clean = local_version.trim_start_matches('v');
+            if is_newer_version(current, local_clean) {
+                let msg = format!(
+                    "Local binary is newer: v{local_clean} (current: v{current})\n\
+                     Run `update --local` to install.\n"
+                );
+                print!("{msg}");
+                CommandResult::success(msg)
+            } else {
+                let msg =
+                    format!("Local binary v{local_clean} is not newer than current v{current}.\n");
+                print!("{msg}");
+                CommandResult::success(msg)
+            }
+        }
+        Err(e) => {
+            let msg = format!("Failed to get local binary version: {e}\n");
+            eprint!("{msg}");
+            CommandResult::error(msg, 1)
+        }
+    }
+}
+
+/// ローカルバイナリで現在の実行バイナリを置換する（`update --local`）。
+fn perform_local_update(binary_path: &Path) -> CommandResult {
+    let current = env!("CARGO_PKG_VERSION");
+    println!("Current version: v{current}");
+
+    if !binary_path.exists() {
+        let msg = format!(
+            "Local binary not found: {}\n\
+             Run `cargo build --release` to build.\n",
+            binary_path.display()
+        );
+        eprint!("{msg}");
+        return CommandResult::error(msg, 1);
+    }
+
+    // ローカルバイナリのバージョンを確認
+    let new_version = match get_local_binary_version(binary_path) {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("Failed to get local binary version: {e}\n");
+            eprint!("{msg}");
+            return CommandResult::error(msg, 1);
+        }
+    };
+
+    let new_clean = new_version.trim_start_matches('v');
+    println!("Local binary version: v{new_clean}");
+
+    if !is_newer_version(current, new_clean) {
+        let msg = format!(
+            "Local binary v{new_clean} is not newer than current v{current}. \
+             No update performed.\n"
+        );
+        print!("{msg}");
+        return CommandResult::success(msg);
+    }
+
+    // 現在の実行バイナリのパスを取得
+    let current_exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(e) => {
+            let msg = format!("Failed to get current exe path: {e}\n");
+            eprint!("{msg}");
+            return CommandResult::error(msg, 1);
+        }
+    };
+
+    // バイナリを置換（self_replace を使用）
+    println!("Replacing {} ...", current_exe.display());
+    if let Err(e) = replace_binary(binary_path, &current_exe) {
+        let msg = format!("Update failed: {e}\n");
+        eprint!("{msg}");
+        return CommandResult::error(msg, 1);
+    }
+
+    println!("Updated to v{new_clean}!");
+
+    // 兄弟プロセスにフラグファイルで通知
+    write_update_flag(new_clean);
+
+    // 自プロセスを再起動
+    println!("Restarting jarvish...");
+    CommandResult::restart()
+}
+
+/// ローカルバイナリで現在のバイナリを置換する。
+///
+/// 実行中のバイナリは直接上書きできないため、一時ファイル経由で置換する。
+fn replace_binary(source: &Path, dest: &Path) -> Result<(), String> {
+    // 一時ファイルにコピーしてからリネーム（アトミックな置換）
+    let dest_dir = dest.parent().unwrap_or(Path::new("."));
+    let tmp_path = dest_dir.join(".jarvish-update.tmp");
+
+    std::fs::copy(source, &tmp_path).map_err(|e| {
+        format!(
+            "Failed to copy {} to {}: {e}",
+            source.display(),
+            tmp_path.display()
+        )
+    })?;
+
+    // 実行パーミッションを設定
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&tmp_path, perms)
+            .map_err(|e| format!("Failed to set permissions: {e}"))?;
+    }
+
+    // リネームで置換（同一ファイルシステム上ならアトミック）
+    std::fs::rename(&tmp_path, dest).map_err(|e| {
+        format!(
+            "Failed to rename {} to {}: {e}",
+            tmp_path.display(),
+            dest.display()
+        )
+    })?;
+
+    Ok(())
 }
 
 /// フラグファイルのパス: `<data_dir>/update-ready`
@@ -411,5 +623,131 @@ mod tests {
         assert_eq!(content, "1.10.0");
 
         cleanup_flag_file();
+    }
+
+    // ── --local option ──
+
+    #[test]
+    fn local_option_parses() {
+        // --local オプションが clap でパースできることを確認
+        let result = execute(&["--help"]);
+        assert!(result.stdout.contains("--local"));
+    }
+
+    #[test]
+    fn resolve_local_binary_path_default() {
+        let path = resolve_local_binary_path(None);
+        assert_eq!(path, PathBuf::from("target/release/jarvish"));
+    }
+
+    #[test]
+    fn resolve_local_binary_path_custom() {
+        let path = resolve_local_binary_path(Some("/tmp/my-jarvish"));
+        assert_eq!(path, PathBuf::from("/tmp/my-jarvish"));
+    }
+
+    // ── parse_version_from_output ──
+
+    #[test]
+    fn parse_version_standard_format() {
+        let result = parse_version_from_output("jarvish 1.8.0\n");
+        assert_eq!(result, Some("1.8.0".to_string()));
+    }
+
+    #[test]
+    fn parse_version_with_v_prefix() {
+        let result = parse_version_from_output("jarvish v1.8.0\n");
+        assert_eq!(result, Some("1.8.0".to_string()));
+    }
+
+    #[test]
+    fn parse_version_bare_version() {
+        let result = parse_version_from_output("1.8.0\n");
+        assert_eq!(result, Some("1.8.0".to_string()));
+    }
+
+    #[test]
+    fn parse_version_empty_string() {
+        assert!(parse_version_from_output("").is_none());
+    }
+
+    #[test]
+    fn parse_version_invalid_output() {
+        assert!(parse_version_from_output("error: something went wrong").is_none());
+    }
+
+    #[test]
+    fn parse_version_with_extra_whitespace() {
+        let result = parse_version_from_output("  jarvish  1.8.0  \n");
+        assert_eq!(result, Some("1.8.0".to_string()));
+    }
+
+    // ── check_for_local_updates ──
+
+    #[test]
+    fn check_local_binary_not_found() {
+        let result = check_for_local_updates(Path::new("/nonexistent/jarvish"));
+        assert_ne!(result.exit_code, 0);
+        assert!(result.stderr.contains("not found"));
+    }
+
+    #[test]
+    fn perform_local_binary_not_found() {
+        let result = perform_local_update(Path::new("/nonexistent/jarvish"));
+        assert_ne!(result.exit_code, 0);
+        assert!(result.stderr.contains("not found"));
+    }
+
+    // ── replace_binary ──
+
+    #[test]
+    fn replace_binary_with_valid_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path().join("source");
+        let dest = tmp.path().join("dest");
+
+        std::fs::write(&source, b"new binary content").unwrap();
+        std::fs::write(&dest, b"old binary content").unwrap();
+
+        let result = replace_binary(&source, &dest);
+        assert!(result.is_ok());
+
+        let content = std::fs::read_to_string(&dest).unwrap();
+        assert_eq!(content, "new binary content");
+    }
+
+    #[test]
+    fn replace_binary_source_not_found() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dest = tmp.path().join("dest");
+        std::fs::write(&dest, b"old").unwrap();
+
+        let result = replace_binary(Path::new("/nonexistent/source"), &dest);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to copy"));
+    }
+
+    // ── get_local_binary_version ──
+
+    #[test]
+    fn get_local_binary_version_nonexistent() {
+        let result = get_local_binary_version(Path::new("/nonexistent/jarvish"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to execute"));
+    }
+
+    #[test]
+    fn get_local_binary_version_non_executable_file() {
+        // 非実行ファイルでのエラーをテスト
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let result = get_local_binary_version(tmp.path());
+        assert!(result.is_err());
+    }
+
+    // ── DEFAULT_LOCAL_BINARY ──
+
+    #[test]
+    fn default_local_binary_path_is_release() {
+        assert_eq!(DEFAULT_LOCAL_BINARY, "target/release/jarvish");
     }
 }
