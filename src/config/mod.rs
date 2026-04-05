@@ -28,6 +28,9 @@
 //!
 //! [completion]
 //! git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
+//!
+//! [startup]
+//! commands = ["echo 'Welcome to jarvish!'", "export JAVA_HOME=/usr/lib/jvm/default"]
 //! ```
 
 mod defaults;
@@ -52,6 +55,8 @@ pub struct JarvishConfig {
     pub prompt: PromptConfig,
     /// 補完設定
     pub completion: CompletionConfig,
+    /// 起動時に実行するコマンド
+    pub startup: StartupConfig,
 }
 
 /// AI 関連の設定
@@ -138,6 +143,14 @@ impl Default for CompletionConfig {
     }
 }
 
+/// 起動時コマンドの設定
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct StartupConfig {
+    /// シェル起動時に順次実行するコマンドのリスト
+    pub commands: Vec<String>,
+}
+
 impl JarvishConfig {
     /// 設定ファイルを読み込む。
     ///
@@ -166,6 +179,7 @@ impl JarvishConfig {
                         nerd_font = config.prompt.nerd_font,
                         starship = config.prompt.starship,
                         git_branch_commands = config.completion.git_branch_commands.len(),
+                        startup_commands = config.startup.commands.len(),
                         "Config loaded successfully"
                     );
                     config
@@ -415,5 +429,50 @@ git_branch_commands = []
             .completion
             .git_branch_commands
             .contains(&"fetch".to_string()));
+    }
+
+    // ── startup ──
+
+    #[test]
+    fn parse_startup_commands() {
+        let toml = r#"
+[startup]
+commands = ["echo hello", "cd /tmp"]
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(config.startup.commands.len(), 2);
+        assert_eq!(config.startup.commands[0], "echo hello");
+        assert_eq!(config.startup.commands[1], "cd /tmp");
+    }
+
+    #[test]
+    fn parse_startup_commands_empty() {
+        let toml = r#"
+[startup]
+commands = []
+"#;
+        let config = load_from_str(toml);
+        assert!(config.startup.commands.is_empty());
+    }
+
+    #[test]
+    fn parse_no_startup_section_uses_default() {
+        let config = load_from_str("");
+        assert!(config.startup.commands.is_empty());
+    }
+
+    #[test]
+    fn default_config_has_empty_startup_commands() {
+        let config = JarvishConfig::default();
+        assert!(config.startup.commands.is_empty());
+    }
+
+    #[test]
+    fn default_template_contains_startup_section() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        JarvishConfig::create_default_config(&path);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("[startup]"));
     }
 }

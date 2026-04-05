@@ -164,6 +164,12 @@ starship = false              # Set to true to use Starship prompt (requires: st
 
 [completion]
 git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
+
+[startup]
+commands = [                      # Commands to run on shell startup (skipped with -c option)
+    "echo 'Welcome to jarvish!'",
+    "export JAVA_HOME=/usr/lib/jvm/default",
+]
 ```
 
 > **Tip**: After changing settings, you can apply them without restarting using the `source` command:
