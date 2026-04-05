@@ -61,6 +61,8 @@ pub struct Shell {
     /// SIGUSR1 受信時に再起動をリクエストするフラグ。
     /// コマンド実行中・PTY 使用中は即座に再起動せず、次の REPL idle 時に遅延実行する。
     restart_requested: Arc<AtomicBool>,
+    /// 起動時に実行するコマンドのリスト（config.toml の `[startup]` セクション）
+    startup_commands: Vec<String>,
 }
 
 impl Shell {
@@ -148,6 +150,7 @@ impl Shell {
             logging_operational,
             git_branch_commands,
             restart_requested: Arc::new(AtomicBool::new(false)),
+            startup_commands: config.startup.commands,
         }
     }
 
@@ -265,7 +268,10 @@ impl Shell {
             *cmds = config.completion.git_branch_commands.clone();
         }
 
-        // サマリー出力（config.toml のセクション順: ai, alias, export, prompt, completion）
+        // [startup] を反映（再実行はしない、値の更新のみ）
+        self.startup_commands = config.startup.commands.clone();
+
+        // サマリー出力（config.toml のセクション順: ai, alias, export, prompt, completion, startup）
         let ignore_cmds_display = if config.ai.ignore_auto_investigation_cmds.is_empty() {
             "none".to_string()
         } else {
@@ -284,7 +290,8 @@ impl Shell {
              \x20 [alias]   {} {}\n\
              \x20 [export]  {} {}\n\
              \x20 [prompt]  nerd_font: {}, starship: {}\n\
-             \x20 [completion]  git_branch_commands: {} {}\n",
+             \x20 [completion]  git_branch_commands: {} {}\n\
+             \x20 [startup]  {} {}\n",
             path.display(),
             config.ai.model,
             config.ai.max_rounds,
@@ -309,6 +316,12 @@ impl Shell {
             config.prompt.starship,
             config.completion.git_branch_commands.len(),
             if config.completion.git_branch_commands.len() == 1 {
+                "command"
+            } else {
+                "commands"
+            },
+            config.startup.commands.len(),
+            if config.startup.commands.len() == 1 {
                 "command"
             } else {
                 "commands"
@@ -384,6 +397,35 @@ impl Shell {
         {
             println!("{notification}");
             println!();
+        }
+
+        // 起動時コマンドの実行（config.toml [startup] commands）
+        if !self.startup_commands.is_empty() {
+            info!(
+                count = self.startup_commands.len(),
+                "Executing startup commands"
+            );
+            let commands = self.startup_commands.clone();
+            for cmd in &commands {
+                info!(command = %cmd, "Running startup command");
+                if !self.handle_input(cmd).await {
+                    // exit 等でシェル終了が要求された場合
+                    info!("Startup command triggered shell exit");
+                    if let Some(ref bb) = self.black_box {
+                        bb.release_session();
+                    }
+                    let exit_code = self.last_exit_code.load(Ordering::Relaxed);
+                    return (
+                        if exit_code == EXIT_CODE_NONE {
+                            0
+                        } else {
+                            exit_code
+                        },
+                        LoopAction::Exit,
+                    );
+                }
+                self.prompt.refresh_git_status();
+            }
         }
 
         loop {

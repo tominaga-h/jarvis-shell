@@ -164,6 +164,12 @@ starship = false              # true にすると Starship プロンプトを使
 
 [completion]
 git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
+
+[startup]
+commands = [                      # シェル起動時に順次実行するコマンド（-c オプション実行時はスキップ）
+    "echo 'Welcome to jarvish!'",
+    "export JAVA_HOME=/usr/lib/jvm/default",
+]
 ```
 
 > **ヒント**: 設定を変更した後は、`source` コマンドで再起動せずに適用できます。
