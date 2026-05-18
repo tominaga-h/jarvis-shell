@@ -123,6 +123,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn stderr_capture() {
         let result = run_single_command(&simple("sh", &["-c", "echo err >&2"]));
         assert_eq!(result.stderr.trim(), "err");

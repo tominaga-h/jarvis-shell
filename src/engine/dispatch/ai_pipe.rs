@@ -40,28 +40,36 @@ pub fn try_execute_ai_pipe(input: &str) -> Option<AiPipeRequest> {
         return None;
     }
 
-    let tokens = shell_words::split(input).ok()?;
+    let tokens = expand::split_quoted(input).ok()?;
     if tokens.is_empty() {
         return None;
     }
 
     if tokens
         .iter()
-        .any(|t| matches!(t.as_str(), "&&" | "||" | ";"))
+        .any(|t| matches!(t.value.as_str(), "&&" | "||" | ";"))
     {
         return None;
     }
 
-    let expanded: Vec<String> = tokens
-        .into_iter()
-        .map(|t| {
-            if matches!(t.as_str(), "|" | ">" | ">>" | "<") {
-                t
-            } else {
-                expand::expand_token(&t)
+    let mut expanded: Vec<String> = Vec::with_capacity(tokens.len());
+    for tok in tokens {
+        if matches!(tok.value.as_str(), "|" | ">" | ">>" | "<") {
+            expanded.push(tok.value);
+            continue;
+        }
+        if tok.quoted {
+            expanded.push(tok.value);
+            continue;
+        }
+        match expand::expand_token_globs(&tok.value) {
+            Ok(parts) => expanded.extend(parts),
+            Err(_) => {
+                // AI ルーティング判定中の no-match は通常パスへフォールスルー
+                return None;
             }
-        })
-        .collect();
+        }
+    }
 
     // 1. `| ai "prompt"` パターン（フィルタモード）
     if let Some(req) = try_pipe_ai(&expanded) {
@@ -256,5 +264,61 @@ mod tests {
             .map(Into::into)
             .collect();
         assert!(try_extract_ai_redirect(&tokens).is_none());
+    }
+
+    // ── グロブ展開と AI パイプの相互作用 (#126) ──
+
+    use serial_test::serial;
+    use std::env;
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct CwdGuard {
+        original: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn new() -> Self {
+            Self {
+                original: env::current_dir().expect("failed to get current dir"),
+            }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = env::set_current_dir(&self.original);
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn ai_pipe_with_glob_expands_and_runs_source() {
+        // 実 FS にマッチするグロブを含む AI パイプは検出され、source 段は実行される
+        // （AI 段は API キー無しで失敗するが、source 実行は確認できる）
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = CwdGuard::new();
+        env::set_current_dir(dir.path()).unwrap();
+        fs::write(dir.path().join("a.txt"), "hello").unwrap();
+
+        let req = try_execute_ai_pipe("cat *.txt | ai \"要約して\"");
+        assert!(req.is_some(), "AI pipe should be detected and executed");
+        let req = req.unwrap();
+        assert_eq!(req.prompt, "要約して");
+        assert_eq!(req.stdin_text, "hello");
+        assert_eq!(req.mode, AiPipeMode::Filter);
+    }
+
+    #[test]
+    #[serial]
+    fn ai_pipe_with_glob_no_match_returns_none() {
+        // グロブが no-match の場合は AI パイプ検出は None を返し、
+        // 呼び出し側の通常パスで no-match エラーを処理させる
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = CwdGuard::new();
+        env::set_current_dir(dir.path()).unwrap();
+
+        let req = try_execute_ai_pipe("cat *.nonexistent_xyz | ai \"prompt\"");
+        assert!(req.is_none());
     }
 }
