@@ -1,5 +1,7 @@
 pub(crate) mod alias;
 pub(crate) mod cd;
+pub(crate) mod cdhist;
+pub(crate) mod cdj;
 mod cwd;
 pub(crate) mod dirstack;
 mod exit;
@@ -12,6 +14,7 @@ pub(crate) mod unalias;
 mod unset;
 pub(crate) mod update;
 pub(crate) mod which_type;
+mod wrapper;
 
 use super::CommandResult;
 
@@ -39,6 +42,8 @@ pub fn is_builtin(cmd: &str) -> bool {
         cmd,
         "alias"
             | "cd"
+            | "cdhist"
+            | "cdj"
             | "cwd"
             | "dirs"
             | "pwd"
@@ -67,6 +72,8 @@ pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
             &mut std::collections::HashMap::new(),
         )),
         "cd" => Some(cd::execute(args, &mut Vec::new())),
+        "cdhist" => Some(cdhist::execute(args)),
+        "cdj" => Some(cdj::execute_stub(args)),
         "cwd" | "pwd" => Some(cwd::execute(args)),
         "dirs" => Some(dirstack::execute_dirs(args, &mut Vec::new())),
         "exit" => Some(exit::execute(args)),
@@ -213,5 +220,37 @@ mod tests {
         assert!(dispatch_builtin("export", &[]).is_some());
         // history --help → 正常終了
         assert!(dispatch_builtin("history", &["--help"]).is_some());
+    }
+
+    // ── cdhist / cdj 登録テスト ──
+
+    #[test]
+    fn cdhist_and_cdj_are_registered() {
+        assert!(is_builtin("cdhist"));
+        assert!(is_builtin("cdj"));
+    }
+
+    #[test]
+    fn dispatch_cdhist_returns_some() {
+        // --help は確実に成功するため、それで Some が返ることを確認
+        let result = dispatch_builtin("cdhist", &["--help"]);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().exit_code, 0);
+    }
+
+    #[test]
+    fn dispatch_cdj_returns_interactive_required_stub() {
+        // dispatch 経由では cdj はスタブのエラーを返す
+        let result = dispatch_builtin("cdj", &[]).expect("cdj should be registered");
+        assert_ne!(result.exit_code, 0);
+        assert!(result.stderr.contains("requires interactive shell"));
+    }
+
+    #[test]
+    fn dispatch_cdj_help_still_works() {
+        // --help はスタブ前に clap で処理されるため成功する
+        let result = dispatch_builtin("cdj", &["--help"]).expect("cdj should be registered");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("cdj"));
     }
 }

@@ -1036,6 +1036,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
+
+[[package]]
 name = "h2"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1425,7 +1431,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jarvish"
-version = "1.8.3"
+version = "1.11.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1435,6 +1441,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "git2",
+ "glob",
  "indicatif 0.17.11",
  "libc",
  "nix",

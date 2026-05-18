@@ -71,6 +71,16 @@ Despite deep AI integration, Jarvish leverages Rust's strengths to deliver outst
 - **Fish-like Autocomplete**: Real-time syntax highlighting with powerful auto-completion for PATH binaries and file paths.
 - **Full PTY Support**: Interactive programs like `vim` and `top` work natively.
 - **Starship Integration**: Native support for [Starship](https://starship.rs/) prompt — use your existing Starship configuration as-is.
+- **Glob & Brace Expansion**: Bash/zsh-compatible filename expansion:
+  - Glob: `ls *.toml`, `cat Cargo.???`, `rm [Cc]argo.lock`
+  - Brace: `echo {a,b,c}`, `echo {1..5}`, `mkdir -p src/{api,cli}/v{1..3}`
+  - Combined: `cp *.{txt,md} backup/`
+  - `zsh`-compatible: errors on no-match (`jarvish: no matches found: <pattern>`)
+  - Quotes / escapes are honored: `'*'`, `"{a,b}"`, `\*` stay literal.
+- **`cdhist` / `cdj` directory jumping**: Recall and jump back to recently visited directories without leaving the shell:
+  - `cdhist [--limit N]` — print recently visited directories in LRU order (one per line, deduplicated, current cwd excluded)
+  - `cdj [pattern]` — fuzzy-pick a directory via `fzf` (requires `fzf` in `PATH`); `pattern` filters candidates by case-insensitive substring; a single match `cd`s immediately. The fzf preview pane shows `ls -Cp` of the highlighted directory (UNIX only).
+  - Source of truth is the existing `command_history.cwd` column — no schema migration
 
 ## 🚀 Install
 
@@ -164,6 +174,12 @@ starship = false              # Set to true to use Starship prompt (requires: st
 
 [completion]
 git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
+
+[startup]
+commands = [                      # Commands to run on shell startup (skipped with -c option)
+    "echo 'Welcome to jarvish!'",
+    "export JAVA_HOME=/usr/lib/jvm/default",
+]
 ```
 
 > **Tip**: After changing settings, you can apply them without restarting using the `source` command:

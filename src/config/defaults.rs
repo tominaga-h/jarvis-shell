@@ -39,6 +39,10 @@ impl super::JarvishConfig {
 
 [completion]
 # git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
+
+[startup]
+# シェル起動時に順次実行するコマンド（-c オプション実行時はスキップ）
+# commands = ["echo 'Welcome to jarvish!'", "export JAVA_HOME=/usr/lib/jvm/default"]
 "#;
 
         if let Some(parent) = path.parent() {

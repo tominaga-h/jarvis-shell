@@ -3,6 +3,29 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.11.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.11.0) - 2026-05-18
+
+### Added
+
+- `cdhist` / `cdj` ビルトインを追加 ([#127](https://github.com/tominaga-h/jarvis-shell/issues/127))
+  - `cdhist [--limit N]` — `command_history.cwd` を LRU 順で重複排除して 1 行 1 件出力。現在の cwd と存在しないパスは除外
+  - `cdj [pattern]` — 履歴ディレクトリから fzf で選んで cd。`pattern` は case-insensitive substring 絞り込み、単一マッチなら fzf を起動せず即 cd、キャンセル時は cwd 不変 (exit 130)
+  - ストレージはスキーマ追加なし、既存 `command_history` を読み取るのみ
+  - fzf 連携部分は zoxide の `src/util.rs::Fzf` / `src/cmd/query.rs::get_fzf` パターンを踏襲
+  - fzf プレビューウィンドウ対応 (UNIX のみ): 選択中ディレクトリの `ls -Cp` を下 30% に表示。macOS は色付き、Linux は `--group-directories-first` 付き
+
+## [v1.10.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.10.0) - 2026-05-18
+
+### Added
+
+- グロブ展開とブレース展開を追加 ([#126](https://github.com/tominaga-h/jarvis-shell/issues/126))
+  - グロブ: `*`, `?`, `[abc]`, `[a-z]`（`glob` クレート使用）
+  - ブレース: `{a,b,c}`, `{1..5}`, `{01..03}`（ゼロパディング保持）, `{5..1}` 降順, `{1..10..2}` ステップ, `{a..e}` 文字レンジ, ネスト, エスケープ
+  - 適用範囲: 外部コマンド + シェルビルトイン（`cd`, `source` 等）
+  - 展開順序: チルダ/環境変数 → ブレース → グロブ
+  - クォート尊重: `'*'`, `"{a,b}"`, `\*` は展開されずリテラル扱い
+  - no-match 時は zsh 互換でエラー終了（`jarvish: no matches found: <pattern>`, exit code 1）
+
 ## [v1.8.3](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.8.3) - 2026-04-03
 
 ### Fixed

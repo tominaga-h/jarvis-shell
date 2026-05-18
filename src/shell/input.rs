@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 
 use crate::cli::jarvis::{jarvis_ask_typo_correction, TypoAction};
-use crate::engine::builtins::{alias, cd, dirstack, source, unalias, which_type};
+use crate::engine::builtins::{alias, cd, cdj, dirstack, source, unalias, which_type};
 use crate::engine::classifier::{is_ai_goodbye_response, InputType};
 use crate::engine::dispatch::{AiPipeMode, AiPipeRequest};
 use crate::engine::expand;
@@ -207,12 +207,21 @@ impl Shell {
         let first_word = input.split_whitespace().next().unwrap_or("");
         if !matches!(
             first_word,
-            "alias" | "unalias" | "source" | "cd" | "pushd" | "popd" | "dirs" | "which" | "type"
+            "alias"
+                | "unalias"
+                | "source"
+                | "cd"
+                | "cdj"
+                | "pushd"
+                | "popd"
+                | "dirs"
+                | "which"
+                | "type"
         ) {
             return None;
         }
 
-        let tokens = match shell_words::split(input) {
+        let tokens = match expand::split_quoted(input) {
             Ok(t) => t,
             Err(e) => {
                 let msg = format!("jarvish: parse error: {e}\n");
@@ -228,15 +237,29 @@ impl Shell {
         // パイプ・リダイレクト・接続演算子を含む場合は通常パスに委ねる
         if tokens
             .iter()
-            .any(|t| matches!(t.as_str(), "|" | ">" | ">>" | "<" | "&&" | "||" | ";"))
+            .any(|t| matches!(t.value.as_str(), "|" | ">" | ">>" | "<" | "&&" | "||" | ";"))
         {
             return None;
         }
 
-        let expanded: Vec<String> = tokens
-            .into_iter()
-            .map(|t| expand::expand_token(&t))
-            .collect();
+        let mut expanded: Vec<String> = Vec::with_capacity(tokens.len());
+        for tok in tokens {
+            if tok.quoted {
+                expanded.push(tok.value);
+                continue;
+            }
+            match expand::expand_token_globs(&tok.value) {
+                Ok(parts) => expanded.extend(parts),
+                Err(expand::ExpandError::NoMatches(p)) => {
+                    let msg = format!("jarvish: no matches found: {p}\n");
+                    eprint!("{msg}");
+                    return Some(CommandResult::error(msg, 1));
+                }
+            }
+        }
+        if expanded.is_empty() {
+            return Some(CommandResult::success(String::new()));
+        }
         let args: Vec<&str> = expanded[1..].iter().map(|s| s.as_str()).collect();
 
         let result = match first_word {
@@ -251,6 +274,7 @@ impl Shell {
                 self.reload_config(&path)
             }
             "cd" => cd::execute(&args, &mut self.dir_stack),
+            "cdj" => cdj::execute(&args, &mut self.dir_stack),
             "pushd" => dirstack::execute_pushd(&args, &mut self.dir_stack),
             "popd" => dirstack::execute_popd(&args, &mut self.dir_stack),
             "dirs" => dirstack::execute_dirs(&args, &mut self.dir_stack),
