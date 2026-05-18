@@ -1,4 +1,5 @@
 pub mod blob;
+pub mod cd_history;
 mod context;
 pub mod history;
 mod record;
