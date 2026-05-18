@@ -3,6 +3,16 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [Unreleased]
+
+### Added
+
+- `cdhist` / `cdj` ビルトインを追加 ([#127](https://github.com/tominaga-h/jarvis-shell/issues/127))
+  - `cdhist [--limit N]` — `command_history.cwd` を LRU 順で重複排除して 1 行 1 件出力。現在の cwd と存在しないパスは除外
+  - `cdj [pattern]` — 履歴ディレクトリから fzf で選んで cd。`pattern` は case-insensitive substring 絞り込み、単一マッチなら fzf を起動せず即 cd、キャンセル時は cwd 不変 (exit 130)
+  - ストレージはスキーマ追加なし、既存 `command_history` を読み取るのみ
+  - fzf 連携部分は zoxide の `src/util.rs::Fzf` / `src/cmd/query.rs::get_fzf` パターンを踏襲
+
 ## [v1.10.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.10.0) - 2026-05-18
 
 ### Added
