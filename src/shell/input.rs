@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 
 use crate::cli::jarvis::{jarvis_ask_typo_correction, TypoAction};
-use crate::engine::builtins::{alias, cd, dirstack, source, unalias, which_type};
+use crate::engine::builtins::{alias, cd, cdj, dirstack, source, unalias, which_type};
 use crate::engine::classifier::{is_ai_goodbye_response, InputType};
 use crate::engine::dispatch::{AiPipeMode, AiPipeRequest};
 use crate::engine::expand;
@@ -207,7 +207,16 @@ impl Shell {
         let first_word = input.split_whitespace().next().unwrap_or("");
         if !matches!(
             first_word,
-            "alias" | "unalias" | "source" | "cd" | "pushd" | "popd" | "dirs" | "which" | "type"
+            "alias"
+                | "unalias"
+                | "source"
+                | "cd"
+                | "cdj"
+                | "pushd"
+                | "popd"
+                | "dirs"
+                | "which"
+                | "type"
         ) {
             return None;
         }
@@ -265,6 +274,7 @@ impl Shell {
                 self.reload_config(&path)
             }
             "cd" => cd::execute(&args, &mut self.dir_stack),
+            "cdj" => cdj::execute(&args, &mut self.dir_stack),
             "pushd" => dirstack::execute_pushd(&args, &mut self.dir_stack),
             "popd" => dirstack::execute_popd(&args, &mut self.dir_stack),
             "dirs" => dirstack::execute_dirs(&args, &mut self.dir_stack),
