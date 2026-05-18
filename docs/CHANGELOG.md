@@ -3,6 +3,18 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.10.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.10.0) - 2026-05-18
+
+### Added
+
+- グロブ展開とブレース展開を追加 ([#126](https://github.com/tominaga-h/jarvis-shell/issues/126))
+  - グロブ: `*`, `?`, `[abc]`, `[a-z]`（`glob` クレート使用）
+  - ブレース: `{a,b,c}`, `{1..5}`, `{01..03}`（ゼロパディング保持）, `{5..1}` 降順, `{1..10..2}` ステップ, `{a..e}` 文字レンジ, ネスト, エスケープ
+  - 適用範囲: 外部コマンド + シェルビルトイン（`cd`, `source` 等）
+  - 展開順序: チルダ/環境変数 → ブレース → グロブ
+  - クォート尊重: `'*'`, `"{a,b}"`, `\*` は展開されずリテラル扱い
+  - no-match 時は zsh 互換でエラー終了（`jarvish: no matches found: <pattern>`, exit code 1）
+
 ## [v1.8.3](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.8.3) - 2026-04-03
 
 ### Fixed

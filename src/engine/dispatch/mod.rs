@@ -34,7 +34,7 @@ pub fn try_builtin(input: &str) -> Option<CommandResult> {
         return None;
     }
 
-    let tokens = match shell_words::split(input) {
+    let tokens = match expand::split_quoted(input) {
         Ok(tokens) => tokens,
         Err(e) => {
             let msg = format!("jarvish: parse error: {e}\n");
@@ -49,7 +49,7 @@ pub fn try_builtin(input: &str) -> Option<CommandResult> {
 
     if tokens
         .iter()
-        .any(|t| matches!(t.as_str(), "|" | ">" | ">>" | "<" | "&&" | "||" | ";"))
+        .any(|t| matches!(t.value.as_str(), "|" | ">" | ">>" | "<" | "&&" | "||" | ";"))
     {
         debug!(
             command = %first_word,
@@ -58,10 +58,27 @@ pub fn try_builtin(input: &str) -> Option<CommandResult> {
         return None;
     }
 
-    let expanded: Vec<String> = tokens
-        .into_iter()
-        .map(|t| expand::expand_token(&t))
-        .collect();
+    let mut expanded: Vec<String> = Vec::with_capacity(tokens.len());
+    for tok in tokens {
+        if tok.quoted {
+            // クォート済みトークンはグロブ/ブレース展開の対象外。
+            // チルダ/env も bash 互換でシングル/ダブルクォート内では展開されないため
+            // ここでは値をそのまま使用する。
+            expanded.push(tok.value);
+            continue;
+        }
+        match expand::expand_token_globs(&tok.value) {
+            Ok(parts) => expanded.extend(parts),
+            Err(expand::ExpandError::NoMatches(p)) => {
+                let msg = format!("jarvish: no matches found: {p}\n");
+                eprint!("{msg}");
+                return Some(CommandResult::error(msg, 1));
+            }
+        }
+    }
+    if expanded.is_empty() {
+        return Some(CommandResult::success(String::new()));
+    }
     let cmd = &expanded[0];
     let args: Vec<&str> = expanded[1..].iter().map(|s| s.as_str()).collect();
 
@@ -85,7 +102,7 @@ pub fn execute(input: &str) -> CommandResult {
         return CommandResult::success(String::new());
     }
 
-    let tokens = match shell_words::split(input) {
+    let tokens = match expand::split_quoted(input) {
         Ok(tokens) => tokens,
         Err(e) => {
             let msg = format!("jarvish: parse error: {e}\n");
@@ -98,16 +115,28 @@ pub fn execute(input: &str) -> CommandResult {
         return CommandResult::success(String::new());
     }
 
-    let expanded: Vec<String> = tokens
-        .into_iter()
-        .map(|t| {
-            if matches!(t.as_str(), "|" | ">" | ">>" | "<" | "&&" | "||" | ";") {
-                t
-            } else {
-                expand::expand_token(&t)
+    let mut expanded: Vec<String> = Vec::with_capacity(tokens.len());
+    for tok in tokens {
+        if matches!(
+            tok.value.as_str(),
+            "|" | ">" | ">>" | "<" | "&&" | "||" | ";"
+        ) {
+            expanded.push(tok.value);
+            continue;
+        }
+        if tok.quoted {
+            expanded.push(tok.value);
+            continue;
+        }
+        match expand::expand_token_globs(&tok.value) {
+            Ok(parts) => expanded.extend(parts),
+            Err(expand::ExpandError::NoMatches(p)) => {
+                let msg = format!("jarvish: no matches found: {p}\n");
+                eprint!("{msg}");
+                return CommandResult::error(msg, 1);
             }
-        })
-        .collect();
+        }
+    }
 
     let command_list = match parser::parse_command_list(expanded) {
         Ok(cl) => cl,
@@ -448,5 +477,132 @@ mod tests {
         let result = execute("cd /tmp && echo done");
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("done"));
+    }
+
+    // ── グロブ / ブレース展開 E2E テスト (#126) ──
+
+    #[test]
+    fn execute_brace_expansion_via_echo() {
+        let result = execute("echo {a,b,c}");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "a b c");
+    }
+
+    #[test]
+    fn execute_brace_numeric_range_via_echo() {
+        let result = execute("echo {1..3}");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "1 2 3");
+    }
+
+    #[test]
+    #[serial]
+    fn execute_glob_star_via_ls() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = CwdGuard::new();
+        env::set_current_dir(dir.path()).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "").unwrap();
+        std::fs::write(dir.path().join("c.md"), "").unwrap();
+
+        let result = execute("ls *.txt");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("a.txt"));
+        assert!(result.stdout.contains("b.txt"));
+        assert!(!result.stdout.contains("c.md"));
+    }
+
+    #[test]
+    #[serial]
+    fn execute_glob_brace_combined() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = CwdGuard::new();
+        env::set_current_dir(dir.path()).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "").unwrap();
+        std::fs::write(dir.path().join("a.md"), "").unwrap();
+        std::fs::write(dir.path().join("b.log"), "").unwrap();
+
+        let result = execute("ls *.{txt,md}");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("a.txt"));
+        assert!(result.stdout.contains("a.md"));
+        assert!(!result.stdout.contains("b.log"));
+    }
+
+    #[test]
+    #[serial]
+    fn execute_quoted_glob_not_expanded() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = CwdGuard::new();
+        env::set_current_dir(dir.path()).unwrap();
+        let result = execute("echo '*'");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "*");
+    }
+
+    #[test]
+    #[serial]
+    fn execute_quoted_brace_not_expanded() {
+        let _guard = CwdGuard::new();
+        let result = execute("echo \"{a,b}\"");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "{a,b}");
+    }
+
+    #[test]
+    #[serial]
+    fn execute_glob_no_match_errors_and_blocks_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = CwdGuard::new();
+        env::set_current_dir(dir.path()).unwrap();
+
+        let result = execute("ls *.nonexistent_xyz && echo OK");
+        assert_ne!(result.exit_code, 0);
+        assert!(!result.stdout.contains("OK"));
+        // stderr もしくは stdout に no matches found が含まれる
+        let combined = format!("{}{}", result.stdout, result.stderr);
+        assert!(
+            combined.contains("no matches found") || combined.contains("nonexistent_xyz"),
+            "expected error output to mention no matches, got stdout={:?} stderr={:?}",
+            result.stdout,
+            result.stderr
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn execute_glob_with_pipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = CwdGuard::new();
+        env::set_current_dir(dir.path()).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "").unwrap();
+
+        let result = execute("ls *.txt | head -n 1");
+        assert_eq!(result.exit_code, 0);
+        let lines: Vec<&str> = result.stdout.lines().collect();
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn execute_glob_with_redirect() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = CwdGuard::new();
+        env::set_current_dir(dir.path()).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        let out_path = dir.path().join("out.dat");
+
+        let cmd = format!("cat *.txt > {}", out_path.display());
+        let result = execute(&cmd);
+        assert_eq!(result.exit_code, 0);
+        let contents = std::fs::read_to_string(&out_path).unwrap();
+        assert_eq!(contents, "hello");
+    }
+
+    #[test]
+    fn try_builtin_brace_expansion_for_echo_returns_none() {
+        // echo はビルトインではない（externalにフォールスルー）
+        assert!(try_builtin("echo {a,b}").is_none());
     }
 }

@@ -71,6 +71,12 @@ Despite deep AI integration, Jarvish leverages Rust's strengths to deliver outst
 - **Fish-like Autocomplete**: Real-time syntax highlighting with powerful auto-completion for PATH binaries and file paths.
 - **Full PTY Support**: Interactive programs like `vim` and `top` work natively.
 - **Starship Integration**: Native support for [Starship](https://starship.rs/) prompt — use your existing Starship configuration as-is.
+- **Glob & Brace Expansion**: Bash/zsh-compatible filename expansion:
+  - Glob: `ls *.toml`, `cat Cargo.???`, `rm [Cc]argo.lock`
+  - Brace: `echo {a,b,c}`, `echo {1..5}`, `mkdir -p src/{api,cli}/v{1..3}`
+  - Combined: `cp *.{txt,md} backup/`
+  - `zsh`-compatible: errors on no-match (`jarvish: no matches found: <pattern>`)
+  - Quotes / escapes are honored: `'*'`, `"{a,b}"`, `\*` stay literal.
 
 ## 🚀 Install
 

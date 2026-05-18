@@ -98,3 +98,19 @@ Debug mode: `jarvish --debug` writes logs to `./var/logs/`.
 ### Miscellaneous
 
 - Markdown filenames under the `docs/` folder must always be ALL UPPERCASE (e.g. `OVERVIEW.md`, `CHANGELOG.md`).
+
+<!-- dev-cycle:toolchain start -->
+
+## dev-cycle ツールチェーン定義（自動生成）
+
+このセクションは `/task-dev-cycle` スキルにより自動管理されている。手動編集は可能だが、フォーマット（マーカーとキー名）は変更しないこと。再検出させたい場合はブロックごと削除する。
+
+- `<TEST_CMD>`: `cargo test --all-targets`
+- `<BUILD_CMD>`: `cargo build`
+- `<LINT_CMD>`: `cargo fmt --all && cargo clippy --all-targets -- -D warnings`
+- `<CHECK_CMD>`: `make check`
+- `<VERSION_FILE>`: `Cargo.toml`
+- `<VERSION_BUMP_POLICY>`: `SemVer 2.0.0`
+- `<SEMVER_ENABLED>`: `true`
+- 検出日: `2026-05-18`
+<!-- dev-cycle:toolchain end -->
