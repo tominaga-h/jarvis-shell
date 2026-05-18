@@ -6,6 +6,8 @@ use crate::engine::CommandResult;
 const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("alias", "Set or display aliases"),
     ("cd", "Change the current directory"),
+    ("cdhist", "Print recently visited directories (LRU)"),
+    ("cdj", "Jump to a directory from cd history via fzf"),
     ("cwd", "Print the current working directory"),
     ("dirs", "Display directory stack"),
     ("exit", "Exit the shell"),
