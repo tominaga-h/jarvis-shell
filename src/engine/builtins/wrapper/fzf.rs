@@ -39,6 +39,29 @@ impl Fzf {
         Self(cmd)
     }
 
+    /// プレビューウィンドウを有効化する（UNIX のみ）。
+    ///
+    /// zoxide `Fzf::enable_preview()` を踏襲。ただし jarvish の stdin 形式が
+    /// `<path>\n`（score なし）であるため、プレースホルダは `{2..}` ではなく
+    /// `{}` を使う。Windows では何もせず self を返す。
+    pub(crate) fn enable_preview(mut self) -> Self {
+        if !cfg!(unix) {
+            return self;
+        }
+        let preview_cmd = if cfg!(target_os = "linux") {
+            "command -p ls -Cp --color=always --group-directories-first {}"
+        } else {
+            "command -p ls -Cp {}"
+        };
+        self.0
+            .args([
+                format!("--preview={preview_cmd}"),
+                "--preview-window=down,30%,sharp".to_string(),
+            ])
+            .envs([("CLICOLOR", "1"), ("CLICOLOR_FORCE", "1"), ("SHELL", "sh")]);
+        self
+    }
+
     /// fzf 子プロセスを起動する。
     ///
     /// fzf がインストールされていない場合は `ERR_FZF_NOT_FOUND` を返す。

@@ -100,7 +100,7 @@ fn pick_and_cd(filtered: Vec<String>, dir_stack: &mut Vec<PathBuf>) -> CommandRe
             cd::execute(&[target.as_str()], dir_stack)
         }
         _ => {
-            let fzf = Fzf::new();
+            let fzf = Fzf::new().enable_preview();
             let child = match fzf.spawn() {
                 Ok(c) => c,
                 Err(e) => {
