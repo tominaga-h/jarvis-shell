@@ -3,7 +3,7 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
-## [Unreleased]
+## [v1.10.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.10.0) - 2026-05-18
 
 ### Added
 
