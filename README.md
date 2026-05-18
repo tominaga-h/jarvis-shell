@@ -79,7 +79,7 @@ Despite deep AI integration, Jarvish leverages Rust's strengths to deliver outst
   - Quotes / escapes are honored: `'*'`, `"{a,b}"`, `\*` stay literal.
 - **`cdhist` / `cdj` directory jumping**: Recall and jump back to recently visited directories without leaving the shell:
   - `cdhist [--limit N]` — print recently visited directories in LRU order (one per line, deduplicated, current cwd excluded)
-  - `cdj [pattern]` — fuzzy-pick a directory via `fzf` (requires `fzf` in `PATH`); `pattern` filters candidates by case-insensitive substring; a single match `cd`s immediately
+  - `cdj [pattern]` — fuzzy-pick a directory via `fzf` (requires `fzf` in `PATH`); `pattern` filters candidates by case-insensitive substring; a single match `cd`s immediately. The fzf preview pane shows `ls -Cp` of the highlighted directory (UNIX only).
   - Source of truth is the existing `command_history.cwd` column — no schema migration
 
 ## 🚀 Install

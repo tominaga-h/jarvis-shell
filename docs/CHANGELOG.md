@@ -12,6 +12,7 @@
   - `cdj [pattern]` — 履歴ディレクトリから fzf で選んで cd。`pattern` は case-insensitive substring 絞り込み、単一マッチなら fzf を起動せず即 cd、キャンセル時は cwd 不変 (exit 130)
   - ストレージはスキーマ追加なし、既存 `command_history` を読み取るのみ
   - fzf 連携部分は zoxide の `src/util.rs::Fzf` / `src/cmd/query.rs::get_fzf` パターンを踏襲
+  - fzf プレビューウィンドウ対応 (UNIX のみ): 選択中ディレクトリの `ls -Cp` を下 30% に表示。macOS は色付き、Linux は `--group-directories-first` 付き
 
 ## [v1.10.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.10.0) - 2026-05-18
 
