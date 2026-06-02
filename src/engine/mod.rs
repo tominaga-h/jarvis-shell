@@ -4,6 +4,7 @@ pub mod dispatch;
 pub mod exec;
 pub mod expand;
 mod io;
+mod job_control;
 pub mod parser;
 mod pty;
 mod redirect;
