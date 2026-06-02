@@ -3,12 +3,14 @@
 //! リダイレクト対応、および PTY セッションのフォールバック先。
 //! 旧来の PTY + tee キャプチャ方式で stdin は inherit する。
 
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::thread;
 
 use tracing::debug;
 
 use crate::engine::io::tee_to_terminal;
+use crate::engine::job_control::{job_control_enabled, pre_exec_setpgid, TerminalForegroundGuard};
 use crate::engine::parser::{Redirect, SimpleCommand};
 use crate::engine::pty::create_capture_pair;
 use crate::engine::redirect::{find_stdin_redirect, find_stdout_redirect};
@@ -71,6 +73,10 @@ pub(super) fn run_single_command_legacy(simple: &SimpleCommand) -> CommandResult
         stdout_writer
     };
 
+    // ジョブ制御: 子を独立プロセスグループに分離し、Ctrl+C が jarvish 本体に
+    // 届かないようにする。テストビルド / 非 tty では無効化される。
+    let enable_job_control = job_control_enabled();
+
     let mut child = {
         let mut command = Command::new(cmd);
         command
@@ -79,10 +85,26 @@ pub(super) fn run_single_command_legacy(simple: &SimpleCommand) -> CommandResult
             .stdout(final_stdout)
             .stderr(stderr_writer);
 
+        if enable_job_control {
+            // pgid == 0: 子自身の pid を pgid とする新規プロセスグループを作る。
+            unsafe {
+                command.pre_exec(|| pre_exec_setpgid(0));
+            }
+        }
+
         match command.spawn() {
             Ok(child) => child,
             Err(e) => return super::spawn_error(cmd, e),
         }
+    };
+
+    // 端末フォアグラウンドを子プロセスグループへ委譲する（RAII で確実に回収）。
+    // pre_exec 内 setpgid とのレースを避けるため親側でも子の pid を pgid として
+    // tcsetpgrp する（POSIX 推奨の両側 setpgid パターン）。
+    let _fg_guard = if enable_job_control {
+        TerminalForegroundGuard::new(child.id() as libc::pid_t)
+    } else {
+        None
     };
 
     let stdout_handle = thread::spawn(move || tee_to_terminal(stdout_reader, false));

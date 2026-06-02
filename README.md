@@ -1,7 +1,7 @@
 # 🤵 Jarvish — The AI-Native Shell
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-[![version](https://img.shields.io/badge/version-1.11.0-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.11.0)
+[![version](https://img.shields.io/badge/version-1.12.0-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.12.0)
 
 > 🌐 [日本語版 README はこちら](docs/README_JA.md)
 
@@ -70,6 +70,7 @@ Despite deep AI integration, Jarvish leverages Rust's strengths to deliver outst
 - **Async Background Prompt**: Git status scanning runs in a separate thread (using the Stale-While-Revalidate pattern), achieving **zero UI jitter** regardless of repository size.
 - **Fish-like Autocomplete**: Real-time syntax highlighting with powerful auto-completion for PATH binaries and file paths.
 - **Full PTY Support**: Interactive programs like `vim` and `top` work natively.
+- **Job-control Ctrl+C**: Pressing `Ctrl+C` while a command runs interrupts only that command — the Jarvish shell itself keeps running. External commands are spawned into their own process group and given the terminal foreground, so the terminal-generated `SIGINT` reaches the child group only.
 - **Starship Integration**: Native support for [Starship](https://starship.rs/) prompt — use your existing Starship configuration as-is.
 - **Glob & Brace Expansion**: Bash/zsh-compatible filename expansion:
   - Glob: `ls *.toml`, `cat Cargo.???`, `rm [Cc]argo.lock`

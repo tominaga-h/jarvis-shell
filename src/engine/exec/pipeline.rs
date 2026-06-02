@@ -2,12 +2,16 @@
 //!
 //! 複数コマンドをパイプで接続し、全ステージの stdout/stderr を tee でキャプチャする。
 
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::thread;
 
 use tracing::debug;
 
 use crate::engine::io::tee_to_terminal;
+use crate::engine::job_control::{
+    job_control_enabled, pipeline_pgid, pre_exec_setpgid, TerminalForegroundGuard,
+};
 use crate::engine::parser::{Redirect, SimpleCommand};
 use crate::engine::pty::create_capture_pair;
 use crate::engine::redirect::{find_stdin_redirect, find_stdout_redirect};
@@ -19,6 +23,15 @@ pub(super) fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
     let n = commands.len();
     let mut children = Vec::new();
     let mut prev_stdout: Option<os_pipe::PipeReader> = None;
+
+    // ジョブ制御: パイプライン全段を 1 つのプロセスグループにまとめ、
+    // そのグループに端末フォアグラウンドを委譲する。先頭プロセスの pid を
+    // ジョブ pgid とし、後続段は同じ pgid に join する。
+    // テストビルド / 非 tty では無効化される。
+    let enable_job_control = job_control_enabled();
+    // 先頭プロセス spawn 後に確定するジョブ pgid。確定するまで端末は委譲しない。
+    let mut job_pgid: Option<libc::pid_t> = None;
+    let mut fg_guard: Option<TerminalForegroundGuard> = None;
 
     // 中間ステージの stderr を共有パイプでキャプチャする。
     // Option でラップし、is_last ブロックで take() → drop して EOF を伝播させる。
@@ -107,6 +120,18 @@ pub(super) fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
                     .stdout(final_stdout)
                     .stderr(stderr_writer);
 
+                if enable_job_control {
+                    // この関数は n>=2 のパイプラインでのみ呼ばれる
+                    // （n==1 は run_pipeline 側で別経路へ分岐）。
+                    // 先頭段は job_pgid 未設定 → pgid=0 で子自身を先頭とする
+                    // 新規グループを作る。後続段は先頭で確定済みの job_pgid に
+                    // join する。
+                    let pgid = job_pgid.unwrap_or(0);
+                    unsafe {
+                        command.pre_exec(move || pre_exec_setpgid(pgid));
+                    }
+                }
+
                 match command.spawn() {
                     Ok(child) => child,
                     Err(e) => {
@@ -117,6 +142,16 @@ pub(super) fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
                     }
                 }
             };
+
+            // 最終段。job_pgid 未確定（＝先頭段が即終了して pgid を確定
+            // できなかった等）ならこの子の pid をジョブ pgid とし、端末
+            // フォアグラウンドを委譲する。通常は先頭段で確定済みのはず。
+            if enable_job_control && fg_guard.is_none() {
+                let pgid = job_pgid.unwrap_or_else(|| pipeline_pgid(child.id() as libc::pid_t));
+                fg_guard = TerminalForegroundGuard::new(pgid);
+            }
+            // RAII ガードは child.wait() 完了後にドロップさせる。
+            let _fg_guard = fg_guard;
 
             let stdout_handle = thread::spawn(move || tee_to_terminal(stdout_reader, false));
             let stderr_handle = thread::spawn(move || tee_to_terminal(stderr_reader, true));
@@ -184,6 +219,15 @@ pub(super) fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
                 .stdout(pipe_write)
                 .stderr(mid_stderr);
 
+            if enable_job_control {
+                // 先頭段（job_pgid 未確定）は pgid=0 で新規グループ。
+                // 後続段は確定済み job_pgid に join する。
+                let pgid = job_pgid.unwrap_or(0);
+                unsafe {
+                    command.pre_exec(move || pre_exec_setpgid(pgid));
+                }
+            }
+
             match command.spawn() {
                 Ok(child) => child,
                 Err(e) => {
@@ -194,6 +238,14 @@ pub(super) fn run_piped_commands(commands: &[SimpleCommand]) -> CommandResult {
                 }
             }
         };
+
+        // 先頭段でジョブ pgid を確定し、端末フォアグラウンドを委譲する。
+        if enable_job_control && job_pgid.is_none() {
+            let pgid = pipeline_pgid(child.id() as libc::pid_t);
+            job_pgid = Some(pgid);
+            fg_guard = TerminalForegroundGuard::new(pgid);
+        }
+
         children.push(child);
         prev_stdout = Some(pipe_read);
     }

@@ -3,6 +3,16 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.12.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.12.0) - 2026-06-02
+
+### Fixed
+
+- コマンド実行中の `Ctrl+C` で jarvish のプロセスそのものが終了してしまう不具合を修正 ([#189](https://github.com/tominaga-h/jarvis-shell/issues/189))
+  - ジョブ制御を導入し、外部コマンドを `setpgid` で独立したプロセスグループへ分離。実行中は `tcsetpgrp` で端末の前面プロセスグループを子へ委譲し、終了後に jarvish へ回収する
+  - これにより `Ctrl+C` は実行中の子プロセスグループにのみ配送され、コマンドだけが中断してプロンプトへ戻る（シェルは継続）
+  - `sleep 100`（PTY 経路）に加え、リダイレクト付き・パイプライン・AI パイプ前段（レガシー/captured 経路）でもシェルが落ちなくなった
+  - プロンプト入力中の `Ctrl+C`（reedline）および AI 応答ストリーム中の `Ctrl+C` の挙動は従来どおり維持
+
 ## [v1.11.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.11.0) - 2026-05-18
 
 ### Added
