@@ -3,10 +3,14 @@
 //! stdout をターミナルに表示せず、メモリ上にキャプチャして返す。
 //! AI パイプ (`cmd | ai "..."`) の手前パイプライン実行に使用する。
 
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use tracing::debug;
 
+use crate::engine::job_control::{
+    job_control_enabled, pipeline_pgid, pre_exec_setpgid, TerminalForegroundGuard,
+};
 use crate::engine::parser::{Pipeline, SimpleCommand};
 use crate::engine::redirect::find_stdin_redirect;
 use crate::engine::{CommandResult, LoopAction};
@@ -44,6 +48,8 @@ fn run_single_command_captured(simple: &SimpleCommand) -> CommandResult {
         Err(e) => return e,
     };
 
+    let enable_job_control = job_control_enabled();
+
     let mut command = Command::new(cmd);
     command
         .args(&args)
@@ -51,30 +57,43 @@ fn run_single_command_captured(simple: &SimpleCommand) -> CommandResult {
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
+    if enable_job_control {
+        unsafe {
+            command.pre_exec(|| pre_exec_setpgid(0));
+        }
+    }
+
     match command.spawn() {
-        Ok(child) => match child.wait_with_output() {
-            Ok(output) => {
-                let exit_code = output.status.code().unwrap_or(1);
-                debug!(
-                    command = %cmd,
-                    exit_code = exit_code,
-                    stdout_size = output.stdout.len(),
-                    "External command completed (captured mode)"
-                );
-                CommandResult {
-                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                    stderr: String::new(),
-                    exit_code,
-                    action: LoopAction::Continue,
-                    used_alt_screen: false,
+        Ok(child) => {
+            let _fg_guard = if enable_job_control {
+                TerminalForegroundGuard::new(child.id() as libc::pid_t)
+            } else {
+                None
+            };
+            match child.wait_with_output() {
+                Ok(output) => {
+                    let exit_code = output.status.code().unwrap_or(1);
+                    debug!(
+                        command = %cmd,
+                        exit_code = exit_code,
+                        stdout_size = output.stdout.len(),
+                        "External command completed (captured mode)"
+                    );
+                    CommandResult {
+                        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                        stderr: String::new(),
+                        exit_code,
+                        action: LoopAction::Continue,
+                        used_alt_screen: false,
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("jarvish: wait error: {e}\n");
+                    eprint!("{msg}");
+                    CommandResult::error(msg, 1)
                 }
             }
-            Err(e) => {
-                let msg = format!("jarvish: wait error: {e}\n");
-                eprint!("{msg}");
-                CommandResult::error(msg, 1)
-            }
-        },
+        }
         Err(e) => super::spawn_error(cmd, e),
     }
 }
@@ -84,6 +103,12 @@ fn run_piped_commands_captured(commands: &[SimpleCommand]) -> CommandResult {
     let n = commands.len();
     let mut children: Vec<std::process::Child> = Vec::new();
     let mut prev_stdout: Option<std::process::ChildStdout> = None;
+
+    // ジョブ制御: 全段を 1 つのプロセスグループにまとめる。先頭プロセスの
+    // pid をジョブ pgid とし、後続段は同じ pgid に join する。
+    let enable_job_control = job_control_enabled();
+    let mut job_pgid: Option<libc::pid_t> = None;
+    let mut fg_guard: Option<TerminalForegroundGuard> = None;
 
     for (i, simple) in commands.iter().enumerate() {
         let is_last = i == n - 1;
@@ -112,9 +137,23 @@ fn run_piped_commands_captured(commands: &[SimpleCommand]) -> CommandResult {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
 
+        if enable_job_control {
+            let pgid = job_pgid.unwrap_or(0);
+            unsafe {
+                command.pre_exec(move || pre_exec_setpgid(pgid));
+            }
+        }
+
         match command.spawn() {
             Ok(mut child) => {
+                if enable_job_control && job_pgid.is_none() {
+                    let pgid = pipeline_pgid(child.id() as libc::pid_t);
+                    job_pgid = Some(pgid);
+                    fg_guard = TerminalForegroundGuard::new(pgid);
+                }
                 if is_last {
+                    // 端末フォアグラウンドガードは wait 完了後にドロップさせる。
+                    let _fg_guard = fg_guard.take();
                     match child.wait_with_output() {
                         Ok(output) => {
                             for mut c in children {
