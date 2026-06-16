@@ -58,14 +58,21 @@ pub fn try_execute_ai_pipe(input: &str) -> Option<AiPipeRequest> {
             expanded.push(tok.value);
             continue;
         }
-        if tok.quoted {
+        if tok.quoted && !tok.has_subst {
             expanded.push(tok.value);
             continue;
         }
-        match expand::expand_token_globs(&tok.value) {
+        let expanded_result = if tok.quoted && tok.has_subst {
+            expand::expand_token_subst_only(&tok.value, tok.subst_quoting)
+        } else if tok.has_subst {
+            expand::expand_token_globs_with_quoting(&tok.value, tok.subst_quoting)
+        } else {
+            expand::expand_token_globs(&tok.value)
+        };
+        match expanded_result {
             Ok(parts) => expanded.extend(parts),
             Err(_) => {
-                // AI ルーティング判定中の no-match は通常パスへフォールスルー
+                // AI ルーティング判定中の no-match / 置換失敗は通常パスへフォールスルー
                 return None;
             }
         }
