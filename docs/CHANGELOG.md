@@ -3,6 +3,17 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.13.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.13.0) - 2026-06-16
+
+### Added
+
+- プロンプト内のコマンド置換 `$(...)` および backtick `` `...` `` に対応 ([#266](https://github.com/tominaga-h/jarvis-shell/issues/266))
+  - コマンドの出力を別のコマンドの引数に展開（`echo $(echo hello)` → `hello`）。ネスト（`$(echo $(echo x))`）と単語途中への埋め込み（`prefix-$(echo mid)-suffix`）に対応
+  - クォート無しの結果は空白で単語分割（連続空白は畳む）、ダブルクォート内は分割せず内部空白を保持、シングルクォート内はリテラル扱い
+  - 置換結果の末尾改行はすべて除去。置換内コマンドの失敗（起動失敗・非ゼロ終了）は外側コマンドを中断し終了コード 1 を返す
+  - ネストは深さ 32 までに制限（暴走防止）
+  - `src/engine/expand/command_subst.rs` を新設し、トークナイザ（`split_quoted`）が `$(...)` / backtick span をアトミックに取り込むよう拡張。展開順序は「コマンド置換 → チルダ/環境変数 → ブレース → グロブ」
+
 ## [v1.12.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.12.0) - 2026-06-02
 
 ### Fixed
