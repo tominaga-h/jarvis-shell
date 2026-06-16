@@ -60,17 +60,30 @@ pub fn try_builtin(input: &str) -> Option<CommandResult> {
 
     let mut expanded: Vec<String> = Vec::with_capacity(tokens.len());
     for tok in tokens {
-        if tok.quoted {
-            // クォート済みトークンはグロブ/ブレース展開の対象外。
+        if tok.quoted && !tok.has_subst {
+            // クォート済みトークン（コマンド置換を含まない）はグロブ/ブレース展開の対象外。
             // チルダ/env も bash 互換でシングル/ダブルクォート内では展開されないため
             // ここでは値をそのまま使用する。
             expanded.push(tok.value);
             continue;
         }
-        match expand::expand_token_globs(&tok.value) {
+        let expanded_result = if tok.quoted && tok.has_subst {
+            // クォート内の置換: 置換のみ行い glob/brace は適用しない（bash 準拠）。
+            expand::expand_token_subst_only(&tok.value, tok.subst_quoting)
+        } else if tok.has_subst {
+            expand::expand_token_globs_with_quoting(&tok.value, tok.subst_quoting)
+        } else {
+            expand::expand_token_globs(&tok.value)
+        };
+        match expanded_result {
             Ok(parts) => expanded.extend(parts),
             Err(expand::ExpandError::NoMatches(p)) => {
                 let msg = format!("jarvish: no matches found: {p}\n");
+                eprint!("{msg}");
+                return Some(CommandResult::error(msg, 1));
+            }
+            Err(expand::ExpandError::Substitution(m)) => {
+                let msg = format!("jarvish: {m}\n");
                 eprint!("{msg}");
                 return Some(CommandResult::error(msg, 1));
             }
@@ -124,14 +137,27 @@ pub fn execute(input: &str) -> CommandResult {
             expanded.push(tok.value);
             continue;
         }
-        if tok.quoted {
+        if tok.quoted && !tok.has_subst {
             expanded.push(tok.value);
             continue;
         }
-        match expand::expand_token_globs(&tok.value) {
+        let expanded_result = if tok.quoted && tok.has_subst {
+            // クォート内の置換: 置換のみ行い glob/brace は適用しない（bash 準拠）。
+            expand::expand_token_subst_only(&tok.value, tok.subst_quoting)
+        } else if tok.has_subst {
+            expand::expand_token_globs_with_quoting(&tok.value, tok.subst_quoting)
+        } else {
+            expand::expand_token_globs(&tok.value)
+        };
+        match expanded_result {
             Ok(parts) => expanded.extend(parts),
             Err(expand::ExpandError::NoMatches(p)) => {
                 let msg = format!("jarvish: no matches found: {p}\n");
+                eprint!("{msg}");
+                return CommandResult::error(msg, 1);
+            }
+            Err(expand::ExpandError::Substitution(m)) => {
+                let msg = format!("jarvish: {m}\n");
                 eprint!("{msg}");
                 return CommandResult::error(msg, 1);
             }
@@ -604,5 +630,111 @@ mod tests {
     fn try_builtin_brace_expansion_for_echo_returns_none() {
         // echo はビルトインではない（externalにフォールスルー）
         assert!(try_builtin("echo {a,b}").is_none());
+    }
+
+    // ── コマンド置換 E2E テスト (#266) ──
+
+    #[test]
+    fn cmdsubst_basic() {
+        let result = execute("echo $(echo hello)");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "hello");
+    }
+
+    #[test]
+    fn cmdsubst_word_split_multiple_args() {
+        let result = execute("echo $(echo a b c)");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "a b c");
+    }
+
+    #[test]
+    fn cmdsubst_backtick() {
+        let result = execute("echo `echo hi`");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "hi");
+    }
+
+    #[test]
+    fn cmdsubst_double_quoted_preserves_whitespace() {
+        let result = execute("echo \"$(printf 'a   b')\"");
+        assert_eq!(result.exit_code, 0);
+        // ダブルクォート内なので内部の連続空白が保持される
+        assert_eq!(result.stdout.trim_end_matches('\n'), "a   b");
+    }
+
+    #[test]
+    fn cmdsubst_unquoted_collapses_whitespace() {
+        let result = execute("echo $(printf 'a   b')");
+        assert_eq!(result.exit_code, 0);
+        // クォート外なので単語分割され、echo が 1 空白で連結する
+        assert_eq!(result.stdout.trim(), "a b");
+    }
+
+    #[test]
+    fn cmdsubst_single_quoted_is_literal() {
+        let result = execute("echo '$(echo X)'");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "$(echo X)");
+    }
+
+    #[test]
+    fn cmdsubst_embedded_in_word() {
+        let result = execute("echo prefix-$(echo mid)-suffix");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "prefix-mid-suffix");
+    }
+
+    #[test]
+    fn cmdsubst_nested() {
+        let result = execute("echo $(echo $(echo deep))");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "deep");
+    }
+
+    #[test]
+    fn cmdsubst_nonexistent_command_no_panic_nonzero_exit() {
+        let result = execute("echo $(this_command_does_not_exist_zzz)");
+        assert_ne!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn cmdsubst_unterminated_is_parse_error() {
+        let result = execute("echo $(echo unclosed");
+        assert_ne!(result.exit_code, 0);
+        let combined = format!("{}{}", result.stdout, result.stderr);
+        assert!(
+            combined.contains("parse error")
+                || combined.contains("unterminated")
+                || combined.contains("substitution"),
+            "expected parse/unterminated error, got stdout={:?} stderr={:?}",
+            result.stdout,
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn cmdsubst_with_pipe() {
+        let result = execute("echo $(echo foo) | cat");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "foo");
+    }
+
+    #[test]
+    fn cmdsubst_trailing_newlines_stripped() {
+        // ダブルクォートで囲み glob（`[...]`）を抑止しつつ、末尾改行の全除去を検証する。
+        // unquoted 版だと `[x]` がグロブパターンとして解釈され no-match になるため。
+        let result = execute("echo \"[$(printf 'x\\n\\n')]\"");
+        assert_eq!(result.exit_code, 0);
+        // 末尾改行が全除去され、`[x]` になる
+        assert_eq!(result.stdout.trim(), "[x]");
+    }
+
+    #[test]
+    fn cmdsubst_operator_inside_span_is_a_pipeline() {
+        // span 内の `|` はサブシェルのパイプとして実行される
+        let result = execute("echo $(echo foo | cat)");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "foo");
     }
 }

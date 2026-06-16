@@ -244,14 +244,26 @@ impl Shell {
 
         let mut expanded: Vec<String> = Vec::with_capacity(tokens.len());
         for tok in tokens {
-            if tok.quoted {
+            if tok.quoted && !tok.has_subst {
                 expanded.push(tok.value);
                 continue;
             }
-            match expand::expand_token_globs(&tok.value) {
+            let expanded_result = if tok.quoted && tok.has_subst {
+                expand::expand_token_subst_only(&tok.value, tok.subst_quoting)
+            } else if tok.has_subst {
+                expand::expand_token_globs_with_quoting(&tok.value, tok.subst_quoting)
+            } else {
+                expand::expand_token_globs(&tok.value)
+            };
+            match expanded_result {
                 Ok(parts) => expanded.extend(parts),
                 Err(expand::ExpandError::NoMatches(p)) => {
                     let msg = format!("jarvish: no matches found: {p}\n");
+                    eprint!("{msg}");
+                    return Some(CommandResult::error(msg, 1));
+                }
+                Err(expand::ExpandError::Substitution(m)) => {
+                    let msg = format!("jarvish: {m}\n");
                     eprint!("{msg}");
                     return Some(CommandResult::error(msg, 1));
                 }

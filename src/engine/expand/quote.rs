@@ -10,6 +10,12 @@
 //!
 //! POSIX 互換の制御演算子（`|`, `>`, `>>`, `<`, `&&`, `||`, `;`）は
 //! 専用トークンとして分離する。
+//!
+//! また、`$(...)` / backtick `` `...` `` のコマンド置換 span は
+//! トークンの一部としてアトミックに取り込む（内部空白や `|` 等の演算子で
+//! トークンを分断しない）。span の実展開は [`super::command_subst`] が担う。
+
+use super::command_subst::SubstQuoting;
 
 /// 1 つのトークンとそのクォート状態
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +23,12 @@ pub struct Token {
     pub value: String,
     /// 当該トークンの少なくとも一部がシングル/ダブルクォートで囲まれていた場合 true
     pub quoted: bool,
+    /// `value` 内に未処理の `$(...)` / backtick コマンド置換 span を含む場合 true
+    pub has_subst: bool,
+    /// コマンド置換 span のクォート文脈。
+    /// unquoted span を 1 つでも含めば `Unquoted`、全 span が
+    /// ダブルクォート内なら `DoubleQuoted`。
+    pub subst_quoting: SubstQuoting,
 }
 
 /// パースエラー
@@ -25,6 +37,8 @@ pub enum SplitError {
     UnmatchedSingleQuote,
     UnmatchedDoubleQuote,
     DanglingBackslash,
+    /// `$(...)` または backtick が閉じられていない
+    UnterminatedSubstitution,
 }
 
 impl std::fmt::Display for SplitError {
@@ -33,6 +47,9 @@ impl std::fmt::Display for SplitError {
             SplitError::UnmatchedSingleQuote => write!(f, "unmatched single quote"),
             SplitError::UnmatchedDoubleQuote => write!(f, "unmatched double quote"),
             SplitError::DanglingBackslash => write!(f, "dangling backslash"),
+            SplitError::UnterminatedSubstitution => {
+                write!(f, "unterminated command substitution")
+            }
         }
     }
 }
@@ -49,9 +66,46 @@ pub fn split_quoted(input: &str) -> Result<Vec<Token>, SplitError> {
     let mut current = String::new();
     let mut in_token = false;
     let mut quoted = false;
+    // 現トークンが未処理のコマンド置換 span を含むか
+    let mut has_subst = false;
+    // unquoted な span を 1 つでも含んだか（含めば最終的に Unquoted 文脈）
+    let mut has_unquoted_subst = false;
 
     let chars: Vec<char> = input.chars().collect();
     let mut i = 0;
+
+    // 現トークンを確定して push する。状態リセットは呼び出し側の責務。
+    macro_rules! push_current {
+        () => {{
+            // subst_quoting は has_subst のトークンでのみ意味を持つ。
+            // 置換 span のうち unquoted を 1 つでも含めば Unquoted、
+            // 全 span がダブルクォート内なら DoubleQuoted。
+            // 置換なしトークンは既定 Unquoted（無視されるフィールド）。
+            let subst_quoting = if has_subst && !has_unquoted_subst {
+                SubstQuoting::DoubleQuoted
+            } else {
+                SubstQuoting::Unquoted
+            };
+            tokens.push(Token {
+                value: std::mem::take(&mut current),
+                quoted,
+                has_subst,
+                subst_quoting,
+            });
+        }};
+    }
+
+    // 現トークンを確定して push し、トークン蓄積状態をリセットする
+    // （トークン境界＝空白/演算子で使用）。
+    macro_rules! flush_token {
+        () => {{
+            push_current!();
+            in_token = false;
+            quoted = false;
+            has_subst = false;
+            has_unquoted_subst = false;
+        }};
+    }
 
     while i < chars.len() {
         let c = chars[i];
@@ -61,27 +115,43 @@ pub fn split_quoted(input: &str) -> Result<Vec<Token>, SplitError> {
             continue;
         }
 
-        // 演算子: 既存トークンを flush してから演算子を 1 トークンとして追加
+        // 演算子: 既存トークンを flush してから演算子を 1 トークンとして追加。
+        // ただしコマンド置換 span 内ではここに到達しない（span は下で
+        // アトミックに取り込まれるため）。
         let op_len = operator_at(&chars, i);
         if op_len > 0 {
             if in_token {
-                tokens.push(Token {
-                    value: std::mem::take(&mut current),
-                    quoted,
-                });
-                in_token = false;
-                quoted = false;
+                flush_token!();
             }
             let op: String = chars[i..i + op_len].iter().collect();
             tokens.push(Token {
                 value: op,
                 quoted: false,
+                has_subst: false,
+                subst_quoting: SubstQuoting::Unquoted,
             });
             i += op_len;
             continue;
         }
 
         match c {
+            // unquoted コンテキストでのコマンド置換 span をアトミックに取り込む。
+            '$' if i + 1 < chars.len() && chars[i + 1] == '(' => {
+                in_token = true;
+                has_subst = true;
+                has_unquoted_subst = true;
+                let end = scan_paren_span(&chars, i + 2)?;
+                current.extend(&chars[i..end]);
+                i = end;
+            }
+            '`' => {
+                in_token = true;
+                has_subst = true;
+                has_unquoted_subst = true;
+                let end = scan_backtick_span(&chars, i + 1)?;
+                current.extend(&chars[i..end]);
+                i = end;
+            }
             '\'' => {
                 in_token = true;
                 quoted = true;
@@ -112,6 +182,22 @@ pub fn split_quoted(input: &str) -> Result<Vec<Token>, SplitError> {
                         found = true;
                         break;
                     }
+                    // ダブルクォート内のコマンド置換 span はリテラル化せず、
+                    // 構文ごと取り込んで後段で展開する（DoubleQuoted 文脈）。
+                    if ch == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
+                        has_subst = true;
+                        let end = scan_paren_span(&chars, i + 2)?;
+                        current.extend(&chars[i..end]);
+                        i = end;
+                        continue;
+                    }
+                    if ch == '`' {
+                        has_subst = true;
+                        let end = scan_backtick_span(&chars, i + 1)?;
+                        current.extend(&chars[i..end]);
+                        i = end;
+                        continue;
+                    }
                     if ch == '\\' && i + 1 < chars.len() {
                         let next = chars[i + 1];
                         if matches!(next, '"' | '\\' | '$' | '`') {
@@ -138,12 +224,7 @@ pub fn split_quoted(input: &str) -> Result<Vec<Token>, SplitError> {
                 i += 2;
             }
             ch if ch.is_whitespace() => {
-                tokens.push(Token {
-                    value: std::mem::take(&mut current),
-                    quoted,
-                });
-                in_token = false;
-                quoted = false;
+                flush_token!();
                 i += 1;
             }
             ch => {
@@ -155,13 +236,52 @@ pub fn split_quoted(input: &str) -> Result<Vec<Token>, SplitError> {
     }
 
     if in_token {
-        tokens.push(Token {
-            value: current,
-            quoted,
-        });
+        // 入力末尾の確定。以後リセットは不要なので push のみ。
+        push_current!();
     }
 
     Ok(tokens)
+}
+
+/// `$(` の直後（`start`）から括弧バランスで対応する `)` を探し、
+/// 「`)` の次のインデックス」を返す。ネスト対応。
+/// 閉じられていなければ [`SplitError::UnterminatedSubstitution`]。
+///
+/// span 検出ロジックは [`super::command_subst`] 側にも存在するが、
+/// トークナイザは「span をリテラルとして丸ごと取り込む」目的、command_subst は
+/// 「span を実行して置換する」目的と責務が異なるため、それぞれが独立して
+/// span 境界を判定する（DRY より責務分離を優先）。
+fn scan_paren_span(chars: &[char], start: usize) -> Result<usize, SplitError> {
+    let mut depth = 1usize;
+    let mut i = start;
+    while i < chars.len() {
+        match chars[i] {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Err(SplitError::UnterminatedSubstitution)
+}
+
+/// 最初の backtick の直後（`start`）から次の backtick の「次のインデックス」を返す。
+/// V1 はエスケープ未対応のため素朴に次の `` ` `` で閉じる。
+/// 閉じられていなければ [`SplitError::UnterminatedSubstitution`]。
+fn scan_backtick_span(chars: &[char], start: usize) -> Result<usize, SplitError> {
+    let mut i = start;
+    while i < chars.len() {
+        if chars[i] == '`' {
+            return Ok(i + 1);
+        }
+        i += 1;
+    }
+    Err(SplitError::UnterminatedSubstitution)
 }
 
 /// `chars[i..]` の先頭が演算子なら長さを返す。なければ 0。
@@ -187,10 +307,23 @@ fn operator_at(chars: &[char], i: usize) -> usize {
 mod tests {
     use super::*;
 
+    /// 通常トークン（コマンド置換なし）を生成するヘルパ。
     fn t(value: &str, quoted: bool) -> Token {
         Token {
             value: value.to_string(),
             quoted,
+            has_subst: false,
+            subst_quoting: SubstQuoting::Unquoted,
+        }
+    }
+
+    /// コマンド置換 span を含むトークンを生成するヘルパ。
+    fn ts(value: &str, quoted: bool, subst_quoting: SubstQuoting) -> Token {
+        Token {
+            value: value.to_string(),
+            quoted,
+            has_subst: true,
+            subst_quoting,
         }
     }
 
@@ -293,5 +426,113 @@ mod tests {
     fn double_quote_escapes() {
         let toks = split_quoted(r#""hello \"world\"""#).unwrap();
         assert_eq!(toks, vec![t(r#"hello "world""#, true)]);
+    }
+
+    // ── コマンド置換 span のトークナイズ (#266) ──
+
+    #[test]
+    fn command_subst_span_is_atomic() {
+        // `echo $(echo a b)` は 2 トークン。span 内の空白で分断しない。
+        let toks = split_quoted("echo $(echo a b)").unwrap();
+        assert_eq!(
+            toks,
+            vec![
+                t("echo", false),
+                ts("$(echo a b)", false, SubstQuoting::Unquoted)
+            ]
+        );
+    }
+
+    #[test]
+    fn backtick_span_is_atomic() {
+        let toks = split_quoted("echo `echo a b`").unwrap();
+        assert_eq!(
+            toks,
+            vec![
+                t("echo", false),
+                ts("`echo a b`", false, SubstQuoting::Unquoted)
+            ]
+        );
+    }
+
+    #[test]
+    fn double_quoted_command_subst_is_double_quoted_context() {
+        // `"$(echo a b)"` は quoted=true かつ DoubleQuoted 文脈。
+        let toks = split_quoted("echo \"$(echo a b)\"").unwrap();
+        assert_eq!(
+            toks,
+            vec![
+                t("echo", false),
+                ts("$(echo a b)", true, SubstQuoting::DoubleQuoted)
+            ]
+        );
+    }
+
+    #[test]
+    fn single_quoted_command_subst_is_literal() {
+        // シングルクォート内の `$(...)` はリテラル。has_subst は立たない。
+        let toks = split_quoted("echo '$(echo X)'").unwrap();
+        assert_eq!(toks, vec![t("echo", false), t("$(echo X)", true)]);
+    }
+
+    #[test]
+    fn operator_inside_command_subst_not_split() {
+        // span 内の `|` でトークン/演算子を切らない。
+        let toks = split_quoted("echo $(a | b)").unwrap();
+        assert_eq!(
+            toks,
+            vec![
+                t("echo", false),
+                ts("$(a | b)", false, SubstQuoting::Unquoted)
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_command_subst_span_is_atomic() {
+        let toks = split_quoted("echo $(echo $(echo x))").unwrap();
+        assert_eq!(
+            toks,
+            vec![
+                t("echo", false),
+                ts("$(echo $(echo x))", false, SubstQuoting::Unquoted)
+            ]
+        );
+    }
+
+    #[test]
+    fn command_subst_embedded_in_word() {
+        // `prefix-$(echo mid)-suffix` は 1 トークンで span を内包。
+        let toks = split_quoted("echo prefix-$(echo mid)-suffix").unwrap();
+        assert_eq!(
+            toks,
+            vec![
+                t("echo", false),
+                ts("prefix-$(echo mid)-suffix", false, SubstQuoting::Unquoted)
+            ]
+        );
+    }
+
+    #[test]
+    fn unterminated_paren_substitution_errors() {
+        assert_eq!(
+            split_quoted("echo $(echo unclosed"),
+            Err(SplitError::UnterminatedSubstitution)
+        );
+    }
+
+    #[test]
+    fn unterminated_backtick_substitution_errors() {
+        assert_eq!(
+            split_quoted("echo `echo unclosed"),
+            Err(SplitError::UnterminatedSubstitution)
+        );
+    }
+
+    #[test]
+    fn plain_dollar_paren_not_treated_as_subst() {
+        // `$VAR` は置換構文ではないので通常トークン（has_subst=false）。
+        let toks = split_quoted("echo $VAR").unwrap();
+        assert_eq!(toks, vec![t("echo", false), t("$VAR", false)]);
     }
 }
