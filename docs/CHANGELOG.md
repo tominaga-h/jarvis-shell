@@ -3,6 +3,14 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.13.1](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.13.1) - 2026-06-18
+
+### Changed
+
+- 起動時のウェルカムバナーのデザインを刷新（表示のみの変更、機能への影響なし）
+  - ASCII ロゴをよりコンパクトな新デザインに差し替え、配色を赤系へ変更
+  - 二重線セパレータ＋独立バージョン行を廃止し、ロゴ幅に合わせた一本の細線セパレータの右端にバージョンタグを配置するレイアウトに変更
+
 ## [v1.13.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.13.0) - 2026-06-16
 
 ### Added
