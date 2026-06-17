@@ -1,7 +1,7 @@
 use chrono::Local;
 use rand::Rng;
 
-use super::color::{bold_red, cyan, white, yellow};
+use super::color::{red, yellow};
 use super::jarvis::jarvis_talk;
 
 /// 時間帯に応じた挨拶を返す。
@@ -26,29 +26,23 @@ pub fn print_welcome(offline_systems: &[&str]) {
     let greeting = time_greeting();
 
     let art_lines: &[&str] = &[
-        r#"   ___   ___   ______  _   _ _____  _____  _   _"#,
-        r#"  |_  | / _ \  | ___ \| | | |_   _|/  ___|| | | |"#,
-        r#"    | |/ /_\ \ | |_/ /| | | | | |  \ `--. | |_| |"#,
-        r#"    | ||  _  | |    / | | | | | |   `--. \|  _  |"#,
-        r#"/\__/ /| | | |_| |\ \ \ \_/ /_| |__/\__/ /| | | |_"#,
-        r#"\____(_)_| |_(_)_| \_(_)___(_)___(_)____(_)_| |_(_)"#,
+        r#"   _   _   ___ _   _ ___ ___ _  _ "#,
+        r#"  | | /_\ | _ \ \ / /_ _/ __| || |"#,
+        r#" _| |/ _ \|   /\ V / | |\__ \ __ |"#,
+        r#" \__/_/ \_\_|_\ \_/ |___|___/_||_|"#,
     ];
 
-    let separator = "===================================================";
-    let version_line = format!(
-        "     {}  ::  {} {}",
-        bold_red("J.A.R.V.I.S.H."),
-        white("AI Native Shell"),
-        yellow(&format!("v{version}"))
-    );
+    // ASCII ロゴの幅に合わせた細線セパレータの右端にバージョンを置く。
+    let art_width = art_lines.iter().map(|l| l.len()).max().unwrap_or(0);
+    let version_tag = format!("v{version}");
+    let dash_len = art_width.saturating_sub(version_tag.len()) - 1;
+    let separator = format!("{} {}", "─".repeat(dash_len), yellow(&version_tag));
 
     println!();
     for line in art_lines {
-        println!("{}", white(line));
+        println!("{}", red(line));
     }
-    println!("{}", cyan(separator));
-    println!("{}", yellow(&version_line));
-    println!("{}", cyan(separator));
+    println!("{separator}");
     println!();
 
     if offline_systems.is_empty() {
