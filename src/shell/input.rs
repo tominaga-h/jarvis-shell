@@ -78,36 +78,43 @@ impl Shell {
         };
 
         // 3. 入力タイプに応じて実行（実行時間を計測）
+        //    `is_ai_response`: この出力が AI（Jarvis）の発話かどうか。
+        //    goodbye 検出（ステップ8）は AI 応答に対してのみ行うべきで、
+        //    人間が打った通常コマンドの stdout を farewell 判定に回してはならない。
         let start = Instant::now();
-        let (result, from_tool_call, should_update_exit_code, executed_command) = match input_type {
-            InputType::Goodbye => {
-                // Goodbye → シェル終了（farewell メッセージは run() 側で表示）
-                info!("Goodbye input detected, exiting shell");
-                return false;
-            }
-            InputType::Command => {
-                // AI パイプ / リダイレクト検出:
-                // `cmd | ai "prompt"` または `cmd > ai "prompt"` をインターセプト
-                if let Some(ai_pipe_req) = try_execute_ai_pipe(&line) {
-                    debug!(input = %line, mode = ?ai_pipe_req.mode, "AI pipe/redirect detected");
-                    let result = self.handle_ai_pipe(ai_pipe_req).await;
-                    (result, false, true, None)
-                } else {
-                    debug!(input = %line, "Executing as command (no AI)");
-                    (execute(&line), false, true, None)
+        let (result, from_tool_call, should_update_exit_code, executed_command, is_ai_response) =
+            match input_type {
+                InputType::Goodbye => {
+                    // Goodbye → シェル終了（farewell メッセージは run() 側で表示）
+                    info!("Goodbye input detected, exiting shell");
+                    return false;
                 }
-            }
-            InputType::NaturalLanguage => {
-                // 自然言語 → AI にルーティング
-                let ai_result = self.route_to_ai(&line).await;
-                (
-                    ai_result.result,
-                    ai_result.from_tool_call,
-                    ai_result.should_update_exit_code,
-                    ai_result.executed_command,
-                )
-            }
-        };
+                InputType::Command => {
+                    // AI パイプ / リダイレクト検出:
+                    // `cmd | ai "prompt"` または `cmd > ai "prompt"` をインターセプト
+                    if let Some(ai_pipe_req) = try_execute_ai_pipe(&line) {
+                        debug!(input = %line, mode = ?ai_pipe_req.mode, "AI pipe/redirect detected");
+                        let result = self.handle_ai_pipe(ai_pipe_req).await;
+                        // AI パイプの出力は AI の発話なので goodbye 判定の対象
+                        (result, false, true, None, true)
+                    } else {
+                        debug!(input = %line, "Executing as command (no AI)");
+                        // 通常コマンドの stdout は人間の打鍵結果。goodbye 判定に回さない。
+                        (execute(&line), false, true, None, false)
+                    }
+                }
+                InputType::NaturalLanguage => {
+                    // 自然言語 → AI にルーティング
+                    let ai_result = self.route_to_ai(&line).await;
+                    (
+                        ai_result.result,
+                        ai_result.from_tool_call,
+                        ai_result.should_update_exit_code,
+                        ai_result.executed_command,
+                        true,
+                    )
+                }
+            };
         let elapsed_ms = start.elapsed().as_millis() as u64;
         self.cmd_duration_ms.store(elapsed_ms, Ordering::Relaxed);
 
@@ -148,7 +155,7 @@ impl Shell {
 
         // 8. AI Goodbye 検出: AI の応答が farewell を含む場合はシェル終了
         //    AI が既に farewell を言っているためバナーは非表示にする
-        if !from_tool_call && is_ai_goodbye_response(&result.stdout) {
+        if should_exit_on_goodbye(is_ai_response, from_tool_call, &result.stdout) {
             info!("AI goodbye response detected, exiting shell");
             self.farewell_shown = true;
             return false;
@@ -366,6 +373,24 @@ impl Shell {
     }
 }
 
+// ── Goodbye 判定 ──
+
+/// 実行結果を受けてシェルを goodbye 終了すべきかを判定する。
+///
+/// goodbye 検出は **AI（Jarvis）の発話** に対してのみ行う。人間が打った
+/// 通常コマンド（`InputType::Command`）の stdout は、内容がどうあれ
+/// farewell 判定に回してはならない。これを怠ると、例えば `git status` の
+/// 出力に "farewell" 等を含むパスが現れただけでシェルが終了してしまう
+/// （葬祭システム palmo-sousai での実バグ）。
+///
+/// - `is_ai_response`: 出力が AI の発話か（NaturalLanguage 経路または AI パイプ）
+/// - `from_tool_call`: AI がツール呼び出しでコマンドを実行したか
+///   （その場合 stdout はコマンド出力であり farewell 文ではないため除外）
+/// - `stdout`: 判定対象テキスト
+fn should_exit_on_goodbye(is_ai_response: bool, from_tool_call: bool, stdout: &str) -> bool {
+    is_ai_response && !from_tool_call && is_ai_goodbye_response(stdout)
+}
+
 // ── タイポ補正 ──
 
 /// タイポ補正チェックの結果
@@ -398,5 +423,74 @@ fn check_typo_correction(line: &str) -> TypoCorrectionOutcome {
         }
         TypoAction::Reject => TypoCorrectionOutcome::Abort,
         TypoAction::Abort => TypoCorrectionOutcome::Abort,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 末尾に farewell パターンを含む goodbye らしい AI 応答テキスト。
+    const GOODBYE_TEXT: &str = "承知しました。\nさようなら、サー。";
+
+    /// 回帰テスト: 通常コマンド（`InputType::Command`）の stdout は
+    /// goodbye 判定の対象にしてはならない。
+    ///
+    /// 葬祭システム palmo-sousai で `git status` の出力に
+    /// "...corporate-farewell-...WIP.md" というパスが含まれており、
+    /// それを goodbye として誤検知してシェルが終了していた。
+    #[test]
+    fn command_output_with_farewell_does_not_exit() {
+        let git_status = "Untracked files:\n\
+            \t(use \"git add <file>...\" to include in what will be committed)\n\
+            \tdocs/design-notes/2026-06-22/obituary-corporate-farewell-other-venue-WIP.md";
+        // is_ai_response=false（通常コマンド）なので、内容に farewell があっても終了しない
+        assert!(
+            !should_exit_on_goodbye(false, false, git_status),
+            "通常コマンドの出力で farewell を含んでもシェルを終了してはならない"
+        );
+    }
+
+    /// AI 応答（NaturalLanguage / AI パイプ）が farewell を含む場合は終了する。
+    #[test]
+    fn ai_response_with_farewell_exits() {
+        assert!(
+            should_exit_on_goodbye(true, false, GOODBYE_TEXT),
+            "AI の farewell 応答ではシェルを終了する"
+        );
+    }
+
+    /// AI 応答であっても from_tool_call の場合は除外する。
+    /// （stdout は AI がツールで実行したコマンドの出力であり farewell 文ではない）
+    #[test]
+    fn ai_tool_call_output_does_not_exit() {
+        // ツール実行結果にたまたま farewell パスが含まれていても終了しない
+        let tool_output = "ファイル一覧:\n./docs/farewell-template.md";
+        assert!(
+            !should_exit_on_goodbye(true, true, tool_output),
+            "from_tool_call の出力は farewell 判定対象外"
+        );
+        // goodbye 文そのものでも、from_tool_call なら終了しない
+        assert!(!should_exit_on_goodbye(true, true, GOODBYE_TEXT));
+    }
+
+    /// AI 応答で farewell を含まない通常応答では終了しない。
+    #[test]
+    fn ai_response_without_farewell_does_not_exit() {
+        assert!(!should_exit_on_goodbye(
+            true,
+            false,
+            "エラーの原因はこちらです。"
+        ));
+    }
+
+    /// 通常コマンドが goodbye 文そのものを出力しても終了しない
+    /// （例: `echo さようなら` や farewell を含むファイルの `cat`）。
+    #[test]
+    fn command_echoing_goodbye_text_does_not_exit() {
+        assert!(
+            !should_exit_on_goodbye(false, false, GOODBYE_TEXT),
+            "コマンドが goodbye 文を出力してもシェルを終了してはならない"
+        );
     }
 }
