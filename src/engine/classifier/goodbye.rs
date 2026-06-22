@@ -84,4 +84,25 @@ mod tests {
                              This is just a normal response.";
         assert!(!is_ai_goodbye_response(long_response));
     }
+
+    /// 回帰テスト: `git status` の出力末尾に "farewell" 等を含むパスがあると
+    /// goodbye として誤検知されていた（部分一致による誤爆）。
+    ///
+    /// 本来この関数は AI 応答にのみ適用されるべきだが（呼び出し側で限定）、
+    /// 関数単体としても、コマンド出力に紛れた farewell 語に過敏でないことを
+    /// 一定程度ドキュメントしておく。なお現仕様は部分一致であり、この入力は
+    /// "true" を返す（＝関数を通常コマンド出力に適用してはならない根拠）。
+    #[test]
+    fn ai_goodbye_response_matches_farewell_substring_in_path() {
+        // palmo-sousai で実際にシェルを終了させた git status 出力（抜粋）
+        let git_status_tail = "Untracked files:\n\
+            \t(use \"git add <file>...\" to include in what will be committed)\n\
+            \tdocs/design-notes/2026-06-22/obituary-corporate-farewell-other-venue-WIP.md";
+        // 現仕様（部分一致）ではマッチしてしまう。
+        // → だからこそ呼び出し側で通常コマンド出力には適用しないことが必須。
+        assert!(
+            is_ai_goodbye_response(git_status_tail),
+            "documents that the substring match is greedy; callers MUST gate on AI-response only"
+        );
+    }
 }

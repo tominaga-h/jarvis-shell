@@ -3,6 +3,15 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.13.2](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.13.2) - 2026-06-22
+
+### Fixed
+
+- 通常コマンドの出力に "farewell" 等の goodbye パターンを含むパスがあると、それを AI の別れの挨拶と誤検知してシェルが終了してしまう致命的な不具合を修正
+  - 例: 未追跡ファイルに `...corporate-farewell-...WIP.md` のようなパスがあるリポジトリで `git status` を実行すると、出力末尾が goodbye とみなされ `jarvish` が終了していた
+  - 原因は goodbye 検出が AI（Jarvis）の発話だけでなく人間が打った通常コマンドの stdout にまで適用されていたこと (`src/shell/input.rs`)
+  - goodbye 検出を AI 応答経路（自然言語応答・AI パイプ）のみに限定。判定を純粋関数 `should_exit_on_goodbye()` に切り出し、回帰テストを追加
+
 ## [v1.13.1](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.13.1) - 2026-06-18
 
 ### Changed
