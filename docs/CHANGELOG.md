@@ -3,6 +3,15 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.13.3](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.13.3) - 2026-07-05
+
+### Fixed
+
+- 先頭トークン（コマンド位置）に `./target/debug/` のような相対/絶対パスを入力しても、Tab 補完候補が出ず「NO RECORDS FOUND」になる不具合を修正 ([#321](https://github.com/tominaga-h/jarvis-shell/issues/321))
+  - 実行可能ファイルがそのパスに存在するのに、先頭トークンでは `$PATH` 走査とビルトインのみが対象で、相対/絶対パスがまったく補完されなかった
+  - 補完ディスパッチ (`src/cli/completer/mod.rs`) に純粋関数 `looks_like_path()` を追加。先頭トークンが `/` を含む、または `~` で始まる場合は `complete_path(dirs_only=false)` へ委譲し、ファイル・ディレクトリの両方を補完するよう修正（`./` `../` `/abs/` `~/` および中間に `/` を含むトークンに対応）
+  - `complete_command`（PATH コマンド補完）は無変更のまま単一責務を維持
+
 ## [v1.13.2](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.13.2) - 2026-06-22
 
 ### Fixed
