@@ -1,6 +1,7 @@
 //! コマンド補完 — Tab キーで PATH コマンド名・ビルトイン・ファイルパスを補完
 //!
 //! - 先頭トークン: PATH 内の実行可能コマンド + ビルトイン (cd, cwd, exit)
+//! - 先頭トークンがパスらしい場合 (`./` `../` `/` `~/`): ファイル / ディレクトリ補完
 //! - それ以降: カレントディレクトリ基準のファイル / ディレクトリ名
 //!
 //! fish shell の設計思想に倣い、インメモリキャッシュを持たず、
@@ -48,6 +49,14 @@ impl JarvishCompleter {
     fn is_first_token(line: &str, pos: usize) -> bool {
         !line[..pos].contains(' ')
     }
+
+    /// 先頭トークンがパスらしいかを判定する。
+    ///
+    /// `/` を含む (`./target/debug/`, `bin/foo`, `/usr/bin/ls`, `~/bin/x`)、
+    /// または `~` で始まる (`~` 単体もホーム基準) 場合にファイル補完へ回す。
+    fn looks_like_path(token: &str) -> bool {
+        token.contains('/') || token.starts_with('~')
+    }
 }
 
 impl Completer for JarvishCompleter {
@@ -57,7 +66,11 @@ impl Completer for JarvishCompleter {
         let span = Span::new(start, pos);
 
         if Self::is_first_token(line, pos) {
-            self.complete_command(partial, span)
+            if Self::looks_like_path(partial) {
+                self.complete_path(partial, span, false)
+            } else {
+                self.complete_command(partial, span)
+            }
         } else {
             let tokens: Vec<&str> = line[..pos].split_whitespace().collect();
 
@@ -177,6 +190,36 @@ mod tests {
     #[test]
     fn is_first_token_false() {
         assert!(!JarvishCompleter::is_first_token("cd /tmp", 7));
+    }
+
+    // ── looks_like_path テスト ──
+
+    #[test]
+    fn looks_like_path_true_cases() {
+        for token in [
+            "./",
+            "../",
+            "./target/debug/",
+            "/usr/bin/ls",
+            "~/",
+            "~",
+            "sub/foo",
+        ] {
+            assert!(
+                JarvishCompleter::looks_like_path(token),
+                "'{token}' should look like a path"
+            );
+        }
+    }
+
+    #[test]
+    fn looks_like_path_false_cases() {
+        for token in ["ls", "cargo", "git", ""] {
+            assert!(
+                !JarvishCompleter::looks_like_path(token),
+                "'{token}' should not look like a path"
+            );
+        }
     }
 
     // ── complete (Completer trait) 統合テスト ──
@@ -320,6 +363,154 @@ mod tests {
         assert!(
             values.contains(&"test-feature"),
             "git nb (alias for checkout -b) should suggest 'test-feature': {values:?}"
+        );
+    }
+
+    // ── 先頭トークンがパスのときファイル補完へ回る統合テスト (#321) ──
+
+    #[test]
+    fn complete_first_token_absolute_path_shows_entries() {
+        let (_tmpdir, path) = create_test_tree();
+        let mut completer = test_completer();
+        let line = format!("{path}/");
+        let pos = line.len();
+
+        let suggestions = completer.complete(&line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        // dirs_only=false の証明: ディレクトリとファイルの両方が候補に出る
+        assert!(
+            values.contains(&format!("{path}/Documents/").as_str()),
+            "should include Documents/ dir: {values:?}"
+        );
+        assert!(
+            values.contains(&format!("{path}/readme.txt").as_str()),
+            "should include readme.txt file: {values:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn complete_first_token_relative_path_shows_entries() {
+        let (tmpdir, _path) = create_test_tree();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut completer = test_completer();
+        let line = "./";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(!suggestions.is_empty(), "./ should produce suggestions");
+        assert!(
+            values.iter().any(|v| v.contains("Documents/")),
+            "./ should include Documents/: {values:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn complete_first_token_tilde_expands_home() {
+        let mut completer = test_completer();
+        let line = "~/";
+        let pos = line.len();
+
+        let suggestions = completer.complete(line, pos);
+
+        assert!(!suggestions.is_empty(), "~/ should produce suggestions");
+        for s in &suggestions {
+            assert!(
+                s.value.starts_with("~/"),
+                "suggestion '{}' should start with ~/",
+                s.value
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn complete_first_token_plain_command_uses_path() {
+        let (tmpdir, _path) = create_test_tree();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut completer = test_completer();
+        let line = "c";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        // コマンド補完に流れている証明: ビルトインが出る
+        assert!(
+            values.contains(&"cd"),
+            "plain 'c' should suggest builtin 'cd': {values:?}"
+        );
+        assert!(
+            values.contains(&"cwd"),
+            "plain 'c' should suggest builtin 'cwd': {values:?}"
+        );
+        // ファイル補完へは流れていない: temp ディレクトリのファイルは出ない
+        assert!(
+            !values.iter().any(|v| v.contains("readme.txt")),
+            "plain 'c' should not suggest files from CWD: {values:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn complete_first_token_parent_relative_path_shows_entries() {
+        let (tmpdir, _path) = create_test_tree();
+        // tree ルート直下の Documents へ cd し、`../` で親（tree ルート）を補完する
+        let subdir = tmpdir.path().join("Documents");
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(&subdir).unwrap();
+
+        let mut completer = test_completer();
+        let line = "../";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(!suggestions.is_empty(), "../ should produce suggestions");
+        assert!(
+            values.iter().any(|v| v.contains("Desktop/")),
+            "../ from Documents should include sibling Desktop/: {values:?}"
+        );
+    }
+
+    #[test]
+    fn complete_first_token_mid_slash_prefix_filters() {
+        let (_tmpdir, path) = create_test_tree();
+        let mut completer = test_completer();
+        // 絶対パス + 中間スラッシュ + 末尾プレフィックス `Do` → 前方一致フィルタ
+        let line = format!("{path}/Do");
+        let pos = line.len();
+
+        let suggestions = completer.complete(&line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&format!("{path}/Documents/").as_str()),
+            "should include Documents/: {values:?}"
+        );
+        assert!(
+            values.contains(&format!("{path}/Downloads/").as_str()),
+            "should include Downloads/: {values:?}"
+        );
+        assert!(
+            !values.iter().any(|v| v.contains("Desktop")),
+            "'Do' prefix should exclude Desktop: {values:?}"
+        );
+        assert!(
+            !values.iter().any(|v| v.contains("readme.txt")),
+            "'Do' prefix should exclude readme.txt: {values:?}"
         );
     }
 }
