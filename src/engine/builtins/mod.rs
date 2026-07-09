@@ -18,6 +18,33 @@ mod wrapper;
 
 use super::CommandResult;
 
+/// ビルトインコマンドの名前と説明の一覧（アルファベット順）。
+///
+/// `is_builtin` の受理判定・`help` の一覧表示・補完エンジンが共通で参照する
+/// 単一の情報源（single source of truth）。
+pub(crate) const BUILTIN_COMMANDS: &[(&str, &str)] = &[
+    ("alias", "Set or display aliases"),
+    ("cd", "Change the current directory"),
+    ("cdhist", "Print recently visited directories (LRU)"),
+    ("cdj", "Jump to a directory from cd history via fzf"),
+    ("cwd", "Print the current working directory"),
+    ("dirs", "Display directory stack"),
+    ("exit", "Exit the shell"),
+    ("export", "Set or display environment variables"),
+    ("help", "Display help for builtin commands"),
+    ("history", "Display or manage command history"),
+    ("popd", "Pop directory from stack and change to it"),
+    ("pushd", "Push directory onto stack and change to it"),
+    ("pwd", "Print the current working directory (alias of cwd)"),
+    ("restart", "Restart the shell process"),
+    ("source", "Load a configuration file (TOML)"),
+    ("type", "Display information about command type"),
+    ("unalias", "Remove aliases"),
+    ("unset", "Remove environment variables"),
+    ("update", "Update jarvish to the latest version"),
+    ("which", "Locate a command (builtin, alias, or external)"),
+];
+
 /// clap の `try_parse_from` を使って引数をパースする共通ヘルパー。
 ///
 /// - パース成功 → `Ok(T)`
@@ -38,29 +65,7 @@ fn parse_args<T: clap::Parser>(cmd: &str, args: &[&str]) -> Result<T, CommandRes
 
 /// 指定されたコマンド名がビルトインかどうかを判定する（軽量チェック用）。
 pub fn is_builtin(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "alias"
-            | "cd"
-            | "cdhist"
-            | "cdj"
-            | "cwd"
-            | "dirs"
-            | "pwd"
-            | "exit"
-            | "export"
-            | "help"
-            | "popd"
-            | "pushd"
-            | "restart"
-            | "source"
-            | "unalias"
-            | "unset"
-            | "update"
-            | "history"
-            | "which"
-            | "type"
-    )
+    BUILTIN_COMMANDS.iter().any(|(name, _)| *name == cmd)
 }
 
 /// ビルトインコマンドを振り分ける。
@@ -252,5 +257,53 @@ mod tests {
         let result = dispatch_builtin("cdj", &["--help"]).expect("cdj should be registered");
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("cdj"));
+    }
+
+    // ── BUILTIN_COMMANDS 一元化テーブルの検証 ──
+
+    #[test]
+    fn is_builtin_accepts_exact_previous_name_list() {
+        // is_builtin が旧来受理していた20コマンドすべてを引き続き受理することを確認
+        const EXPECTED: &[&str] = &[
+            "alias", "cd", "cdhist", "cdj", "cwd", "dirs", "exit", "export", "help", "history",
+            "popd", "pushd", "pwd", "restart", "source", "type", "unalias", "unset", "update",
+            "which",
+        ];
+        assert_eq!(EXPECTED.len(), 20);
+        for cmd in EXPECTED {
+            assert!(is_builtin(cmd), "{cmd} should be recognized as builtin");
+        }
+
+        // ビルトインでないコマンドは受理しない
+        for cmd in ["ls", "git", "cat", "pwdx", "aliass"] {
+            assert!(
+                !is_builtin(cmd),
+                "{cmd} should not be recognized as builtin"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_commands_table_is_sorted_and_unique() {
+        assert_eq!(BUILTIN_COMMANDS.len(), 20);
+
+        let mut names: Vec<&str> = BUILTIN_COMMANDS.iter().map(|(name, _)| *name).collect();
+        let sorted_names = {
+            let mut v = names.clone();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(
+            names, sorted_names,
+            "BUILTIN_COMMANDS must be alphabetically sorted"
+        );
+
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            BUILTIN_COMMANDS.len(),
+            "BUILTIN_COMMANDS must not contain duplicate names"
+        );
     }
 }
