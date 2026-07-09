@@ -77,6 +77,41 @@ impl CompletionContext {
     pub(crate) fn head_command(&self) -> Option<&str> {
         self.command_words().into_iter().next()
     }
+
+    /// nushell 型 spans プロトコル向けの現在セグメントの単語列を返す。
+    ///
+    /// `command_words()` を土台にしつつ、必ず `partial` を最終要素として
+    /// 末尾に置く。カーソルが空白の直後にある場合（trailing space）は
+    /// `tokens` に開いている partial トークンが存在しない
+    /// （`context.rs` の `build_context_from_tokens` 参照）ため、
+    /// `command_words()` の結果には partial が含まれておらず、末尾に
+    /// 空文字列を追加する必要がある — この末尾の空文字列は外部補完コマンド
+    /// （carapace 等）に「新しい単語の入力が始まる」ことを伝えるために
+    /// 不可欠（load-bearing）。逆にカーソルが単語の途中にある場合は、
+    /// 開いている partial トークンが `tokens` の最後の要素として存在し
+    /// `command_words()` が既にそれを含んでいるため、そのまま採用する。
+    ///
+    /// 開いている partial トークンの有無は、生の `tokens`（`expanded_head`
+    /// 適用前）の最後の要素の終端が `span.end` と一致するかで判定する
+    /// （文字列の中身で判定すると、partial と偶然同じ値を持つトークンが
+    /// 手前にあった場合に誤判定しうるため避ける）。
+    pub(crate) fn spans(&self) -> Vec<String> {
+        let mut words: Vec<String> = self
+            .command_words()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+        let has_open_partial_token = self
+            .tokens
+            .last()
+            .is_some_and(|tok| !tok.is_operator && tok.end == self.span.end);
+        if !has_open_partial_token {
+            words.push(self.partial.clone());
+        }
+
+        words
+    }
 }
 
 /// 走査状態。
@@ -741,5 +776,91 @@ mod tests {
 
             assert_eq!(actual, expected, "parity mismatch for line {line:?}");
         }
+    }
+
+    // ── spans() (nushell 型 spans プロトコル、Task 2a.2) ──
+
+    #[test]
+    fn spans_table_driven_cases() {
+        // (説明, line, pos, 期待される spans)
+        let cases: Vec<(&str, &str, Option<usize>, Vec<&str>)> = vec![
+            (
+                "mid-word partial はそのまま最終要素",
+                "git checkout ma",
+                None,
+                vec!["git", "checkout", "ma"],
+            ),
+            (
+                "trailing space は空文字列の最終要素を追加",
+                "git checkout ",
+                None,
+                vec!["git", "checkout", ""],
+            ),
+            (
+                "先頭トークンの途中入力は spans が1要素のみ",
+                "gi",
+                None,
+                vec!["gi"],
+            ),
+            (
+                "先頭トークンの直後の trailing space は空文字列1要素",
+                "git ",
+                None,
+                vec!["git", ""],
+            ),
+            ("空行は空文字列1要素", "", None, vec![""]),
+            (
+                "クォート付き partial はクォート剥がし済みの値",
+                r#"git checkout "fo"#,
+                None,
+                vec!["git", "checkout", "fo"],
+            ),
+            (
+                "パイプ後のセグメントのみが対象",
+                "ls | git checkout ma",
+                None,
+                vec!["git", "checkout", "ma"],
+            ),
+            (
+                "リダイレクトはセグメントを切らないが演算子トークン自体は除外される",
+                "git checkout ma > out",
+                None,
+                vec!["git", "checkout", "ma", "out"],
+            ),
+        ];
+
+        for (desc, line, pos_override, expected) in cases {
+            let pos = pos_override.unwrap_or(line.len());
+            let c = ctx(line, pos);
+            assert_eq!(c.spans(), expected, "case failed: {desc} ({line:?})");
+        }
+    }
+
+    #[test]
+    fn spans_uses_alias_expanded_head_and_appends_trailing_partial() {
+        // alias g=git: 'g checkout ' の spans は展開後の head + 空文字列。
+        let mut c = ctx("g checkout ", "g checkout ".len());
+        c.expanded_head = Some(vec!["git".to_string(), "checkout".to_string()]);
+        assert_eq!(c.spans(), vec!["git", "checkout", ""]);
+    }
+
+    #[test]
+    fn spans_uses_alias_expanded_head_with_mid_word_partial() {
+        // alias g=git: 'g checkout ma' の spans は展開後の head + partial。
+        let mut c = ctx("g checkout ma", "g checkout ma".len());
+        c.expanded_head = Some(vec![
+            "git".to_string(),
+            "checkout".to_string(),
+            "ma".to_string(),
+        ]);
+        assert_eq!(c.spans(), vec!["git", "checkout", "ma"]);
+    }
+
+    #[test]
+    fn spans_dollar_paren_recursion_reflects_inner_segment() {
+        // 未閉 $( の再帰抽出結果に対しても spans が内側セグメントを反映する。
+        let line = "echo $(git checkout ma";
+        let c = ctx(line, line.len());
+        assert_eq!(c.spans(), vec!["git", "checkout", "ma"]);
     }
 }

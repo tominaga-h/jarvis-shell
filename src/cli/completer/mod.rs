@@ -1,15 +1,21 @@
-//! コマンド補完 — Tab キーで PATH コマンド名・ビルトイン・ファイルパス・git ブランチを補完
+//! コマンド補完 — Tab キーで PATH コマンド名・ビルトイン・ファイルパス・git ブランチ・
+//! carapace 外部補完を補完
 //!
 //! - 先頭トークン: PATH 内の実行可能コマンド + ビルトイン (cd, cwd, exit, ...)
 //! - 先頭トークンがパスらしい場合 (`./` `../` `/` `~/`): ファイル / ディレクトリ補完
 //! - `git <branch系サブコマンド>`: git ブランチ名補完
+//! - carapace 対応コマンドの引数: carapace 外部補完（インストール時のみ）
 //! - それ以降: カレントディレクトリ基準のファイル / ディレクトリ名
 //!
 //! [`CompletionProvider`] トレイトで補完源をプラグイン化しており、
 //! `complete()` は [`Command`](command::CommandProvider) →
-//! [`Git`](git::GitProvider) → [`Path`](path::PathProvider) の順に
-//! 各プロバイダを走査し、最初に `Some` を返したプロバイダの候補を採用する
-//! （`None` = 対象外で次へ、`Some(vec![])` = 担当したが候補なしでそこで確定）。
+//! [`Git`](git::GitProvider) → [`Carapace`](carapace::CarapaceProvider) →
+//! [`Path`](path::PathProvider) の順に各プロバイダを走査し、最初に `Some`
+//! を返したプロバイダの候補を採用する（`None` = 対象外で次へ、
+//! `Some(vec![])` = 担当したが候補なしでそこで確定）。`GitProvider` を
+//! `CarapaceProvider` より先に置いているのは、設定済みのブランチ系
+//! サブコマンドではカレントブランチ優先の並び順（`GitProvider` 側の既存
+//! ロジック）を carapace の並び順より優先したいため。
 //!
 //! コマンド名補完は fish shell の設計思想に倣い、インメモリキャッシュを持たず、
 //! Tab 押下時にリアルタイムで `$PATH` を走査する（キャッシュレス設計）。
@@ -21,11 +27,9 @@
 //! 経由でそれを透過的に参照する。`aliases` は `Shell` と `Arc` を共有して
 //! おり、`alias` ビルトイン実行直後の次の Tab から即座に反映される。
 
+mod carapace;
 mod command;
 mod context;
-// TODO(Phase2a Task 2a.2): CarapaceProvider がこのランナーを消費し始めたら
-// allow(dead_code) を外す。
-#[allow(dead_code)]
 mod external;
 mod git;
 mod path;
@@ -38,6 +42,7 @@ use reedline::{Completer, Suggestion};
 
 use crate::engine::expand::{operator_prefix_len, split_quoted};
 
+use carapace::CarapaceProvider;
 use command::CommandProvider;
 use context::{extract_context, CompletionContext};
 use git::GitProvider;
@@ -70,6 +75,7 @@ impl JarvishCompleter {
         let providers: Vec<Box<dyn CompletionProvider>> = vec![
             Box::new(CommandProvider::new(Arc::clone(&aliases))),
             Box::new(GitProvider::new(git_branch_commands)),
+            Box::new(CarapaceProvider::new()),
             Box::new(PathProvider),
         ];
         Self { providers, aliases }
