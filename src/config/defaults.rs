@@ -39,6 +39,8 @@ impl super::JarvishConfig {
 
 [completion]
 # git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
+# external = "auto"           # "auto"（既定・carapace 検出時のみ使用） | "carapace"（強制有効） | "none"（無効化）
+# external_timeout_ms = 400   # 外部補完プロセス（carapace）のタイムアウト（ミリ秒）
 
 [startup]
 # シェル起動時に順次実行するコマンド（-c オプション実行時はスキップ）

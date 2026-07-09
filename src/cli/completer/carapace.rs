@@ -20,17 +20,95 @@
 //! `ctx.partial` によるフィルタを重ねて行わない（carapace の責務）。
 
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde::Deserialize;
+use tracing::warn;
+
+use crate::config::CompletionConfig;
 
 use super::context::CompletionContext;
 use super::external::run_external_capped;
 use super::provider::{Candidate, CompletionProvider};
 
-// TODO(Phase2a Task 2a.3): [completion] timeout_ms 設定で上書き可能にする。
-// 現状は 400ms 固定。
-const CARAPACE_TIMEOUT: Duration = Duration::from_millis(400);
+/// `[completion] external` の使用方針。
+///
+/// [`ExternalCompletionSettings`] が [`super::JarvishCompleter::new`]（`pub`）の
+/// 引数型に現れるため `pub` にしている（`private_interfaces` lint 対応）。
+/// 実際の生成箇所は `Shell::new` / `reload_config` に限られ、外部クレートからの
+/// 利用は想定していない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalMode {
+    /// バイナリが検出できた場合のみ使用する（デフォルト）。
+    Auto,
+    /// 明示的に有効化。バイナリ未検出なら無効化して警告する。
+    Carapace,
+    /// 無効化。
+    None,
+}
+
+/// `[completion]` の外部補完（carapace）関連設定を解決した実行時状態。
+///
+/// `Shell::new` で構築し、`Arc<RwLock<_>>` として `editor::build_editor` 経由で
+/// [`CarapaceProvider`] と共有する（`git_branch_commands` と同じ配管パターン）。
+/// `Shell::reload_config`（`source` ビルトイン）が `which()` 再検出込みで
+/// 更新するため、セッション中に carapace をインストールしてから `source` する
+/// だけで再起動なしに有効化できる。
+#[derive(Debug, Clone)]
+pub struct ExternalCompletionSettings {
+    pub(crate) mode: ExternalMode,
+    pub(crate) timeout: Duration,
+    /// 検出済みの carapace バイナリパス（`mode == None` または未検出なら `None`）。
+    pub(crate) binary: Option<PathBuf>,
+}
+
+impl ExternalCompletionSettings {
+    /// `[completion]` 設定から実行時状態を解決する。
+    ///
+    /// `external` の値に応じて `which::which("carapace")` を実行し、バイナリの
+    /// 有無を確定する:
+    /// - `"auto"`: 検出できれば使用、できなければ黙って無効（`binary = None`）
+    /// - `"carapace"`: 検出できれば使用、できなければ警告を出して無効化
+    /// - `"none"`: 検出自体を行わず無効
+    /// - それ以外（未知の値）: `"auto"` として扱い警告を出す
+    pub(crate) fn resolve(config: &CompletionConfig) -> Self {
+        let mode = match config.external.as_str() {
+            "auto" => ExternalMode::Auto,
+            "carapace" => ExternalMode::Carapace,
+            "none" => ExternalMode::None,
+            other => {
+                warn!(
+                    value = %other,
+                    "Unknown [completion] external value; falling back to \"auto\""
+                );
+                ExternalMode::Auto
+            }
+        };
+        let timeout = Duration::from_millis(config.external_timeout_ms);
+
+        let binary = match mode {
+            ExternalMode::None => None,
+            ExternalMode::Auto => which::which("carapace").ok(),
+            ExternalMode::Carapace => match which::which("carapace") {
+                Ok(path) => Some(path),
+                Err(_) => {
+                    warn!(
+                        "[completion] external = \"carapace\" but the carapace binary was not \
+                         found on PATH; external completion disabled"
+                    );
+                    None
+                }
+            },
+        };
+
+        Self {
+            mode,
+            timeout,
+            binary,
+        }
+    }
+}
 
 /// carapace の JSON 出力全体（`#[serde(default)]` で壊れたフィールドがあっても
 /// パース自体は失敗させない — resilient parsing）。
@@ -56,24 +134,33 @@ struct CarapaceValue {
 /// 先頭トークン補完（コマンド名自体の補完）は [`super::command::CommandProvider`]
 /// の担当のため、`ctx.is_first_token` の場合は必ず `None`（担当外）を返す。
 pub(super) struct CarapaceProvider {
-    /// 起動時に detect した carapace バイナリのパス。未検出なら `None`
-    /// （以降ずっと `provide()` が `None` を返し続ける = 無害な no-op）。
-    binary: Option<PathBuf>,
-    timeout: Duration,
+    /// `Shell` と共有する外部補完設定（`git_branch_commands` と同じ配管
+    /// パターン）。`source` コマンドによる `reload_config` が `which()` の
+    /// 再検出込みで更新するため、`provide()` 呼び出しごとに短命な read を行う。
+    settings: Arc<RwLock<ExternalCompletionSettings>>,
 }
 
 impl CarapaceProvider {
-    pub(super) fn new() -> Self {
-        Self {
-            binary: which::which("carapace").ok(),
-            timeout: CARAPACE_TIMEOUT,
-        }
+    pub(super) fn new(settings: Arc<RwLock<ExternalCompletionSettings>>) -> Self {
+        Self { settings }
     }
 }
 
 impl CompletionProvider for CarapaceProvider {
     fn provide(&self, ctx: &CompletionContext) -> Option<Vec<Candidate>> {
-        let binary = self.binary.as_ref()?;
+        // 短命な read ロック: バイナリパスと timeout を clone したら即座に drop する
+        // （`mod.rs` の aliases スナップショットと同じ方針）。
+        let (mode, binary, timeout) = {
+            let settings = self.settings.read().ok()?;
+            (settings.mode, settings.binary.clone(), settings.timeout)
+        };
+        if mode == ExternalMode::None {
+            // 明示的な無効化。`resolve()` は mode == None のとき binary を
+            // 常に None にするが、意図を読み取りやすくするためここでも
+            // 明示的にガードする。
+            return None;
+        }
+        let binary = binary?;
 
         if ctx.is_first_token {
             // コマンド名自体の補完は CommandProvider の担当。
@@ -91,7 +178,7 @@ impl CompletionProvider for CarapaceProvider {
         args.extend(spans.iter().cloned());
 
         let envs = [("CARAPACE_LENIENT".to_string(), "1".to_string())];
-        let stdout = run_external_capped(binary, &args, &envs, self.timeout)?;
+        let stdout = run_external_capped(&binary, &args, &envs, timeout)?;
 
         let export: CarapaceExport = serde_json::from_str(&stdout).ok()?;
         if export.values.is_empty() {
@@ -298,12 +385,19 @@ mod tests {
 
     // ── provider-contract テスト ──
 
+    const CARAPACE_TIMEOUT: Duration = Duration::from_millis(400);
+
+    fn settings_with_binary(binary: Option<PathBuf>) -> Arc<RwLock<ExternalCompletionSettings>> {
+        Arc::new(RwLock::new(ExternalCompletionSettings {
+            mode: ExternalMode::Auto,
+            timeout: CARAPACE_TIMEOUT,
+            binary,
+        }))
+    }
+
     #[test]
     fn provide_returns_none_when_binary_absent() {
-        let provider = CarapaceProvider {
-            binary: None,
-            timeout: CARAPACE_TIMEOUT,
-        };
+        let provider = CarapaceProvider::new(settings_with_binary(None));
         let ctx = extract_context("git checkout ma", "git checkout ma".len());
         assert_eq!(provider.provide(&ctx), None);
     }
@@ -313,10 +407,9 @@ mod tests {
         // バイナリが存在する体で構築するが、実際の実行は起きない
         // (is_first_token で早期 return するはず)。存在しないダミーパスでも
         // 先頭トークン判定の方が先に効くことを確認する。
-        let provider = CarapaceProvider {
-            binary: Some(PathBuf::from("/no/such/carapace/binary")),
-            timeout: CARAPACE_TIMEOUT,
-        };
+        let provider = CarapaceProvider::new(settings_with_binary(Some(PathBuf::from(
+            "/no/such/carapace/binary",
+        ))));
         let ctx = extract_context("gi", "gi".len());
         assert!(ctx.is_first_token);
         assert_eq!(provider.provide(&ctx), None);
@@ -329,10 +422,9 @@ mod tests {
         // (command_words() が非空 + partial)、このガードへは通常到達しない。
         // ここでは境界を直接検証するため、CompletionContext を手組みして
         // spans() が 1 要素になる状況を人工的に作る。
-        let provider = CarapaceProvider {
-            binary: Some(PathBuf::from("/no/such/carapace/binary")),
-            timeout: CARAPACE_TIMEOUT,
-        };
+        let provider = CarapaceProvider::new(settings_with_binary(Some(PathBuf::from(
+            "/no/such/carapace/binary",
+        ))));
 
         let mut ctx = extract_context("git", "git".len());
         assert!(ctx.is_first_token);
@@ -343,7 +435,161 @@ mod tests {
         assert_eq!(provider.provide(&ctx), None);
     }
 
+    // ── ExternalCompletionSettings::resolve ──
+
+    #[test]
+    fn resolve_auto_mode_with_carapace_installed_detects_binary() {
+        let Ok(_) = which::which("carapace") else {
+            eprintln!("skipping: carapace not installed");
+            return;
+        };
+        let config = CompletionConfig {
+            external: "auto".to_string(),
+            ..CompletionConfig::default()
+        };
+        let settings = ExternalCompletionSettings::resolve(&config);
+        assert_eq!(settings.mode, ExternalMode::Auto);
+        assert!(settings.binary.is_some());
+    }
+
+    #[test]
+    fn resolve_none_mode_never_detects_binary_even_when_installed() {
+        let config = CompletionConfig {
+            external: "none".to_string(),
+            ..CompletionConfig::default()
+        };
+        let settings = ExternalCompletionSettings::resolve(&config);
+        assert_eq!(settings.mode, ExternalMode::None);
+        assert!(settings.binary.is_none());
+    }
+
+    #[test]
+    fn resolve_unknown_mode_falls_back_to_auto() {
+        let config = CompletionConfig {
+            external: "bogus".to_string(),
+            ..CompletionConfig::default()
+        };
+        let settings = ExternalCompletionSettings::resolve(&config);
+        assert_eq!(settings.mode, ExternalMode::Auto);
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_carapace_mode_missing_binary_disables_without_panic() {
+        // PATH に無いことを保証するため、空の PATH で解決する。
+        let original_path = std::env::var("PATH").ok();
+        // SAFETY: テスト単体プロセス内で一時的に環境変数を書き換える。
+        // 他のテストと並行実行されると PATH 汚染で誤検知しうるため #[serial] を付与。
+        unsafe {
+            std::env::set_var("PATH", "");
+        }
+
+        let config = CompletionConfig {
+            external: "carapace".to_string(),
+            ..CompletionConfig::default()
+        };
+        let settings = ExternalCompletionSettings::resolve(&config);
+
+        unsafe {
+            match original_path {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+
+        assert_eq!(settings.mode, ExternalMode::Carapace);
+        assert!(settings.binary.is_none());
+    }
+
+    #[test]
+    fn resolve_timeout_converts_millis_to_duration() {
+        let config = CompletionConfig {
+            external: "none".to_string(),
+            external_timeout_ms: 1234,
+            ..CompletionConfig::default()
+        };
+        let settings = ExternalCompletionSettings::resolve(&config);
+        assert_eq!(settings.timeout, Duration::from_millis(1234));
+    }
+
+    // ── hot-reload 伝播（`Shell::reload_config` の書き込み経路を模擬） ──
+    //
+    // 完全な `Shell` は構築せず、`Shell::new` / `reload_config` が行うのと
+    // 同じ `Arc<RwLock<ExternalCompletionSettings>>` の生成・書き換えのみを
+    // 直接シミュレートする（git_branch_commands の hot-reload テストと同じ方針）。
+
+    #[test]
+    fn reload_write_path_updates_shared_settings_timeout_and_mode() {
+        let initial = ExternalCompletionSettings::resolve(&CompletionConfig {
+            external: "none".to_string(),
+            external_timeout_ms: 400,
+            ..CompletionConfig::default()
+        });
+        let shared = Arc::new(RwLock::new(initial));
+
+        // `Shell::reload_config` と同じ書き込み経路: 新しい config から再解決し、
+        // 書き込みロックで丸ごと置き換える。
+        let reloaded_config = CompletionConfig {
+            external: "none".to_string(),
+            external_timeout_ms: 900,
+            ..CompletionConfig::default()
+        };
+        let resolved = ExternalCompletionSettings::resolve(&reloaded_config);
+        {
+            let mut guard = shared.write().unwrap();
+            *guard = resolved;
+        }
+
+        let after = shared.read().unwrap();
+        assert_eq!(after.mode, ExternalMode::None);
+        assert_eq!(after.timeout, Duration::from_millis(900));
+    }
+
+    #[test]
+    fn reload_write_path_installing_carapace_mid_session_enables_it() {
+        // 「セッション中に carapace をインストールしてから source する」ケースの
+        // 模擬: 最初は external = "none" 相当（binary なし）で開始し、reload 後に
+        // "auto"（実機に carapace があれば検出される）へ切り替える。
+        let Ok(expected_binary) = which::which("carapace") else {
+            eprintln!("skipping: carapace not installed");
+            return;
+        };
+
+        let initial = ExternalCompletionSettings::resolve(&CompletionConfig {
+            external: "none".to_string(),
+            ..CompletionConfig::default()
+        });
+        let shared = Arc::new(RwLock::new(initial));
+        assert!(
+            shared.read().unwrap().binary.is_none(),
+            "external = \"none\" should never resolve a binary"
+        );
+
+        let resolved = ExternalCompletionSettings::resolve(&CompletionConfig {
+            external: "auto".to_string(),
+            ..CompletionConfig::default()
+        });
+        {
+            let mut guard = shared.write().unwrap();
+            *guard = resolved;
+        }
+
+        let after = shared.read().unwrap();
+        assert_eq!(
+            after.binary.as_deref(),
+            Some(expected_binary.as_path()),
+            "reload with external = \"auto\" should re-detect the now-installed carapace binary"
+        );
+    }
+
     // ── 統合テスト（実行時 skip: which carapace が失敗する環境では skip） ──
+
+    /// `[completion] external = "auto"` 相当の実 detect で settings を構築する。
+    fn auto_detected_settings() -> Arc<RwLock<ExternalCompletionSettings>> {
+        Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
+            &CompletionConfig::default(),
+        )))
+    }
 
     fn create_test_git_repo() -> tempfile::TempDir {
         let tmpdir = tempfile::tempdir().unwrap();
@@ -390,7 +636,7 @@ mod tests {
         let original_dir = env::current_dir().unwrap();
         env::set_current_dir(tmpdir.path()).unwrap();
 
-        let provider = CarapaceProvider::new();
+        let provider = CarapaceProvider::new(auto_detected_settings());
         let ctx = extract_context("git checkout test-", "git checkout test-".len());
         let result = provider.provide(&ctx);
 
@@ -412,7 +658,7 @@ mod tests {
             return;
         };
 
-        let provider = CarapaceProvider::new();
+        let provider = CarapaceProvider::new(auto_detected_settings());
         let ctx = extract_context("git log --one", "git log --one".len());
         let result = provider.provide(&ctx);
 

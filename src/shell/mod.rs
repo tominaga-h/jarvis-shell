@@ -24,6 +24,7 @@ use std::sync::atomic::AtomicBool as StaticAtomicBool;
 static RESTART_FLAG: StaticAtomicBool = StaticAtomicBool::new(false);
 
 use crate::ai::{ConversationState, JarvisAI};
+use crate::cli::completer::ExternalCompletionSettings;
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 use crate::cli::prompt::{ShellPrompt, EXIT_CODE_NONE};
 use crate::config::JarvishConfig;
@@ -58,6 +59,9 @@ pub struct Shell {
     logging_operational: bool,
     /// ブランチ名補完対象の git サブコマンド（JarvishCompleter と共有）
     git_branch_commands: Arc<RwLock<Vec<String>>>,
+    /// 外部補完（carapace）の実行時設定（JarvishCompleter と共有）。
+    /// `source` コマンドで `which()` 再検出込みに更新される。
+    external_completion: Arc<RwLock<ExternalCompletionSettings>>,
     /// SIGUSR1 受信時に再起動をリクエストするフラグ。
     /// コマンド実行中・PTY 使用中は即座に再起動せず、次の REPL idle 時に遅延実行する。
     restart_requested: Arc<AtomicBool>,
@@ -89,6 +93,12 @@ impl Shell {
         // エイリアスは JarvishCompleter と共有するため editor 構築前に確保する
         let aliases = Arc::new(RwLock::new(config.alias.clone()));
 
+        // 外部補完（carapace）の設定を解決する（`which` によるバイナリ検出込み）。
+        // JarvishCompleter と共有するため editor 構築前に確保する。
+        let external_completion = Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
+            &config.completion,
+        )));
+
         let db_path = data_dir.join("history.db");
         let (reedline, history_available) = editor::build_editor(
             Arc::clone(&classifier),
@@ -96,6 +106,7 @@ impl Shell {
             session_id,
             Arc::clone(&git_branch_commands),
             Arc::clone(&aliases),
+            Arc::clone(&external_completion),
         );
 
         // 直前コマンドの終了コードを共有するアトミック変数
@@ -153,6 +164,7 @@ impl Shell {
             history_available,
             logging_operational,
             git_branch_commands,
+            external_completion,
             restart_requested: Arc::new(AtomicBool::new(false)),
             startup_commands: config.startup.commands,
         }
@@ -273,6 +285,13 @@ impl Shell {
         if let Ok(mut cmds) = self.git_branch_commands.write() {
             *cmds = config.completion.git_branch_commands.clone();
         }
+        // 外部補完（carapace）は which() の再検出込みで反映する。これにより
+        // セッション中に carapace をインストールしてから `source` するだけで
+        // 再起動なしに有効化できる。
+        let resolved_external = ExternalCompletionSettings::resolve(&config.completion);
+        if let Ok(mut ext) = self.external_completion.write() {
+            *ext = resolved_external.clone();
+        }
 
         // [startup] を反映（再実行はしない、値の更新のみ）
         self.startup_commands = config.startup.commands.clone();
@@ -283,6 +302,11 @@ impl Shell {
         } else {
             format!("{:?}", config.ai.ignore_auto_investigation_cmds)
         };
+        let external_binary_display = resolved_external
+            .binary
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "not found".to_string());
         let summary = format!(
             "Loaded {}\n\
              \x20 [ai]\n\
@@ -297,6 +321,8 @@ impl Shell {
              \x20 [export]  {} {}\n\
              \x20 [prompt]  nerd_font: {}, starship: {}\n\
              \x20 [completion]  git_branch_commands: {} {}\n\
+             \x20\x20 external: {} (binary: {})\n\
+             \x20\x20 external_timeout_ms: {}\n\
              \x20 [startup]  {} {}\n",
             path.display(),
             config.ai.model,
@@ -326,6 +352,9 @@ impl Shell {
             } else {
                 "commands"
             },
+            config.completion.external,
+            external_binary_display,
+            config.completion.external_timeout_ms,
             config.startup.commands.len(),
             if config.startup.commands.len() == 1 {
                 "command"

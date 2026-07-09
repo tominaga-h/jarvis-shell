@@ -28,6 +28,8 @@
 //!
 //! [completion]
 //! git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
+//! external = "auto"             # "auto" | "carapace" | "none" — 外部補完（carapace）の使用方針
+//! external_timeout_ms = 400     # 外部補完プロセスのタイムアウト（ミリ秒）
 //!
 //! [startup]
 //! commands = ["echo 'Welcome to jarvish!'", "export JAVA_HOME=/usr/lib/jvm/default"]
@@ -118,6 +120,13 @@ impl Default for PromptConfig {
 pub struct CompletionConfig {
     /// ブランチ名補完を提供する git サブコマンド
     pub git_branch_commands: Vec<String>,
+    /// 外部補完（carapace）の使用方針。
+    /// `"auto"`（デフォルト・バイナリ検出時のみ使用） / `"carapace"`（明示的に有効化。
+    /// バイナリ未検出なら無効化して警告） / `"none"`（無効化）。未知の値は
+    /// `"auto"` として扱い警告を出す。
+    pub external: String,
+    /// 外部補完プロセスのタイムアウト（ミリ秒）
+    pub external_timeout_ms: u64,
 }
 
 impl Default for CompletionConfig {
@@ -139,6 +148,8 @@ impl Default for CompletionConfig {
             .into_iter()
             .map(String::from)
             .collect(),
+            external: "auto".to_string(),
+            external_timeout_ms: 400,
         }
     }
 }
@@ -179,6 +190,8 @@ impl JarvishConfig {
                         nerd_font = config.prompt.nerd_font,
                         starship = config.prompt.starship,
                         git_branch_commands = config.completion.git_branch_commands.len(),
+                        completion_external = %config.completion.external,
+                        completion_external_timeout_ms = config.completion.external_timeout_ms,
                         startup_commands = config.startup.commands.len(),
                         "Config loaded successfully"
                     );
@@ -251,6 +264,8 @@ mod tests {
             .git_branch_commands
             .contains(&"fetch".to_string()));
         assert_eq!(config.completion.git_branch_commands.len(), 11);
+        assert_eq!(config.completion.external, "auto");
+        assert_eq!(config.completion.external_timeout_ms, 400);
     }
 
     #[test]
@@ -392,6 +407,8 @@ EDITOR = "vim"
         assert!(content.contains("[alias]"));
         assert!(content.contains("[export]"));
         assert!(content.contains("[completion]"));
+        assert!(content.contains("external = \"auto\""));
+        assert!(content.contains("external_timeout_ms = 400"));
 
         let config: JarvishConfig = toml::from_str(&content).unwrap();
         assert_eq!(config.ai.model, "gpt-4o");
@@ -429,6 +446,50 @@ git_branch_commands = []
             .completion
             .git_branch_commands
             .contains(&"fetch".to_string()));
+        assert_eq!(config.completion.external, "auto");
+        assert_eq!(config.completion.external_timeout_ms, 400);
+    }
+
+    #[test]
+    fn parse_completion_config_external_carapace() {
+        let toml = r#"
+[completion]
+external = "carapace"
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(config.completion.external, "carapace");
+    }
+
+    #[test]
+    fn parse_completion_config_external_none() {
+        let toml = r#"
+[completion]
+external = "none"
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(config.completion.external, "none");
+    }
+
+    #[test]
+    fn parse_completion_config_external_unknown_value_kept_as_is() {
+        // TOML パース自体は文字列をそのまま受け入れる。
+        // "auto" への読み替えと警告は ExternalCompletionSettings 構築時（実行時）の責務。
+        let toml = r#"
+[completion]
+external = "bogus"
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(config.completion.external, "bogus");
+    }
+
+    #[test]
+    fn parse_completion_config_custom_external_timeout_ms() {
+        let toml = r#"
+[completion]
+external_timeout_ms = 1500
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(config.completion.external_timeout_ms, 1500);
     }
 
     // ── startup ──

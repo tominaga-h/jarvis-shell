@@ -29,6 +29,7 @@
 - [アップデート](#-アップデート)
 - [セットアップと設定](#️-セットアップと設定)
   - [Starship プロンプト連携](#starship-プロンプト連携)
+  - [外部補完連携 (carapace)](#外部補完連携-carapace)
 - [アーキテクチャ](#️-アーキテクチャ)
 - [開発への参加](#-開発への参加)
 
@@ -68,7 +69,7 @@ Jarvish はターミナルで起きたすべての出来事を記憶していま
 AIを統合しながらも、Rustの特性を活かし、インフラツールとしての圧倒的なパフォーマンスを誇ります。
 
 - **非同期バックグラウンド・プロンプト**: Gitのステータススキャンを別スレッドで処理し（Stale-While-Revalidate パターン採用）、どれだけ巨大なリポジトリでもタイピングの遅延（UIジッター）を**完全にゼロ**にしました。
-- **Fishライクなオートコンプリート**: リアルタイムなシンタックスハイライトと、PATHバイナリやファイルパスの強力な自動補完機能を備えています。
+- **Fishライクなオートコンプリート**: リアルタイムなシンタックスハイライトと、PATHバイナリやファイルパスの強力な自動補完機能を備えています。さらに [carapace](#外部補完連携-carapace) 連携により、数百種類の CLI ツールの引数・フラグ補完にも対応します（任意）。
 - **完全な PTY サポート**: `vim` や `top` などの対話型プログラムもネイティブに動作します。
 - **ジョブ制御による Ctrl+C**: コマンド実行中に `Ctrl+C` を押すと、実行中のコマンドだけが中断され、Jarvish シェル本体は終了しません。外部コマンドは独立したプロセスグループで起動され、端末のフォアグラウンドを一時的に委譲されるため、端末が生成する `SIGINT` は子プロセスグループにのみ届きます。
 - **Starship 連携**: [Starship](https://starship.rs/) プロンプトをネイティブサポート。既存の Starship 設定をそのまま利用できます。
@@ -175,6 +176,8 @@ starship = false              # true にすると Starship プロンプトを使
 
 [completion]
 git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
+external = "auto"             # "auto" | "carapace" | "none" — 外部補完（carapace）の使用方針
+external_timeout_ms = 400     # 外部補完プロセスのタイムアウト（ミリ秒）
 
 [startup]
 commands = [                      # シェル起動時に順次実行するコマンド（-c オプション実行時はスキップ）
@@ -209,6 +212,15 @@ starship = true
 Jarvish は `starship prompt` に `--status`、`--cmd-duration`、`--terminal-width` を渡すため、`character`、`cmd_duration`、`status` などの Starship モジュールが正しく動作します。
 
 `starship = true` を設定しているが前提条件を満たしていない場合は、警告を表示してビルトインプロンプトにフォールバックします。
+
+### 外部補完連携 (carapace)
+
+Jarvish の Tab 補完は [carapace](https://github.com/carapace-sh/carapace-bin) と連携できます。carapace は git・docker・kubectl など 500 以上の CLI ツールの補完を提供するマルチシェル対応の補完エンジンです。`brew install carapace` でインストールできます。
+
+- **自動検出**: `[completion] external = "auto"`（デフォルト）は、起動時に `carapace` バイナリが `PATH` 上に見つかれば自動的に使用します。追加設定は不要です。`external = "carapace"` にすると明示的に必須化され（バイナリ未検出時は警告を表示）、`external = "none"` にすると外部補完を完全に無効化します。
+- **タイムアウト + フォールバック**: 各 carapace 呼び出しは `external_timeout_ms`（デフォルト 400ms）でタイムアウトします。carapace がハング・エラー・候補なしを返した場合、Jarvish は自動的にビルトインのパス補完へフォールバックします — Tab キーが外部プロセス待ちでブロックされることはありません。
+- **ホットリロード**: `external` と `external_timeout_ms` は `source` ビルトインで再読み込みされ、そのたびに carapace バイナリの再検出（`which`）も行われます。つまりセッション中に `brew install carapace` した後、`source ~/.config/jarvish/config.toml` を実行するだけで、再起動なしに即座に有効化できます。
+- **カバレッジの拡大**: carapace は実際のシェル補完関数（zsh の `compsys` など）へのブリッジもサポートしています。`config.toml` の `[export]` セクションで `CARAPACE_BRIDGES`（例: `CARAPACE_BRIDGES = "zsh"`）を設定すると、carapace が標準搭載していない補完も取り込めます。
 
 ## 🏗️ アーキテクチャ
 

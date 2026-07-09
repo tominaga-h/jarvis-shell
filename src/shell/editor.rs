@@ -13,7 +13,7 @@ use reedline::{
     MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu,
 };
 
-use crate::cli::completer::JarvishCompleter;
+use crate::cli::completer::{ExternalCompletionSettings, JarvishCompleter};
 use crate::cli::highlighter::JarvisHighlighter;
 use crate::engine::classifier::InputClassifier;
 use crate::storage::BlackBoxHistory;
@@ -32,8 +32,13 @@ pub fn build_editor(
     session_id: i64,
     git_branch_commands: Arc<RwLock<Vec<String>>>,
     aliases: Arc<RwLock<HashMap<String, String>>>,
+    external_completion: Arc<RwLock<ExternalCompletionSettings>>,
 ) -> (Reedline, bool) {
-    let completer = Box::new(JarvishCompleter::new(git_branch_commands, aliases));
+    let completer = Box::new(JarvishCompleter::new(
+        git_branch_commands,
+        aliases,
+        external_completion,
+    ));
     let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
 
     let mut keybindings = default_emacs_keybindings();

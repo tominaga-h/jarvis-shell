@@ -29,6 +29,7 @@ The days of copy-pasting errors into a browser to ask AI are over. Just ask Jarv
 - [Updating](#-updating)
 - [Setup and Configuration](#️-setup-and-configuration)
   - [Starship Prompt Integration](#starship-prompt-integration)
+  - [External Completion (carapace)](#external-completion-carapace)
 - [Architecture](#️-architecture)
 - [Development](#-development)
 
@@ -68,7 +69,7 @@ Jarvish remembers everything that happens in your terminal.
 Despite deep AI integration, Jarvish leverages Rust's strengths to deliver outstanding performance as an infrastructure tool.
 
 - **Async Background Prompt**: Git status scanning runs in a separate thread (using the Stale-While-Revalidate pattern), achieving **zero UI jitter** regardless of repository size.
-- **Fish-like Autocomplete**: Real-time syntax highlighting with powerful auto-completion for PATH binaries and file paths.
+- **Fish-like Autocomplete**: Real-time syntax highlighting with powerful auto-completion for PATH binaries and file paths, plus optional [carapace](#external-completion-carapace) integration for argument/flag completion across hundreds of CLI tools.
 - **Full PTY Support**: Interactive programs like `vim` and `top` work natively.
 - **Job-control Ctrl+C**: Pressing `Ctrl+C` while a command runs interrupts only that command — the Jarvish shell itself keeps running. External commands are spawned into their own process group and given the terminal foreground, so the terminal-generated `SIGINT` reaches the child group only.
 - **Starship Integration**: Native support for [Starship](https://starship.rs/) prompt — use your existing Starship configuration as-is.
@@ -175,6 +176,8 @@ starship = false              # Set to true to use Starship prompt (requires: st
 
 [completion]
 git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
+external = "auto"             # "auto" | "carapace" | "none" — external completion (carapace) policy
+external_timeout_ms = 400     # Timeout for the external completion process (milliseconds)
 
 [startup]
 commands = [                      # Commands to run on shell startup (skipped with -c option)
@@ -209,6 +212,15 @@ starship = true
 Jarvish passes `--status`, `--cmd-duration`, and `--terminal-width` to `starship prompt`, so modules like `character`, `cmd_duration`, and `status` work as expected.
 
 If `starship = true` is set but the prerequisites are not met, Jarvish falls back to the built-in prompt with a warning.
+
+### External Completion (carapace)
+
+Jarvish's Tab completion can bridge to [carapace](https://github.com/carapace-sh/carapace-bin), a multi-shell completion engine that ships completions for 500+ CLI tools (git, docker, kubectl, etc.). Install it with `brew install carapace`.
+
+- **Auto-detection**: `[completion] external = "auto"` (the default) uses carapace automatically if the `carapace` binary is found on `PATH` at startup — no further configuration needed. Set `external = "carapace"` to require it explicitly (a warning is printed if the binary is missing) or `external = "none"` to disable external completion entirely.
+- **Timeout + fallback**: Each carapace invocation is capped by `external_timeout_ms` (default 400ms). If carapace hangs, errors, or returns no candidates, Jarvish silently falls back to its built-in path completion — Tab never blocks waiting on an external process.
+- **Hot-reload**: `external` and `external_timeout_ms` are re-read by the `source` builtin, and the carapace binary is re-detected (via `which`) on every reload. This means you can `brew install carapace` mid-session and run `source ~/.config/jarvish/config.toml` to enable it immediately, without restarting Jarvish.
+- **Widening coverage**: carapace also supports bridging to real shell completion functions (e.g. zsh's `compsys`). Export `CARAPACE_BRIDGES` (e.g. `CARAPACE_BRIDGES = "zsh"`) in the `[export]` section of `config.toml` to pull in completions that carapace doesn't natively ship.
 
 ## 🏗️ Architecture
 

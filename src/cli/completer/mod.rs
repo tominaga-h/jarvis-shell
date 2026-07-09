@@ -4,7 +4,8 @@
 //! - 先頭トークン: PATH 内の実行可能コマンド + ビルトイン (cd, cwd, exit, ...)
 //! - 先頭トークンがパスらしい場合 (`./` `../` `/` `~/`): ファイル / ディレクトリ補完
 //! - `git <branch系サブコマンド>`: git ブランチ名補完
-//! - carapace 対応コマンドの引数: carapace 外部補完（インストール時のみ）
+//! - carapace 対応コマンドの引数: carapace 外部補完（`[completion] external`
+//!   の方針とバイナリ検出結果に応じて有効・無効化される）
 //! - それ以降: カレントディレクトリ基準のファイル / ディレクトリ名
 //!
 //! [`CompletionProvider`] トレイトで補完源をプラグイン化しており、
@@ -26,6 +27,12 @@
 //! `ctx.expanded_head` へ格納され、`GitProvider` 等は `command_words()`
 //! 経由でそれを透過的に参照する。`aliases` は `Shell` と `Arc` を共有して
 //! おり、`alias` ビルトイン実行直後の次の Tab から即座に反映される。
+//!
+//! carapace の実行時設定（[`ExternalCompletionSettings`]）も `git_branch_commands`
+//! / `aliases` と同じ配管パターンで `Shell` と共有される。`source` コマンドに
+//! よる `reload_config` はバイナリの `which()` 再検出込みで設定を更新するため、
+//! セッション中に carapace をインストールしてから `source` するだけで
+//! 再起動なしに外部補完を有効化できる。
 
 mod carapace;
 mod command;
@@ -49,6 +56,8 @@ use git::GitProvider;
 use path::PathProvider;
 use provider::{escape_for_insert, CompletionProvider};
 
+pub use carapace::ExternalCompletionSettings;
+
 /// ColumnarMenu は description を持つ候補が 1 件でもあると全幅 1 カラムに
 /// 描画が変わってしまうため、候補数がこの件数を超えたら description を
 /// 一律で除去する（大きな PATH スキャン結果を守るガード）。
@@ -71,11 +80,12 @@ impl JarvishCompleter {
     pub fn new(
         git_branch_commands: Arc<RwLock<Vec<String>>>,
         aliases: Arc<RwLock<HashMap<String, String>>>,
+        external_completion: Arc<RwLock<ExternalCompletionSettings>>,
     ) -> Self {
         let providers: Vec<Box<dyn CompletionProvider>> = vec![
             Box::new(CommandProvider::new(Arc::clone(&aliases))),
             Box::new(GitProvider::new(git_branch_commands)),
-            Box::new(CarapaceProvider::new()),
+            Box::new(CarapaceProvider::new(external_completion)),
             Box::new(PathProvider),
         ];
         Self { providers, aliases }
@@ -190,11 +200,24 @@ mod tests {
 
     use crate::config::CompletionConfig;
 
+    /// テスト用の外部補完設定（無効化固定）。他プロバイダの単体/統合テストが
+    /// 環境の carapace 有無に左右されないよう `ExternalMode::None` で構築する
+    /// （carapace 連携自体の検証は `carapace.rs` 側の実行時 skip 付きテストで行う）。
+    fn disabled_external_completion() -> Arc<RwLock<ExternalCompletionSettings>> {
+        Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
+            &CompletionConfig {
+                external: "none".to_string(),
+                ..CompletionConfig::default()
+            },
+        )))
+    }
+
     fn test_completer() -> JarvishCompleter {
         let commands = CompletionConfig::default().git_branch_commands;
         JarvishCompleter::new(
             Arc::new(RwLock::new(commands)),
             Arc::new(RwLock::new(HashMap::new())),
+            disabled_external_completion(),
         )
     }
 
@@ -205,8 +228,11 @@ mod tests {
     ) -> (JarvishCompleter, Arc<RwLock<HashMap<String, String>>>) {
         let commands = CompletionConfig::default().git_branch_commands;
         let aliases = Arc::new(RwLock::new(aliases));
-        let completer =
-            JarvishCompleter::new(Arc::new(RwLock::new(commands)), Arc::clone(&aliases));
+        let completer = JarvishCompleter::new(
+            Arc::new(RwLock::new(commands)),
+            Arc::clone(&aliases),
+            disabled_external_completion(),
+        );
         (completer, aliases)
     }
 
