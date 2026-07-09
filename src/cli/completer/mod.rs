@@ -23,6 +23,10 @@
 
 mod command;
 mod context;
+// TODO(Phase2a Task 2a.2): CarapaceProvider がこのランナーを消費し始めたら
+// allow(dead_code) を外す。
+#[allow(dead_code)]
+mod external;
 mod git;
 mod path;
 mod provider;
