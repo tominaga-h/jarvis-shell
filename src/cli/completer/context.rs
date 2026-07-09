@@ -599,6 +599,26 @@ mod tests {
     }
 
     #[test]
+    fn mid_line_cursor_ignores_trailing_content() {
+        // pos < line.len() で、カーソル後方に実コンテンツがある場合。
+        // "git checkout main && ls" の "che" の直後にカーソルを置く。
+        let line = "git checkout main && ls";
+        let pos = line.find("che").unwrap() + "che".len();
+        let c = ctx(line, pos);
+
+        // tokens/partial は line[..pos] ("git checkout main"[.."che"]) のみから
+        // 導出され、カーソル以降の "ckout main && ls" は一切見えない。
+        assert_eq!(c.partial, "che");
+        assert_eq!(tok_values(&c), vec!["git", "che"]);
+        assert_eq!(c.head_command(), Some("git"));
+        assert!(!c.is_first_token);
+
+        // span はちょうど pos で終わる（後方の "ckout" 等は含まれない）。
+        assert_eq!(c.span, Span::new(pos - "che".len(), pos));
+        assert_eq!(c.span.end, pos);
+    }
+
+    #[test]
     fn pos_zero_is_first_token() {
         let line = "git checkout";
         let c = ctx(line, 0);

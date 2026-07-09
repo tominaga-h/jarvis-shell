@@ -92,7 +92,7 @@ impl Completer for JarvishCompleter {
             .find_map(|provider| provider.provide(&ctx))
             .unwrap_or_default();
 
-        let strip_descriptions = candidates.len() > DESCRIPTION_LIMIT;
+        let strip_descriptions = should_strip_descriptions(candidates.len());
 
         candidates
             .into_iter()
@@ -111,6 +111,15 @@ impl Completer for JarvishCompleter {
             })
             .collect()
     }
+}
+
+/// 候補数が [`DESCRIPTION_LIMIT`] を超えるかどうかを判定する。
+///
+/// `complete()` から切り出したのは、ファイルシステムや `Completer` トレイトの
+/// セットアップなしに境界値（`DESCRIPTION_LIMIT` ちょうど / +1）を単体テスト
+/// するため。
+fn should_strip_descriptions(candidate_count: usize) -> bool {
+    candidate_count > DESCRIPTION_LIMIT
 }
 
 /// `ctx.tokens[0]` がシェルエイリアスなら、値を展開して
@@ -672,6 +681,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn complete_large_candidate_set_strips_descriptions() {
         // DESCRIPTION_LIMIT を超える候補数になる場面では description が全除去される。
         let tmpdir = tempfile::tempdir().unwrap();
@@ -849,6 +859,90 @@ mod tests {
         assert!(
             !after.iter().any(|s| s.value == "zzjarvishtestalias"),
             "alias should disappear once removed from the shared map: {after:?}"
+        );
+    }
+
+    // ── DESCRIPTION_LIMIT 境界値テスト (should_strip_descriptions 単体) ──
+
+    #[test]
+    fn should_strip_descriptions_at_exact_limit_survives() {
+        // ちょうど DESCRIPTION_LIMIT 件なら description は生存する。
+        assert!(!should_strip_descriptions(DESCRIPTION_LIMIT));
+    }
+
+    #[test]
+    fn should_strip_descriptions_one_over_limit_strips() {
+        // DESCRIPTION_LIMIT を 1 件でも超えたら全除去される。
+        assert!(should_strip_descriptions(DESCRIPTION_LIMIT + 1));
+    }
+
+    // ── apply_shell_alias 単体テスト（エッジケース） ──
+
+    #[test]
+    fn apply_shell_alias_operator_value_skips_expansion() {
+        // alias 値に演算子 (`|`) が含まれる場合は展開しない。
+        let mut ctx = extract_context("lg ", "lg ".len());
+        let mut aliases = HashMap::new();
+        aliases.insert("lg".to_string(), "ls | grep".to_string());
+
+        apply_shell_alias(&mut ctx, &aliases);
+
+        assert_eq!(
+            ctx.expanded_head, None,
+            "operator-bearing alias value should not be expanded"
+        );
+    }
+
+    #[test]
+    fn apply_shell_alias_unparseable_value_skips_safely() {
+        // alias 値が split_quoted でパースエラーになる場合（未閉クォート）は
+        // パニックせず安全にスキップする。
+        let mut ctx = extract_context("bad ", "bad ".len());
+        let mut aliases = HashMap::new();
+        aliases.insert("bad".to_string(), "ls 'foo".to_string());
+
+        apply_shell_alias(&mut ctx, &aliases);
+
+        assert_eq!(
+            ctx.expanded_head, None,
+            "unparseable alias value should be skipped safely, not panic"
+        );
+    }
+
+    #[test]
+    fn apply_shell_alias_empty_value_is_safe() {
+        // alias 値が空文字列でもクラッシュせず、安全な挙動（展開なし、
+        // または空展開）になる。
+        let mut ctx = extract_context("empty ", "empty ".len());
+        let mut aliases = HashMap::new();
+        aliases.insert("empty".to_string(), "".to_string());
+
+        apply_shell_alias(&mut ctx, &aliases);
+
+        // 実際の安全な挙動: split_quoted("") は空のトークン列を返すため
+        // has_operator は false になり、expanded_head は Some(空 + 後続トークン) になる。
+        assert_eq!(
+            ctx.expanded_head,
+            Some(Vec::new()),
+            "empty alias value should expand to an empty head, not panic"
+        );
+    }
+
+    #[test]
+    fn apply_shell_alias_chained_alias_is_single_pass_only() {
+        // a=b, b=git のとき 'a ' を展開すると expanded_head は "b" のまま
+        // （"b" を再度 alias マップで引いて "git" まで再帰解決したりしない）。
+        let mut ctx = extract_context("a ", "a ".len());
+        let mut aliases = HashMap::new();
+        aliases.insert("a".to_string(), "b".to_string());
+        aliases.insert("b".to_string(), "git".to_string());
+
+        apply_shell_alias(&mut ctx, &aliases);
+
+        assert_eq!(
+            ctx.expanded_head,
+            Some(vec!["b".to_string()]),
+            "alias expansion must be single-pass only, not recursively resolved to 'git'"
         );
     }
 
