@@ -45,7 +45,9 @@ pub(crate) struct CompletionContext {
     pub span: Span,
     /// カーソルのトークンがセグメントの先頭（コマンド位置）かどうか。
     pub is_first_token: bool,
-    /// alias 展開後の先頭コマンドの単語列。Phase 1.5 まで常に `None`。
+    /// alias 展開後の先頭コマンドの単語列。`extract_context` は常に `None`
+    /// を返し、`JarvishCompleter::complete` が `apply_shell_alias`（`mod.rs`）
+    /// でシェルエイリアス解決後に設定する。
     pub expanded_head: Option<Vec<String>>,
 }
 

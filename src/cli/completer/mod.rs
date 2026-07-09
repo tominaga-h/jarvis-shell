@@ -14,6 +14,12 @@
 //! コマンド名補完は fish shell の設計思想に倣い、インメモリキャッシュを持たず、
 //! Tab 押下時にリアルタイムで `$PATH` を走査する（キャッシュレス設計）。
 //! `brew install` 等で新しいバイナリが追加された直後でも即座に補完候補に出現する。
+//!
+//! シェルエイリアス（`alias` ビルトイン）は先頭トークンではない位置でのみ
+//! 展開する（[`apply_shell_alias`]）。展開結果は各プロバイダ走査前に
+//! `ctx.expanded_head` へ格納され、`GitProvider` 等は `command_words()`
+//! 経由でそれを透過的に参照する。`aliases` は `Shell` と `Arc` を共有して
+//! おり、`alias` ビルトイン実行直後の次の Tab から即座に反映される。
 
 mod command;
 mod context;
@@ -26,8 +32,10 @@ use std::sync::{Arc, RwLock};
 
 use reedline::{Completer, Suggestion};
 
+use crate::engine::expand::{operator_prefix_len, split_quoted};
+
 use command::CommandProvider;
-use context::extract_context;
+use context::{extract_context, CompletionContext};
 use git::GitProvider;
 use path::PathProvider;
 use provider::{escape_for_insert, CompletionProvider};
@@ -45,8 +53,8 @@ const DESCRIPTION_LIMIT: usize = 30;
 /// `git_branch_commands` は `Shell` と共有され、`source` コマンドで動的に更新される。
 pub struct JarvishCompleter {
     providers: Vec<Box<dyn CompletionProvider>>,
-    /// シェルエイリアス（Shell と共有）
-    #[allow(dead_code)] // TODO(Phase1 Task 1.5): alias-aware completion will use this
+    /// シェルエイリアス（Shell と共有。`alias` ビルトインによる更新が
+    /// 次回の Tab に即座に反映される — reload 不要）
     aliases: Arc<RwLock<HashMap<String, String>>>,
 }
 
@@ -56,7 +64,7 @@ impl JarvishCompleter {
         aliases: Arc<RwLock<HashMap<String, String>>>,
     ) -> Self {
         let providers: Vec<Box<dyn CompletionProvider>> = vec![
-            Box::new(CommandProvider),
+            Box::new(CommandProvider::new(Arc::clone(&aliases))),
             Box::new(GitProvider::new(git_branch_commands)),
             Box::new(PathProvider),
         ];
@@ -66,7 +74,17 @@ impl JarvishCompleter {
 
 impl Completer for JarvishCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
-        let ctx = extract_context(line, pos);
+        let mut ctx = extract_context(line, pos);
+
+        if !ctx.is_first_token {
+            // 短命な read ロック: スナップショットを clone したら即座に drop する。
+            let snapshot = self
+                .aliases
+                .read()
+                .map(|guard| guard.clone())
+                .unwrap_or_default();
+            apply_shell_alias(&mut ctx, &snapshot);
+        }
 
         let candidates = self
             .providers
@@ -95,6 +113,55 @@ impl Completer for JarvishCompleter {
     }
 }
 
+/// `ctx.tokens[0]` がシェルエイリアスなら、値を展開して
+/// `ctx.expanded_head` に格納する。
+///
+/// `tokens[0]` が先頭コマンド位置でも（`is_first_token` は呼び出し元で
+/// 弾いている）、それ以外の位置でも意味を持たないため、呼び出しは常に
+/// `!ctx.is_first_token` の場合に限る。
+///
+/// エイリアス値は実行系の `split_quoted`（strict パーサ）でトークナイズする。
+/// パースエラー（未閉クォート等）が出たら展開をスキップする（エイリアス値は
+/// ユーザーが `alias` ビルトインで自由に設定できるため、不正な値でも
+/// パニックせずフォールバックする）。
+///
+/// 展開結果に演算子トークン（`| && || ; > >> <`）が 1 つでも含まれる場合は
+/// 展開しない。パイプ等を含むエイリアス値はセグメントの再切断
+/// （cut_index の再計算）が必要になり、Phase 1.5 のスコープ外として
+/// 意図的に見送る — この場合は今までどおりパス補完にフォールバックする。
+fn apply_shell_alias(ctx: &mut CompletionContext, aliases: &HashMap<String, String>) {
+    let Some(first) = ctx.tokens.first() else {
+        return;
+    };
+    let Some(alias_value) = aliases.get(first.value.as_str()) else {
+        return;
+    };
+
+    let Ok(expanded_tokens) = split_quoted(alias_value) else {
+        return;
+    };
+
+    let has_operator = expanded_tokens
+        .iter()
+        .any(|t| operator_prefix_len(&t.value) == t.value.len());
+    if has_operator {
+        return;
+    }
+
+    let mut values: Vec<String> = expanded_tokens.into_iter().map(|t| t.value).collect();
+    // tokens[0] より後ろの既存トークン（partial 含む）の値を続ける。
+    // `command_words()` の非展開経路と挙動を揃えるため、リダイレクト等の
+    // 演算子トークン（`> >> <`）はここでも除外する。
+    values.extend(
+        ctx.tokens[1..]
+            .iter()
+            .filter(|t| !t.is_operator)
+            .map(|t| t.value.clone()),
+    );
+
+    ctx.expanded_head = Some(values);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +177,18 @@ mod tests {
             Arc::new(RwLock::new(commands)),
             Arc::new(RwLock::new(HashMap::new())),
         )
+    }
+
+    /// alias マップの `Arc` を呼び出し元にも返す（共有 Arc の即時反映を
+    /// テストするため、completer 構築後に呼び出し元からマップを書き換えられる）。
+    fn test_completer_with_aliases(
+        aliases: HashMap<String, String>,
+    ) -> (JarvishCompleter, Arc<RwLock<HashMap<String, String>>>) {
+        let commands = CompletionConfig::default().git_branch_commands;
+        let aliases = Arc::new(RwLock::new(aliases));
+        let completer =
+            JarvishCompleter::new(Arc::new(RwLock::new(commands)), Arc::clone(&aliases));
+        (completer, aliases)
     }
 
     fn create_test_tree() -> (tempfile::TempDir, String) {
@@ -618,6 +697,189 @@ mod tests {
         assert!(
             suggestions.iter().all(|s| s.description.is_none()),
             "descriptions should be stripped when candidate count exceeds the limit"
+        );
+    }
+
+    // ── 新規テスト (Task 1.5: alias 対応補完) ──
+
+    #[test]
+    #[serial]
+    fn alias_single_word_head_triggers_branch_completion() {
+        // alias g=git: 'g checkout test-' がブランチ補完される
+        // （alias → git → git-alias 連鎖は GitProvider の既存解決を利用）。
+        let tmpdir = create_test_git_repo();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut aliases = HashMap::new();
+        aliases.insert("g".to_string(), "git".to_string());
+        let (mut completer, _aliases) = test_completer_with_aliases(aliases);
+
+        let line = "g checkout test-";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&"test-feature"),
+            "'g checkout test-' (alias g=git) should suggest 'test-feature': {values:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn alias_head_in_pipeline_triggers_branch_completion() {
+        // 'ls | g co test-' (alias g=git, git alias co=checkout):
+        // シェルエイリアス→git→git-alias の二重連鎖。
+        let tmpdir = create_test_git_repo_with_aliases();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut aliases = HashMap::new();
+        aliases.insert("g".to_string(), "git".to_string());
+        let (mut completer, _aliases) = test_completer_with_aliases(aliases);
+
+        let line = "ls | g co test-";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&"test-feature"),
+            "'ls | g co test-' should suggest 'test-feature': {values:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn alias_multi_word_value_triggers_branch_completion() {
+        // alias gco="git checkout": 'gco test-' がブランチ補完される。
+        let tmpdir = create_test_git_repo();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut aliases = HashMap::new();
+        aliases.insert("gco".to_string(), "git checkout".to_string());
+        let (mut completer, _aliases) = test_completer_with_aliases(aliases);
+
+        let line = "gco test-";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&"test-feature"),
+            "'gco test-' (alias gco=\"git checkout\") should suggest 'test-feature': {values:?}"
+        );
+    }
+
+    #[test]
+    fn alias_with_operator_value_falls_back_to_path_completion() {
+        // alias lg="ls | grep": 演算子入りのエイリアス値は展開せず、
+        // 今までどおりパス補完にフォールバックする（クラッシュしないことも確認）。
+        let (_tmpdir, path) = create_test_tree();
+
+        let mut aliases = HashMap::new();
+        aliases.insert("lg".to_string(), "ls | grep".to_string());
+        let (mut completer, _aliases) = test_completer_with_aliases(aliases);
+
+        let line = format!("lg {path}/");
+        let pos = line.len();
+        let suggestions = completer.complete(&line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&format!("{path}/readme.txt").as_str()),
+            "operator-bearing alias should fall back to plain path completion: {values:?}"
+        );
+    }
+
+    // これらのテストは PATH 上の実バイナリと衝突しない一意な名前
+    // (`zzjarvishtestalias`) を使う。ありふれた接頭辞（"g" 等）は開発機の
+    // PATH 上に DESCRIPTION_LIMIT を超える数のコマンドがヒットしうるため、
+    // orchestrator の「候補過多で description を一律除去する」ガード
+    // （既存仕様。`complete_large_candidate_set_strips_descriptions` 参照）
+    // に巻き込まれて description アサーションが不安定になる。
+
+    #[test]
+    fn alias_name_offered_as_first_token_candidate() {
+        // 先頭トークンの補完候補にエイリアス名が description=alias 値で出る。
+        let mut aliases = HashMap::new();
+        aliases.insert("zzjarvishtestalias".to_string(), "git".to_string());
+        let (mut completer, _aliases) = test_completer_with_aliases(aliases);
+
+        let line = "zzjarvishtestalias";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        let alias_suggestion = suggestions
+            .iter()
+            .find(|s| s.value == "zzjarvishtestalias")
+            .expect("alias should be offered as a first-token candidate");
+        assert_eq!(
+            alias_suggestion.description.as_deref(),
+            Some("git"),
+            "alias candidate description should be the alias value"
+        );
+    }
+
+    #[test]
+    fn alias_name_removed_from_map_disappears_from_candidates() {
+        let mut aliases = HashMap::new();
+        aliases.insert("zzjarvishtestalias".to_string(), "git".to_string());
+        let (mut completer, aliases_arc) = test_completer_with_aliases(aliases);
+
+        let line = "zzjarvishtestalias";
+        let pos = line.len();
+        let before = completer.complete(line, pos);
+        assert!(
+            before.iter().any(|s| s.value == "zzjarvishtestalias"),
+            "alias should be offered before removal: {before:?}"
+        );
+
+        aliases_arc.write().unwrap().remove("zzjarvishtestalias");
+
+        let after = completer.complete(line, pos);
+        assert!(
+            !after.iter().any(|s| s.value == "zzjarvishtestalias"),
+            "alias should disappear once removed from the shared map: {after:?}"
+        );
+    }
+
+    #[test]
+    fn alias_defined_between_complete_calls_is_picked_up_by_second() {
+        // ヘッドライン UX: セッション中に `alias` ビルトインで定義した直後の
+        // 次の Tab に即座に反映される（共有 Arc — reload 不要）。
+        let (mut completer, aliases_arc) = test_completer_with_aliases(HashMap::new());
+
+        let line = "zzjarvishtestalias";
+        let pos = line.len();
+        let first = completer.complete(line, pos);
+        assert!(
+            !first.iter().any(|s| s.value == "zzjarvishtestalias"),
+            "alias should not be offered before it is defined: {first:?}"
+        );
+
+        aliases_arc
+            .write()
+            .unwrap()
+            .insert("zzjarvishtestalias".to_string(), "git".to_string());
+
+        let second = completer.complete(line, pos);
+        let suggestion = second
+            .iter()
+            .find(|s| s.value == "zzjarvishtestalias")
+            .expect("alias defined between complete() calls should be visible immediately");
+        assert_eq!(
+            suggestion.description.as_deref(),
+            Some("git"),
+            "newly defined alias should carry its value as description"
         );
     }
 }
