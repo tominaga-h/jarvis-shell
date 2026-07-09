@@ -24,7 +24,7 @@ use std::sync::atomic::AtomicBool as StaticAtomicBool;
 static RESTART_FLAG: StaticAtomicBool = StaticAtomicBool::new(false);
 
 use crate::ai::{ConversationState, JarvisAI};
-use crate::cli::completer::ExternalCompletionSettings;
+use crate::cli::completer::{format_external_summary, ExternalCompletionSettings};
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 use crate::cli::prompt::{ShellPrompt, EXIT_CODE_NONE};
 use crate::config::JarvishConfig;
@@ -307,6 +307,8 @@ impl Shell {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "not found".to_string());
+        let external_mode_display =
+            format_external_summary(&config.completion.external, &resolved_external);
         let summary = format!(
             "Loaded {}\n\
              \x20 [ai]\n\
@@ -352,7 +354,7 @@ impl Shell {
             } else {
                 "commands"
             },
-            config.completion.external,
+            external_mode_display,
             external_binary_display,
             config.completion.external_timeout_ms,
             config.startup.commands.len(),

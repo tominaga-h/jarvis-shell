@@ -19,6 +19,7 @@
 //! 返し、`feature-x` 等は含まれない）。そのためこの Provider 側では
 //! `ctx.partial` によるフィルタを重ねて行わない（carapace の責務）。
 
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -46,6 +47,28 @@ pub enum ExternalMode {
     Carapace,
     /// 無効化。
     None,
+}
+
+impl ExternalMode {
+    /// `config.toml` の `external` 値として書ける正規の文字列表現を返す。
+    ///
+    /// `source` ビルトインのサマリー表示（`src/shell/mod.rs` の
+    /// `reload_config`）で、raw な設定文字列ではなく「実際に解決された
+    /// モード」を表示するために使う（未知の値が `auto` へフォールバック
+    /// した事実を隠さないための対応、#88 / #89）。
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            ExternalMode::Auto => "auto",
+            ExternalMode::Carapace => "carapace",
+            ExternalMode::None => "none",
+        }
+    }
+}
+
+impl fmt::Display for ExternalMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// `[completion]` の外部補完（carapace）関連設定を解決した実行時状態。
@@ -107,6 +130,33 @@ impl ExternalCompletionSettings {
             timeout,
             binary,
         }
+    }
+}
+
+/// `source` ビルトインのサマリーに載せる `external:` 行の右辺（binary 部分は
+/// 含まない）を組み立てる純粋関数。
+///
+/// `raw`（`config.toml` の `[completion] external` の生文字列）と、それを
+/// [`ExternalCompletionSettings::resolve`] が実際に解決した後の
+/// `settings.mode` を突き合わせ、以下のいずれかを返す:
+/// - `raw` が既知の値（`"auto"` / `"carapace"` / `"none"`）と一致する場合は
+///   解決後モードをそのまま表示する（例: `"carapace"`）。
+/// - `raw` が未知の値の場合は `resolve()` の暗黙フォールバック（`auto`）を
+///   隠さず、その旨を明示するマーカー付きで表示する
+///   （例: `auto (未対応の値 "bogus" のため auto を使用)`）。
+///
+/// `Shell` 全体を組み立てずにユニットテストできるよう、`&str` と
+/// `ExternalCompletionSettings` のみを引数に取る形にしている（#88 / #89）。
+///
+/// [`ExternalCompletionSettings`] と同じ理由（`mod.rs` の `pub use` 経由で
+/// `Shell::reload_config` から利用するため）で `pub` にしている。
+pub fn format_external_summary(raw: &str, settings: &ExternalCompletionSettings) -> String {
+    let resolved = settings.mode.as_str();
+    let is_known_value = matches!(raw, "auto" | "carapace" | "none");
+    if is_known_value {
+        resolved.to_string()
+    } else {
+        format!("{resolved} (未対応の値 \"{raw}\" のため {resolved} を使用)")
     }
 }
 
@@ -471,6 +521,97 @@ mod tests {
         };
         let settings = ExternalCompletionSettings::resolve(&config);
         assert_eq!(settings.mode, ExternalMode::Auto);
+    }
+
+    // ── ExternalMode::as_str / Display ──
+
+    #[test]
+    fn external_mode_as_str_matches_config_toml_values() {
+        assert_eq!(ExternalMode::Auto.as_str(), "auto");
+        assert_eq!(ExternalMode::Carapace.as_str(), "carapace");
+        assert_eq!(ExternalMode::None.as_str(), "none");
+    }
+
+    #[test]
+    fn external_mode_display_matches_as_str() {
+        assert_eq!(ExternalMode::Auto.to_string(), "auto");
+        assert_eq!(ExternalMode::Carapace.to_string(), "carapace");
+        assert_eq!(ExternalMode::None.to_string(), "none");
+    }
+
+    // ── format_external_summary（`source` サマリーの external: 行）──
+    //
+    // `Shell` は構築せず、`ExternalCompletionSettings` を直接組み立てて
+    // 純粋関数のみを検証する。
+
+    #[test]
+    fn format_external_summary_known_value_shows_resolved_mode_only() {
+        let settings = ExternalCompletionSettings {
+            mode: ExternalMode::Carapace,
+            timeout: Duration::from_millis(400),
+            binary: Some(PathBuf::from("/usr/local/bin/carapace")),
+        };
+        assert_eq!(format_external_summary("carapace", &settings), "carapace");
+    }
+
+    #[test]
+    fn format_external_summary_known_auto_value_shows_auto_without_fallback_marker() {
+        let settings = ExternalCompletionSettings {
+            mode: ExternalMode::Auto,
+            timeout: Duration::from_millis(400),
+            binary: None,
+        };
+        let out = format_external_summary("auto", &settings);
+        assert_eq!(out, "auto");
+        assert!(!out.contains("未対応"));
+    }
+
+    #[test]
+    fn format_external_summary_none_mode_shows_none() {
+        let settings = ExternalCompletionSettings {
+            mode: ExternalMode::None,
+            timeout: Duration::from_millis(400),
+            binary: None,
+        };
+        assert_eq!(format_external_summary("none", &settings), "none");
+    }
+
+    #[test]
+    fn format_external_summary_unknown_value_shows_fallback_marker_with_raw_value() {
+        // resolve() は未知の値を auto にフォールバックさせるため、
+        // settings.mode は Auto になっている前提。
+        let settings = ExternalCompletionSettings {
+            mode: ExternalMode::Auto,
+            timeout: Duration::from_millis(400),
+            binary: None,
+        };
+        let out = format_external_summary("bogus", &settings);
+        assert!(
+            out.contains("auto"),
+            "fallback summary should mention the resolved mode: {out:?}"
+        );
+        assert!(
+            out.contains("bogus"),
+            "fallback summary should mention the raw unknown value: {out:?}"
+        );
+        assert!(
+            out.contains("未対応"),
+            "fallback summary should carry a visible fallback marker: {out:?}"
+        );
+    }
+
+    #[test]
+    fn format_external_summary_unknown_value_end_to_end_via_resolve() {
+        // resolve() が実際に fallback した結果を format_external_summary に
+        // 渡す統合的な確認（raw と settings の食い違いを実際の呼び出し経路で検証）。
+        let config = CompletionConfig {
+            external: "typo-value".to_string(),
+            ..CompletionConfig::default()
+        };
+        let settings = ExternalCompletionSettings::resolve(&config);
+        let out = format_external_summary(&config.external, &settings);
+        assert!(out.contains("auto"));
+        assert!(out.contains("typo-value"));
     }
 
     #[test]

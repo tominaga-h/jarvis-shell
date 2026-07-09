@@ -56,7 +56,7 @@ use git::GitProvider;
 use path::PathProvider;
 use provider::{escape_for_insert, CompletionProvider};
 
-pub use carapace::ExternalCompletionSettings;
+pub use carapace::{format_external_summary, ExternalCompletionSettings};
 
 /// ColumnarMenu は description を持つ候補が 1 件でもあると全幅 1 カラムに
 /// 描画が変わってしまうため、候補数がこの件数を超えたら description を
