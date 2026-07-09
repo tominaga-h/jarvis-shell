@@ -13,6 +13,16 @@
 //! （kill 後は SIGKILL により即座に終了するため実質即時）。メインスレッドが
 //! 先に抜けても Rust の `Child` は Drop 時に kill しない（子プロセス自体は
 //! 別スレッドが `wait_with_output()` で既に刈り取っている想定）。
+//!
+//! # プロセスグループ全体を kill する（孫プロセス対策）
+//! carapace 等の外部補完プロバイダは、内部で `git` 等の実プロセスを
+//! さらに spawn することがある（carapace が発行する孫プロセス）。直接の
+//! 子プロセスの pid だけを kill しても、孫プロセスは carapace の pgid を
+//! 共有したまま孤児化して生き残り、最悪ハングし続ける。これを防ぐため
+//! `unix` では spawn 時に子プロセスを新しいプロセスグループのリーダーに
+//! し（`command.process_group(0)`）、タイムアウト時は `kill(-pid, SIGKILL)`
+//! （負の pid = プロセスグループ全体への送信）でグループごと確実に
+//! 終了させる。
 
 use std::io;
 use std::path::Path;
@@ -20,11 +30,18 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 /// `program` を `args` / `envs` 付きで起動し、`timeout` 以内に正常終了（exit
 /// code 0）した場合のみ stdout を `String` として返す。
 ///
 /// 以下のいずれの場合も `None`:
-/// - `timeout` 以内にプロセスが終了しなかった（SIGKILL で強制終了する）
+/// - `timeout` 以内にプロセスが終了しなかった（`unix` では子プロセスは
+///   専用のプロセスグループのリーダーとして spawn されており、タイムアウト
+///   時はそのプロセスグループ全体に SIGKILL を送る。直接の子プロセスだけ
+///   でなく、子プロセスがさらに spawn した孫プロセス — carapace が実行する
+///   git 等 — も道連れで終了するため、孤児化して残り続けることはない）
 /// - プロセスの spawn 自体に失敗した（バイナリが存在しない等）
 /// - プロセスが非ゼロで終了した
 ///
@@ -45,6 +62,11 @@ pub(crate) fn run_external_capped(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // 子プロセスを新しいプロセスグループのリーダーにする。これにより
+    // タイムアウト時に `kill(-pid, SIGKILL)` で子プロセスが spawn した
+    // 孫プロセス（carapace の場合は git 等）もまとめて確実に kill できる。
+    #[cfg(unix)]
+    command.process_group(0);
 
     let child = match command.spawn() {
         Ok(child) => child,
@@ -89,14 +111,20 @@ pub(crate) fn run_external_capped(
     }
 }
 
-/// `pid` に `SIGKILL` を送る。プロセスが既に終了していた場合のエラーは
+/// `pid` が属するプロセスグループ全体に `SIGKILL` を送る。
+///
+/// `command.process_group(0)` により `pid` は自身のプロセスグループの
+/// リーダー（pgid == pid）になっているため、`kill(-pid, SIGKILL)`（負の
+/// pid はプロセスグループ全体への送信を意味する）で直接の子プロセスだけ
+/// でなく、そのプロセスが spawn した孫プロセス（carapace が発行する
+/// git 等）もまとめて終了させる。プロセスが既に終了していた場合のエラーは
 /// 無視する（reap 済みなら送信対象が既に存在しない = 正常なレース）。
 #[cfg(unix)]
 fn kill_pid(pid: u32) {
-    let ret = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    let ret = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
     if ret != 0 {
         let err = io::Error::last_os_error();
-        tracing::debug!("run_external_capped: kill({pid}) failed: {err}");
+        tracing::debug!("run_external_capped: kill(-{pid}) failed: {err}");
     }
 }
 
@@ -150,8 +178,14 @@ mod tests {
         // pid を取得できるよう、内部の spawn ロジックをここでも直接使う
         // （run_external_capped は pid を外部に返さない設計のため、テスト用に
         // 同じ spawn+kill の流れを再現して「本当に死んでいるか」を確認する）。
+        // 本番と同じく process_group(0) を設定する（kill_pid は -pid で
+        // プロセスグループ全体に送るため、揃えないと対象がずれる）。
         let mut command = Command::new("/bin/sleep");
-        command.arg("5").stdout(Stdio::null()).stderr(Stdio::null());
+        command
+            .arg("5")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
         let child = command.spawn().expect("failed to spawn /bin/sleep");
         let pid = child.id();
 
@@ -172,6 +206,72 @@ mod tests {
             err.raw_os_error(),
             Some(libc::ESRCH),
             "expected ESRCH (no such process) after kill+reap, got {err:?}"
+        );
+    }
+
+    /// carapace が孫プロセス（git 等）を spawn するケースの再現テスト。
+    ///
+    /// `run_external_capped` 経由で `sh -c 'sleep 30 & echo $! > <tempfile>; wait'`
+    /// を短いタイムアウトで実行する。`sh` は直接の子プロセス、`sleep 30` は
+    /// その `sh` がバックグラウンドで spawn した孫プロセスに相当する。
+    /// タイムアウト後、プロセスグループ全体への kill によって孫プロセスも
+    /// 道連れで死んでいることを確認する（直接の子だけを kill する実装では
+    /// 孫プロセスは孤児化して生き残ってしまう）。
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_grandchild_process_spawned_by_child() {
+        let tempfile = std::env::temp_dir().join(format!(
+            "jarvish-external-grandchild-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let tempfile_path = tempfile.to_str().unwrap().to_string();
+
+        let out = run_external_capped(
+            Path::new("/bin/sh"),
+            &[
+                "-c".to_string(),
+                format!("sleep 30 & echo $! > {tempfile_path}; wait"),
+            ],
+            &[],
+            Duration::from_millis(150),
+        );
+        assert!(out.is_none(), "the wrapping sh should time out to None");
+
+        // グループ kill が孫プロセス (sleep 30) へ届き、reap されるまで
+        // 少し待つ（グランドチャイルドの pid ファイル書き込み自体も
+        // 非同期なので、多少のポーリング余地を持たせる）。
+        let mut grandchild_pid: Option<i32> = None;
+        for _ in 0..20 {
+            if let Ok(contents) = std::fs::read_to_string(&tempfile) {
+                if let Ok(pid) = contents.trim().parse::<i32>() {
+                    grandchild_pid = Some(pid);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let gpid = grandchild_pid.expect("grandchild should have written its pid to tempfile");
+
+        // グループ kill 後、孫プロセスが実際に死んでいるかポーリングで確認する。
+        let mut alive = true;
+        for _ in 0..20 {
+            let ret = unsafe { libc::kill(gpid as libc::pid_t, 0) };
+            if ret == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                alive = false;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let _ = std::fs::remove_file(&tempfile);
+
+        assert!(
+            !alive,
+            "grandchild pid {gpid} should be dead after group-kill on timeout"
         );
     }
 
