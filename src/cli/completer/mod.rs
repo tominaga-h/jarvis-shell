@@ -9,6 +9,8 @@
 //! `brew install` 等で新しいバイナリが追加された直後でも即座に補完候補に出現する。
 
 mod command;
+#[allow(dead_code)] // TODO(Phase1 Task 1.3): orchestrator will consume this module
+mod context;
 mod git;
 mod path;
 
