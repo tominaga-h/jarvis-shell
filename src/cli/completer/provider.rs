@@ -37,16 +37,22 @@ pub(crate) trait CompletionProvider: Send {
 
 /// 補完確定時に挿入する値をエスケープする。
 ///
-/// 空白・タブおよび `' " \ | & ; < > ( ) ` (バックタイム) をバックスラッシュで
+/// Unicode 空白（`char::is_whitespace()` が true を返す全文字。U+00A0 NBSP 等を
+/// 含む）および `' " \ | & ; < > ( ) ` (バックタイム) をバックスラッシュで
 /// エスケープする。クォートで包む方式を採らないのは、クォートされたトークンが
 /// 実行系でチルダ・環境変数展開をスキップしてしまうため（`quote.rs` / `expand.rs`
 /// の展開はクォート外のトークンにのみ適用される）。
 ///
+/// Unicode 空白全体をエスケープ対象にしているのは、このエスケープが
+/// round-trip すべき相手（`context.rs` の `lex_lenient` と
+/// `engine/expand/quote.rs` の `split_quoted`）がどちらも
+/// `char::is_whitespace()` でトークン境界を判定しているため。ASCII の
+/// 空白・タブだけをエスケープすると、値に U+00A0 のような非 ASCII 空白を
+/// 含む候補を挿入した際に再レックスで 2 トークンに分裂してしまう。
+///
 /// 先頭の `~` はエスケープしない（チルダ展開を維持するため）。
 pub(crate) fn escape_for_insert(value: &str) -> String {
-    const SPECIAL: &[char] = &[
-        ' ', '\t', '\'', '"', '\\', '|', '&', ';', '<', '>', '(', ')', '$', '`',
-    ];
+    const SPECIAL: &[char] = &['\'', '"', '\\', '|', '&', ';', '<', '>', '(', ')', '$', '`'];
 
     let (head, rest) = if let Some(stripped) = value.strip_prefix('~') {
         ("~", stripped)
@@ -57,7 +63,7 @@ pub(crate) fn escape_for_insert(value: &str) -> String {
     let mut out = String::with_capacity(head.len() + rest.len());
     out.push_str(head);
     for ch in rest.chars() {
-        if SPECIAL.contains(&ch) {
+        if ch.is_whitespace() || SPECIAL.contains(&ch) {
             out.push('\\');
         }
         out.push(ch);
@@ -110,5 +116,47 @@ mod tests {
     #[test]
     fn escape_for_insert_empty_string() {
         assert_eq!(escape_for_insert(""), "");
+    }
+
+    #[test]
+    fn escape_for_insert_ascii_space_round_trips_via_lenient_scanner() {
+        use super::super::context::extract_context;
+
+        let escaped = escape_for_insert("a b.txt");
+        let line = format!("echo {escaped}");
+        let ctx = extract_context(&line, line.len());
+
+        assert_eq!(
+            ctx.tokens.len(),
+            2,
+            "escaped ASCII-space candidate should re-lex as a single trailing token: {:?}",
+            ctx.tokens
+        );
+        assert_eq!(ctx.tokens[1].value, "a b.txt");
+    }
+
+    #[test]
+    fn escape_for_insert_unicode_nbsp_round_trips_via_lenient_scanner() {
+        use super::super::context::extract_context;
+
+        let value = "a\u{00A0}b.txt";
+        let escaped = escape_for_insert(value);
+        // NBSP は SPECIAL に含まれないが is_whitespace() では true になるため
+        // バックスラッシュエスケープされているはず。
+        assert_eq!(escaped, "a\\\u{00A0}b.txt");
+
+        let line = format!("echo {escaped}");
+        let ctx = extract_context(&line, line.len());
+
+        assert_eq!(
+            ctx.tokens.len(),
+            2,
+            "escaped NBSP candidate should re-lex as a single trailing token: {:?}",
+            ctx.tokens
+        );
+        assert_eq!(
+            ctx.tokens[1].value, value,
+            "round-tripped token value should equal the original candidate value"
+        );
     }
 }
