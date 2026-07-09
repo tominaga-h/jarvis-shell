@@ -106,6 +106,7 @@ impl super::JarvishCompleter {
 mod tests {
     use reedline::Span;
     use serial_test::serial;
+    use std::collections::HashMap;
     use std::env;
     use std::fs;
 
@@ -116,7 +117,10 @@ mod tests {
 
     fn test_completer() -> JarvishCompleter {
         let commands = CompletionConfig::default().git_branch_commands;
-        JarvishCompleter::new(Arc::new(RwLock::new(commands)))
+        JarvishCompleter::new(
+            Arc::new(RwLock::new(commands)),
+            Arc::new(RwLock::new(HashMap::new())),
+        )
     }
 
     fn create_test_tree() -> (tempfile::TempDir, String) {

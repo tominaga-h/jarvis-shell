@@ -44,8 +44,8 @@ pub struct Shell {
     /// 直前コマンドの実行時間（ミリ秒）。Starship プロンプトの `--cmd-duration` に使用。
     cmd_duration_ms: Arc<AtomicU64>,
     classifier: Arc<InputClassifier>,
-    /// 設定ファイルで定義されたコマンドエイリアス
-    aliases: HashMap<String, String>,
+    /// 設定ファイルで定義されたコマンドエイリアス（JarvishCompleter と共有）
+    aliases: Arc<RwLock<HashMap<String, String>>>,
     /// 異常終了時に自動調査をスキップするコマンドの前方一致パターン
     ignore_auto_investigation_cmds: Vec<String>,
     /// pushd / popd / cd で管理されるディレクトリスタック
@@ -86,12 +86,16 @@ impl Shell {
         let git_branch_commands =
             Arc::new(RwLock::new(config.completion.git_branch_commands.clone()));
 
+        // エイリアスは JarvishCompleter と共有するため editor 構築前に確保する
+        let aliases = Arc::new(RwLock::new(config.alias.clone()));
+
         let db_path = data_dir.join("history.db");
         let (reedline, history_available) = editor::build_editor(
             Arc::clone(&classifier),
             db_path,
             session_id,
             Arc::clone(&git_branch_commands),
+            Arc::clone(&aliases),
         );
 
         // 直前コマンドの終了コードを共有するアトミック変数
@@ -142,7 +146,7 @@ impl Shell {
             last_exit_code,
             cmd_duration_ms,
             classifier,
-            aliases: config.alias,
+            aliases,
             ignore_auto_investigation_cmds: config.ai.ignore_auto_investigation_cmds,
             dir_stack: Vec::new(),
             farewell_shown: false,
@@ -244,7 +248,9 @@ impl Shell {
         };
 
         // [alias] を反映
-        self.aliases = config.alias.clone();
+        if let Ok(mut a) = self.aliases.write() {
+            *a = config.alias.clone();
+        }
 
         // [export] を反映
         Self::apply_exports(&config);

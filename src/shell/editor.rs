@@ -3,6 +3,7 @@
 //! ハイライター、補完、キーバインディング、履歴、オートサジェストを設定した
 //! reedline エディタを構築する。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -30,8 +31,9 @@ pub fn build_editor(
     db_path: PathBuf,
     session_id: i64,
     git_branch_commands: Arc<RwLock<Vec<String>>>,
+    aliases: Arc<RwLock<HashMap<String, String>>>,
 ) -> (Reedline, bool) {
-    let completer = Box::new(JarvishCompleter::new(git_branch_commands));
+    let completer = Box::new(JarvishCompleter::new(git_branch_commands, aliases));
     let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
 
     let mut keybindings = default_emacs_keybindings();

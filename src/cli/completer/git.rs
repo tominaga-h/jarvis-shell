@@ -136,6 +136,7 @@ impl super::JarvishCompleter {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
 
     use reedline::Span;
@@ -147,7 +148,10 @@ mod tests {
 
     fn test_completer() -> JarvishCompleter {
         let commands = CompletionConfig::default().git_branch_commands;
-        JarvishCompleter::new(Arc::new(RwLock::new(commands)))
+        JarvishCompleter::new(
+            Arc::new(RwLock::new(commands)),
+            Arc::new(RwLock::new(HashMap::new())),
+        )
     }
 
     fn create_test_git_repo() -> tempfile::TempDir {

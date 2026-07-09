@@ -31,13 +31,20 @@ pub struct JarvishCompleter {
     git_aliases_cache: RwLock<HashMap<PathBuf, HashMap<String, String>>>,
     /// ブランチ名補完を提供する git サブコマンド（config.toml で設定可能）
     pub(super) git_branch_commands: Arc<RwLock<Vec<String>>>,
+    /// シェルエイリアス（Shell と共有）
+    #[allow(dead_code)] // TODO(Phase1 Task 1.5): alias-aware completion will use this
+    aliases: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl JarvishCompleter {
-    pub fn new(git_branch_commands: Arc<RwLock<Vec<String>>>) -> Self {
+    pub fn new(
+        git_branch_commands: Arc<RwLock<Vec<String>>>,
+        aliases: Arc<RwLock<HashMap<String, String>>>,
+    ) -> Self {
         Self {
             git_aliases_cache: RwLock::new(HashMap::new()),
             git_branch_commands,
+            aliases,
         }
     }
 
@@ -98,7 +105,10 @@ mod tests {
 
     fn test_completer() -> JarvishCompleter {
         let commands = CompletionConfig::default().git_branch_commands;
-        JarvishCompleter::new(Arc::new(RwLock::new(commands)))
+        JarvishCompleter::new(
+            Arc::new(RwLock::new(commands)),
+            Arc::new(RwLock::new(HashMap::new())),
+        )
     }
 
     fn create_test_tree() -> (tempfile::TempDir, String) {

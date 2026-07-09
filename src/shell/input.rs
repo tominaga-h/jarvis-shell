@@ -40,7 +40,14 @@ impl Shell {
         // 0. エイリアス展開（先頭トークンがエイリアスに一致すれば置換）
         // 履歴にはユーザーが実際に入力した文字列を記録するため、展開前の入力を保持する
         let original_line = line.clone();
-        let line = if let Some(expanded) = expand::expand_alias(&line, &self.aliases) {
+        // read ガードは短命スコープで取得し、await を跨いで保持しない
+        let expanded = {
+            match self.aliases.read() {
+                Ok(guard) => expand::expand_alias(&line, &guard),
+                Err(_) => None,
+            }
+        };
+        let line = if let Some(expanded) = expanded {
             debug!(original = %line, expanded = %expanded, "Alias expanded");
             expanded
         } else {
@@ -282,8 +289,22 @@ impl Shell {
         let args: Vec<&str> = expanded[1..].iter().map(|s| s.as_str()).collect();
 
         let result = match first_word {
-            "alias" => alias::execute_with_aliases(&args, &mut self.aliases),
-            "unalias" => unalias::execute_with_aliases(&args, &mut self.aliases),
+            "alias" => {
+                let Ok(mut guard) = self.aliases.write() else {
+                    let msg = "jarvish: alias: internal error: lock poisoned\n".to_string();
+                    eprint!("{msg}");
+                    return Some(CommandResult::error(msg, 1));
+                };
+                alias::execute_with_aliases(&args, &mut guard)
+            }
+            "unalias" => {
+                let Ok(mut guard) = self.aliases.write() else {
+                    let msg = "jarvish: unalias: internal error: lock poisoned\n".to_string();
+                    eprint!("{msg}");
+                    return Some(CommandResult::error(msg, 1));
+                };
+                unalias::execute_with_aliases(&args, &mut guard)
+            }
             "source" => {
                 let path_str = match source::parse(&args) {
                     Ok(p) => p,
@@ -297,8 +318,22 @@ impl Shell {
             "pushd" => dirstack::execute_pushd(&args, &mut self.dir_stack),
             "popd" => dirstack::execute_popd(&args, &mut self.dir_stack),
             "dirs" => dirstack::execute_dirs(&args, &mut self.dir_stack),
-            "which" => which_type::execute_which(&args, &self.aliases),
-            "type" => which_type::execute_type(&args, &self.aliases),
+            "which" => {
+                let Ok(guard) = self.aliases.read() else {
+                    let msg = "jarvish: which: internal error: lock poisoned\n".to_string();
+                    eprint!("{msg}");
+                    return Some(CommandResult::error(msg, 1));
+                };
+                which_type::execute_which(&args, &guard)
+            }
+            "type" => {
+                let Ok(guard) = self.aliases.read() else {
+                    let msg = "jarvish: type: internal error: lock poisoned\n".to_string();
+                    eprint!("{msg}");
+                    return Some(CommandResult::error(msg, 1));
+                };
+                which_type::execute_type(&args, &guard)
+            }
             _ => unreachable!(),
         };
 
