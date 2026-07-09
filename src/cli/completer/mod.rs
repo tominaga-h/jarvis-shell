@@ -1,24 +1,41 @@
-//! コマンド補完 — Tab キーで PATH コマンド名・ビルトイン・ファイルパスを補完
+//! コマンド補完 — Tab キーで PATH コマンド名・ビルトイン・ファイルパス・git ブランチを補完
 //!
-//! - 先頭トークン: PATH 内の実行可能コマンド + ビルトイン (cd, cwd, exit)
+//! - 先頭トークン: PATH 内の実行可能コマンド + ビルトイン (cd, cwd, exit, ...)
 //! - 先頭トークンがパスらしい場合 (`./` `../` `/` `~/`): ファイル / ディレクトリ補完
+//! - `git <branch系サブコマンド>`: git ブランチ名補完
 //! - それ以降: カレントディレクトリ基準のファイル / ディレクトリ名
 //!
-//! fish shell の設計思想に倣い、インメモリキャッシュを持たず、
+//! [`CompletionProvider`] トレイトで補完源をプラグイン化しており、
+//! `complete()` は [`Command`](command::CommandProvider) →
+//! [`Git`](git::GitProvider) → [`Path`](path::PathProvider) の順に
+//! 各プロバイダを走査し、最初に `Some` を返したプロバイダの候補を採用する
+//! （`None` = 対象外で次へ、`Some(vec![])` = 担当したが候補なしでそこで確定）。
+//!
+//! コマンド名補完は fish shell の設計思想に倣い、インメモリキャッシュを持たず、
 //! Tab 押下時にリアルタイムで `$PATH` を走査する（キャッシュレス設計）。
 //! `brew install` 等で新しいバイナリが追加された直後でも即座に補完候補に出現する。
 
 mod command;
-#[allow(dead_code)] // TODO(Phase1 Task 1.3): orchestrator will consume this module
 mod context;
 mod git;
 mod path;
+mod provider;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use reedline::{Completer, Span, Suggestion};
+use reedline::{Completer, Suggestion};
+
+use command::CommandProvider;
+use context::extract_context;
+use git::GitProvider;
+use path::PathProvider;
+use provider::{escape_for_insert, CompletionProvider};
+
+/// ColumnarMenu は description を持つ候補が 1 件でもあると全幅 1 カラムに
+/// 描画が変わってしまうため、候補数がこの件数を超えたら description を
+/// 一律で除去する（大きな PATH スキャン結果を守るガード）。
+const DESCRIPTION_LIMIT: usize = 30;
 
 /// Jarvish 用の補完エンジン
 ///
@@ -27,10 +44,7 @@ use reedline::{Completer, Span, Suggestion};
 ///
 /// `git_branch_commands` は `Shell` と共有され、`source` コマンドで動的に更新される。
 pub struct JarvishCompleter {
-    /// CWD ごとの Git エイリアスマップ: `{ CWD: { "co": "checkout", "b": "branch", ... } }`
-    git_aliases_cache: RwLock<HashMap<PathBuf, HashMap<String, String>>>,
-    /// ブランチ名補完を提供する git サブコマンド（config.toml で設定可能）
-    pub(super) git_branch_commands: Arc<RwLock<Vec<String>>>,
+    providers: Vec<Box<dyn CompletionProvider>>,
     /// シェルエイリアス（Shell と共有）
     #[allow(dead_code)] // TODO(Phase1 Task 1.5): alias-aware completion will use this
     aliases: Arc<RwLock<HashMap<String, String>>>,
@@ -41,56 +55,43 @@ impl JarvishCompleter {
         git_branch_commands: Arc<RwLock<Vec<String>>>,
         aliases: Arc<RwLock<HashMap<String, String>>>,
     ) -> Self {
-        Self {
-            git_aliases_cache: RwLock::new(HashMap::new()),
-            git_branch_commands,
-            aliases,
-        }
-    }
-
-    /// カーソルより前の文字列から、補完対象トークンの開始位置を返す。
-    fn token_start(line: &str, pos: usize) -> usize {
-        let before = &line[..pos];
-        before.rfind(' ').map(|i| i + 1).unwrap_or(0)
-    }
-
-    /// カーソルが先頭トークン上にあるかを判定する。
-    fn is_first_token(line: &str, pos: usize) -> bool {
-        !line[..pos].contains(' ')
-    }
-
-    /// 先頭トークンがパスらしいかを判定する。
-    ///
-    /// `/` を含む (`./target/debug/`, `bin/foo`, `/usr/bin/ls`, `~/bin/x`)、
-    /// または `~` で始まる (`~` 単体もホーム基準) 場合にファイル補完へ回す。
-    fn looks_like_path(token: &str) -> bool {
-        token.contains('/') || token.starts_with('~')
+        let providers: Vec<Box<dyn CompletionProvider>> = vec![
+            Box::new(CommandProvider),
+            Box::new(GitProvider::new(git_branch_commands)),
+            Box::new(PathProvider),
+        ];
+        Self { providers, aliases }
     }
 }
 
 impl Completer for JarvishCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
-        let start = Self::token_start(line, pos);
-        let partial = &line[start..pos];
-        let span = Span::new(start, pos);
+        let ctx = extract_context(line, pos);
 
-        if Self::is_first_token(line, pos) {
-            if Self::looks_like_path(partial) {
-                self.complete_path(partial, span, false)
-            } else {
-                self.complete_command(partial, span)
-            }
-        } else {
-            let tokens: Vec<&str> = line[..pos].split_whitespace().collect();
+        let candidates = self
+            .providers
+            .iter()
+            .find_map(|provider| provider.provide(&ctx))
+            .unwrap_or_default();
 
-            if let Some(git_suggestions) = self.try_complete_git(&tokens, partial, span) {
-                return git_suggestions;
-            }
+        let strip_descriptions = candidates.len() > DESCRIPTION_LIMIT;
 
-            let first_token = tokens.first().copied().unwrap_or("");
-            let dirs_only = first_token == "cd";
-            self.complete_path(partial, span, dirs_only)
-        }
+        candidates
+            .into_iter()
+            .map(|candidate| Suggestion {
+                value: escape_for_insert(&candidate.value),
+                description: if strip_descriptions {
+                    None
+                } else {
+                    candidate.description
+                },
+                style: None,
+                extra: None,
+                span: ctx.span,
+                append_whitespace: candidate.append_whitespace,
+                match_indices: None,
+            })
+            .collect()
     }
 }
 
@@ -182,59 +183,7 @@ mod tests {
         tmpdir
     }
 
-    // ── ヘルパーメソッドテスト ──
-
-    #[test]
-    fn token_start_no_space() {
-        assert_eq!(JarvishCompleter::token_start("ls", 2), 0);
-    }
-
-    #[test]
-    fn token_start_after_command() {
-        assert_eq!(JarvishCompleter::token_start("cd /tmp", 7), 3);
-    }
-
-    #[test]
-    fn is_first_token_true() {
-        assert!(JarvishCompleter::is_first_token("ls", 2));
-    }
-
-    #[test]
-    fn is_first_token_false() {
-        assert!(!JarvishCompleter::is_first_token("cd /tmp", 7));
-    }
-
-    // ── looks_like_path テスト ──
-
-    #[test]
-    fn looks_like_path_true_cases() {
-        for token in [
-            "./",
-            "../",
-            "./target/debug/",
-            "/usr/bin/ls",
-            "~/",
-            "~",
-            "sub/foo",
-        ] {
-            assert!(
-                JarvishCompleter::looks_like_path(token),
-                "'{token}' should look like a path"
-            );
-        }
-    }
-
-    #[test]
-    fn looks_like_path_false_cases() {
-        for token in ["ls", "cargo", "git", ""] {
-            assert!(
-                !JarvishCompleter::looks_like_path(token),
-                "'{token}' should not look like a path"
-            );
-        }
-    }
-
-    // ── complete (Completer trait) 統合テスト ──
+    // ── complete (Completer trait) 統合テスト（既存の回帰網。原文の意図・assertion を維持） ──
 
     #[test]
     fn complete_cd_dirs_only_via_trait() {
@@ -523,6 +472,152 @@ mod tests {
         assert!(
             !values.iter().any(|v| v.contains("readme.txt")),
             "'Do' prefix should exclude readme.txt: {values:?}"
+        );
+    }
+
+    // ── 新規テスト (Task 1.3) ──
+
+    #[test]
+    #[serial]
+    fn complete_pipeline_git_checkout_includes_branches() {
+        // 'ls | git checkout test-' でパイプ後のセグメントがブランチ補完される。
+        let tmpdir = create_test_git_repo();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut completer = test_completer();
+        let line = "ls | git checkout test-";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&"test-feature"),
+            "pipeline segment should suggest 'test-feature': {values:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn complete_quoted_partial_completes_files() {
+        // 'echo "fo' が一時ディレクトリ内の fo* ファイルを補完する。
+        let tmpdir = tempfile::tempdir().unwrap();
+        fs::write(tmpdir.path().join("foo.txt"), "").unwrap();
+        fs::write(tmpdir.path().join("bar.txt"), "").unwrap();
+
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut completer = test_completer();
+        let line = r#"echo "fo"#;
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&"foo.txt"),
+            "quoted partial 'fo' should suggest foo.txt: {values:?}"
+        );
+        assert!(
+            !values.iter().any(|v| v.contains("bar")),
+            "'fo' prefix should exclude bar.txt: {values:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn complete_file_with_space_is_escaped_on_insert() {
+        // 'foo bar.txt' という名前のファイルはエスケープされた値で挿入される。
+        let tmpdir = tempfile::tempdir().unwrap();
+        fs::write(tmpdir.path().join("foo bar.txt"), "").unwrap();
+
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut completer = test_completer();
+        let line = "cat foo";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&r"foo\ bar.txt"),
+            "space in filename should be escaped: {values:?}"
+        );
+        assert!(
+            !values.contains(&"foo bar.txt"),
+            "unescaped raw value should not be inserted directly: {values:?}"
+        );
+    }
+
+    #[test]
+    fn complete_pipeline_cd_offers_dirs_only() {
+        // 'ls | cd ' はディレクトリのみを候補に出す。
+        let (_tmpdir, path) = create_test_tree();
+        let mut completer = test_completer();
+        let line = format!("ls | cd {path}/");
+        let pos = line.len();
+
+        let suggestions = completer.complete(&line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(values.contains(&format!("{path}/Documents/").as_str()));
+        assert!(
+            !values.iter().any(|v| v.contains("readme.txt")),
+            "cd after pipe should only offer directories: {values:?}"
+        );
+    }
+
+    #[test]
+    fn complete_builtin_suggestions_carry_descriptions() {
+        let mut completer = test_completer();
+        let line = "cd";
+        let pos = line.len();
+
+        let suggestions = completer.complete(line, pos);
+
+        let cd_suggestion = suggestions
+            .iter()
+            .find(|s| s.value == "cd")
+            .expect("'cd' builtin should be suggested");
+        assert!(
+            cd_suggestion.description.is_some(),
+            "builtin 'cd' suggestion should carry a description"
+        );
+    }
+
+    #[test]
+    fn complete_large_candidate_set_strips_descriptions() {
+        // DESCRIPTION_LIMIT を超える候補数になる場面では description が全除去される。
+        let tmpdir = tempfile::tempdir().unwrap();
+        for i in 0..(DESCRIPTION_LIMIT + 5) {
+            fs::write(tmpdir.path().join(format!("file{i}.txt")), "").unwrap();
+        }
+
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut completer = test_completer();
+        let line = "ls file";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        assert!(
+            suggestions.len() > DESCRIPTION_LIMIT,
+            "test setup should exceed DESCRIPTION_LIMIT: {}",
+            suggestions.len()
+        );
+        assert!(
+            suggestions.iter().all(|s| s.description.is_none()),
+            "descriptions should be stripped when candidate count exceeds the limit"
         );
     }
 }

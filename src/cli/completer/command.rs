@@ -1,48 +1,71 @@
 //! コマンド名補完 — PATH 走査 + ビルトイン
+//!
+//! `$PATH` の走査はキャッシュレス（fish shell 式）で、Tab 押下ごとに
+//! リアルタイムで走査する。`brew install` 等で新しいバイナリが追加された
+//! 直後でも即座に補完候補に出現する。
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
-use reedline::{Span, Suggestion};
+use crate::engine::builtins::BUILTIN_COMMANDS;
 
-/// ビルトインコマンド名（補完候補に常に含める）
-const BUILTIN_COMMANDS: &[&str] = &["cd", "cwd", "exit", "export", "unset", "help", "history"];
+use super::context::CompletionContext;
+use super::provider::{Candidate, CompletionProvider};
 
-impl super::JarvishCompleter {
-    /// コマンド名補完（先頭トークン）
-    ///
-    /// `$PATH` をリアルタイム走査し、ビルトインコマンドと合わせて候補を生成する。
-    pub(super) fn complete_command(&self, partial: &str, span: Span) -> Vec<Suggestion> {
-        let mut matches = scan_path_commands(partial);
+/// コマンド名補完プロバイダ（先頭トークン）。
+///
+/// 先頭トークンがパスらしく見える場合（`looks_like_path`）は担当外とし、
+/// `PathProvider` に処理を譲る（#321 の挙動を維持）。
+pub(super) struct CommandProvider;
 
-        for cmd in BUILTIN_COMMANDS {
+impl CompletionProvider for CommandProvider {
+    fn provide(&self, ctx: &CompletionContext) -> Option<Vec<Candidate>> {
+        if !ctx.is_first_token || looks_like_path(&ctx.partial) {
+            return None;
+        }
+
+        let partial = ctx.partial.as_str();
+
+        // 名前をキーにしたマップで統合する。同名が PATH 上の実行ファイルと
+        // ビルトインの両方に存在する場合（例: macOS の `/usr/bin/cd`）、
+        // ビルトインの説明文を優先する。
+        let mut matches: BTreeMap<String, Option<String>> = scan_path_commands(partial)
+            .into_iter()
+            .map(|name| (name, None))
+            .collect();
+
+        for (cmd, description) in BUILTIN_COMMANDS {
             if cmd.starts_with(partial) {
-                matches.push(cmd.to_string());
+                matches.insert(cmd.to_string(), Some((*description).to_string()));
             }
         }
 
-        matches.sort_unstable();
-        matches.dedup();
-
-        matches
-            .into_iter()
-            .map(|cmd| Suggestion {
-                value: cmd,
-                description: None,
-                style: None,
-                extra: None,
-                span,
-                append_whitespace: true,
-                match_indices: None,
-            })
-            .collect()
+        Some(
+            matches
+                .into_iter()
+                .map(|(value, description)| Candidate {
+                    value,
+                    description,
+                    append_whitespace: true,
+                })
+                .collect(),
+        )
     }
+}
+
+/// 先頭トークンがパスらしいかを判定する。
+///
+/// `/` を含む (`./target/debug/`, `bin/foo`, `/usr/bin/ls`, `~/bin/x`)、
+/// または `~` で始まる (`~` 単体もホーム基準) 場合にファイル補完へ回す。
+pub(super) fn looks_like_path(token: &str) -> bool {
+    token.contains('/') || token.starts_with('~')
 }
 
 /// `$PATH` 上の実行可能ファイルのうち、`prefix` に前方一致するものを収集する。
 ///
 /// 実行権限チェック (`mode & 0o111 != 0`) を行い、
-/// README 等の非実行ファイルを除外する。
+/// README 等の非実行ファイルを除外する。PATH コマンドに説明文は付けない。
 fn scan_path_commands(prefix: &str) -> Vec<String> {
     let path_var = match std::env::var("PATH") {
         Ok(p) => p,
@@ -69,4 +92,34 @@ fn scan_path_commands(prefix: &str) -> Vec<String> {
         }
     }
     commands
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn looks_like_path_true_cases() {
+        for token in [
+            "./",
+            "../",
+            "./target/debug/",
+            "/usr/bin/ls",
+            "~/",
+            "~",
+            "sub/foo",
+        ] {
+            assert!(looks_like_path(token), "'{token}' should look like a path");
+        }
+    }
+
+    #[test]
+    fn looks_like_path_false_cases() {
+        for token in ["ls", "cargo", "git", ""] {
+            assert!(
+                !looks_like_path(token),
+                "'{token}' should not look like a path"
+            );
+        }
+    }
 }
