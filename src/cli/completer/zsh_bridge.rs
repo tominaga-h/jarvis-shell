@@ -64,7 +64,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use super::carapace::{ExternalCompletionSettings, ExternalKind};
+use super::carapace::{gate, ExternalCompletionSettings, ExternalKind};
 use super::context::CompletionContext;
 use super::external::run_external_capped;
 use super::provider::{Candidate, CompletionProvider};
@@ -196,12 +196,21 @@ fn is_symlink(path: &Path) -> io::Result<bool> {
 
 /// `zsh --no-rcs -c <script>` のハードタイムアウト予算。
 ///
-/// ワンショットの内側 zsh 起動 + compinit は環境によって 100〜300ms
-/// かかりうるため、carapace 用に短めに調整された
-/// `ExternalCompletionSettings::timeout` をそのまま使うとタイムアウトで
-/// 候補を取りこぼしやすい。Task 2b.4 で独立設定が入るまでの暫定措置として、
-/// 共有設定の timeout と、compinit の重さを見込んだ下限値の大きい方を使う。
-const MIN_TIMEOUT_MS: u64 = 800;
+/// 実機計測（warm 状態、zpty 経由の内側 zsh 起動 + compinit + PTY
+/// ポーリングを含むワンショット呼び出し全体）では、通常の補完（例:
+/// `git <subcommand>` 補完）でも 700〜1100ms かかることが確認されている
+/// （zpty/PTY のポーリングオーバーヘッドが支配的）。デフォルト設定
+/// （`external_timeout_ms = 400`）をそのまま使うと、この現実的なコストを
+/// 大きく下回るタイムアウトになり、ありふれた補完（git サブコマンド
+/// 補完等）でも静かにタイムアウトしてしまう。そのため、計測値 700〜1100ms に
+/// 余裕（headroom）を持たせた 2000ms を下限値として設定し、共有設定の
+/// timeout とこの下限値の大きい方を使う。
+///
+/// **この下限値は zsh ブリッジ専用**であり、carapace（[`CarapaceProvider`]）
+/// には適用しない — carapace は起動コストが低く、設定された
+/// `external_timeout_ms` をそのまま使っても実用上問題ない
+/// （[`crate::cli::completer::carapace::gate`] のドキュメント参照）。
+const MIN_TIMEOUT_MS: u64 = 2000;
 
 /// zsh 補完ブリッジ Provider。
 ///
@@ -308,18 +317,18 @@ impl CompletionProvider for ZshBridgeProvider {
             return None;
         }
 
-        let timeout = {
-            // 短命な read ロック: 有効化判定と timeout を取得したら即座に drop
-            // する（`carapace.rs` / `mod.rs` の aliases スナップショットと
-            // 同じ方針）。zsh が優先順リストに含まれていない（無効化されて
-            // いる、または carapace のみが指定されている等）場合は
-            // binary_path が None を返し、ここで早期 return する。
-            let settings = self.settings.read().ok()?;
-            settings.binary_path(ExternalKind::Zsh)?;
-            settings
-                .timeout
-                .max(std::time::Duration::from_millis(MIN_TIMEOUT_MS))
-        };
+        // 短命な read ロック（`gate` 内部で取得・即座に drop する —
+        // `carapace.rs` / `mod.rs` の aliases スナップショットと同じ方針）。
+        // zsh が優先順リストに含まれていない（無効化されている、または
+        // carapace のみが指定されている等）場合は `gate` が `None` を返し、
+        // ここで早期 return する。`MIN_TIMEOUT_MS` フロアは zsh ブリッジ
+        // 専用（compinit の重さ対策 — 定数のドキュメント参照）なので
+        // `Some(...)` で渡す。
+        let (_gated_binary, timeout) = gate(
+            &self.settings,
+            ExternalKind::Zsh,
+            Some(std::time::Duration::from_millis(MIN_TIMEOUT_MS)),
+        )?;
 
         let zsh = self.resolve_zsh()?;
 
@@ -979,17 +988,29 @@ mod tests {
 
     #[test]
     fn timeout_budget_is_at_least_min_timeout() {
-        // MIN_TIMEOUT_MS 未満の設定 timeout でも実効タイムアウトが
-        // MIN_TIMEOUT_MS を下回らないことを保証する（compinit の重さ対策）。
+        // MIN_TIMEOUT_MS 未満の設定 timeout でも、`gate`（C2 で共有ヘルパー化）
+        // 経由の実効タイムアウトが MIN_TIMEOUT_MS を下回らないことを保証する
+        // （compinit の重さ対策）。zsh を有効化した settings で `gate` 自体を
+        // 呼び、`ZshBridgeProvider::provide` が実際に使う経路をそのまま検証する。
+        // `external = "zsh"` の resolve() は実機に zsh バイナリが無いと
+        // gate 自体が None になる（binary_path が None）ため、実行時 skip する。
+        if zsh_binary().is_none() {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        }
         let settings = Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
             &CompletionConfig {
-                external: ExternalSetting::Single("none".to_string()),
+                external: ExternalSetting::Single("zsh".to_string()),
                 external_timeout_ms: 50,
                 ..CompletionConfig::default()
             },
         )));
-        let read = settings.read().unwrap();
-        let effective = read.timeout.max(Duration::from_millis(MIN_TIMEOUT_MS));
+        let (_binary, effective) = gate(
+            &settings,
+            ExternalKind::Zsh,
+            Some(Duration::from_millis(MIN_TIMEOUT_MS)),
+        )
+        .expect("zsh should be gated-in when external = \"zsh\"");
         assert!(effective >= Duration::from_millis(MIN_TIMEOUT_MS));
     }
 

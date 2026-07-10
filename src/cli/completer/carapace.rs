@@ -149,6 +149,41 @@ impl ExternalCompletionSettings {
     }
 }
 
+/// 各外部補完プロバイダの `provide()` 冒頭で共通する「read ロック → 有効化判定
+/// → timeout 取得」ゲートを一本化したヘルパー。
+///
+/// [`CarapaceProvider::provide`] と
+/// [`super::zsh_bridge::ZshBridgeProvider::provide`] はどちらも同じ手順
+/// （短命な read ロックを取り、`kind` が優先順リストに含まれ、かつバイナリが
+/// 検出済みか確認し、実効タイムアウトを求める）を踏む。以前はこの手順が
+/// 両ファイルにコピペされており、`zsh_bridge.rs` 側にだけ `MIN_TIMEOUT_MS`
+/// フロアが後付けされた結果 2 箇所の実装が drift していた（#89 レビュー
+/// 指摘）。このヘルパーに一本化することで、今後どちらかを変更すれば
+/// もう一方にも自動的に反映される。
+///
+/// `min_timeout` に `Some(floor)` を渡すと、共有設定の `timeout` と `floor`
+/// の大きい方を実効タイムアウトとして使う（zsh ブリッジの
+/// [`super::zsh_bridge::MIN_TIMEOUT_MS`] 用途）。`None` を渡すと共有設定の
+/// `timeout` をそのまま使う（carapace は起動コストが低く、下限フロアを
+/// 必要としない）。
+///
+/// 戻り値は `(binary_path, effective_timeout)`。無効化されている・バイナリ
+/// 未検出の場合は `None`（呼び出し元はこれを受けて `provide()` 全体を
+/// `None` に縮退する）。
+pub(super) fn gate(
+    settings: &Arc<RwLock<ExternalCompletionSettings>>,
+    kind: ExternalKind,
+    min_timeout: Option<Duration>,
+) -> Option<(PathBuf, Duration)> {
+    let settings = settings.read().ok()?;
+    let binary = settings.binary_path(kind)?.clone();
+    let timeout = match min_timeout {
+        Some(floor) => settings.timeout.max(floor),
+        None => settings.timeout,
+    };
+    Some((binary, timeout))
+}
+
 /// `"auto"` 相当の優先順（[`ExternalKind::ALL`]）で、実機に検出できた
 /// バイナリのプロバイダだけを有効化する。検出できなくても警告は出さない
 /// （未インストールは通常運用のため — `resolve_enabled_kinds` の "auto" /
@@ -338,16 +373,10 @@ impl CarapaceProvider {
 
 impl CompletionProvider for CarapaceProvider {
     fn provide(&self, ctx: &CompletionContext) -> Option<Vec<Candidate>> {
-        // 短命な read ロック: バイナリパスと timeout を clone したら即座に drop する
-        // （`mod.rs` の aliases スナップショットと同じ方針）。
-        let (binary, timeout) = {
-            let settings = self.settings.read().ok()?;
-            (
-                settings.binary_path(ExternalKind::Carapace).cloned(),
-                settings.timeout,
-            )
-        };
-        let binary = binary?;
+        // 短命な read ロック（`gate` 内部で取得・即座に drop する — `mod.rs`
+        // の aliases スナップショットと同じ方針）。carapace は起動コストが
+        // 低いため `min_timeout` フロアは適用しない（`None`）。
+        let (binary, timeout) = gate(&self.settings, ExternalKind::Carapace, None)?;
 
         if ctx.is_first_token {
             // コマンド名自体の補完は CommandProvider の担当。
@@ -946,6 +975,111 @@ mod tests {
         assert_eq!(
             settings.binary_path(ExternalKind::Zsh),
             Some(&PathBuf::from("/bin/zsh"))
+        );
+    }
+
+    // ── gate（carapace / zsh ブリッジ共通の read-lock/有効化/timeout ゲート）──
+    //
+    // C2 (#89): 以前は同じ手順が CarapaceProvider::provide と
+    // ZshBridgeProvider::provide にコピペされ、MIN_TIMEOUT_MS フロアの
+    // 有無で drift していた。ここでは共有ヘルパー自体の契約
+    // （無効化 kind -> None、フロアは Some のときのみ適用）を直接検証する。
+
+    #[test]
+    fn gate_returns_none_when_kind_disabled() {
+        // enabled リストが空（= 全プロバイダ無効化）なら、どの kind を
+        // 指定しても None。
+        let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            timeout: Duration::from_millis(400),
+            enabled: Vec::new(),
+        }));
+        assert_eq!(gate(&settings, ExternalKind::Carapace, None), None);
+        assert_eq!(gate(&settings, ExternalKind::Zsh, None), None);
+    }
+
+    #[test]
+    fn gate_returns_none_when_kind_not_in_enabled_list() {
+        // enabled に別の kind (carapace) だけがある状態で zsh を問い合わせると None。
+        let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            timeout: Duration::from_millis(400),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Carapace,
+                binary: Some(PathBuf::from("/usr/local/bin/carapace")),
+            }],
+        }));
+        assert_eq!(gate(&settings, ExternalKind::Zsh, None), None);
+    }
+
+    #[test]
+    fn gate_returns_none_when_binary_not_detected() {
+        // エントリはあるが binary が None（明示指定したのに未検出のケース）。
+        let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            timeout: Duration::from_millis(400),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Carapace,
+                binary: None,
+            }],
+        }));
+        assert_eq!(gate(&settings, ExternalKind::Carapace, None), None);
+    }
+
+    #[test]
+    fn gate_without_floor_uses_configured_timeout_verbatim() {
+        // min_timeout = None のとき、設定 timeout がどれだけ短くてもそのまま使う
+        // （carapace の実際の呼び出し方: フロアなし）。
+        let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            timeout: Duration::from_millis(50),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Carapace,
+                binary: Some(PathBuf::from("/usr/local/bin/carapace")),
+            }],
+        }));
+        let (binary, timeout) = gate(&settings, ExternalKind::Carapace, None).unwrap();
+        assert_eq!(binary, PathBuf::from("/usr/local/bin/carapace"));
+        assert_eq!(
+            timeout,
+            Duration::from_millis(50),
+            "without a floor, the configured timeout must be used verbatim even if very short"
+        );
+    }
+
+    #[test]
+    fn gate_with_floor_raises_timeout_below_floor() {
+        // min_timeout = Some(floor) かつ設定 timeout がそれ未満のとき、
+        // floor まで引き上げられる（zsh ブリッジの実際の呼び出し方）。
+        let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            timeout: Duration::from_millis(50),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Zsh,
+                binary: Some(PathBuf::from("/bin/zsh")),
+            }],
+        }));
+        let floor = Duration::from_millis(2000);
+        let (binary, timeout) = gate(&settings, ExternalKind::Zsh, Some(floor)).unwrap();
+        assert_eq!(binary, PathBuf::from("/bin/zsh"));
+        assert_eq!(
+            timeout, floor,
+            "configured timeout below the floor must be raised to the floor"
+        );
+    }
+
+    #[test]
+    fn gate_with_floor_does_not_lower_timeout_above_floor() {
+        // 設定 timeout が floor を上回るときは floor に切り下げない（max の
+        // 意味論をそのまま検証する）。
+        let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            timeout: Duration::from_millis(5000),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Zsh,
+                binary: Some(PathBuf::from("/bin/zsh")),
+            }],
+        }));
+        let floor = Duration::from_millis(2000);
+        let (_binary, timeout) = gate(&settings, ExternalKind::Zsh, Some(floor)).unwrap();
+        assert_eq!(
+            timeout,
+            Duration::from_millis(5000),
+            "configured timeout above the floor must not be lowered to the floor"
         );
     }
 

@@ -30,6 +30,7 @@ The days of copy-pasting errors into a browser to ask AI are over. Just ask Jarv
 - [Setup and Configuration](#️-setup-and-configuration)
   - [Starship Prompt Integration](#starship-prompt-integration)
   - [External Completion (carapace)](#external-completion-carapace)
+  - [zsh Completion Bridge](#zsh-completion-bridge)
 - [Architecture](#️-architecture)
 - [Development](#-development)
 
