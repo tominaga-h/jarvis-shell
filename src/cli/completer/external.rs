@@ -194,10 +194,21 @@ mod tests {
         });
 
         kill_pid(pid);
-        std::thread::sleep(Duration::from_millis(200));
 
-        let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        let err = io::Error::last_os_error();
+        // 固定 sleep + 単発 assert は CI 負荷下でリーピングが遅れるとフレーキー
+        // になるため、timeout_kills_grandchild_process_spawned_by_child と
+        // 同じポーリングパターンで ESRCH になるまで繰り返し確認する。
+        let mut ret = -1;
+        let mut err = io::Error::last_os_error();
+        for _ in 0..20 {
+            ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+            err = io::Error::last_os_error();
+            if ret == -1 && err.raw_os_error() == Some(libc::ESRCH) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
         assert_eq!(
             ret, -1,
             "kill(pid, 0) should fail once the process is reaped"
@@ -207,6 +218,29 @@ mod tests {
             Some(libc::ESRCH),
             "expected ESRCH (no such process) after kill+reap, got {err:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_pid_on_already_reaped_process_does_not_panic() {
+        // /usr/bin/true を spawn し、wait() で完全に reap してから kill_pid を
+        // 呼ぶ。対象 pid は既に存在しないため kill(-pid, SIGKILL) は ESRCH
+        // で失敗するはずだが、kill_pid はこれを無視してログ出力のみ行い、
+        // パニックしないことを確認する（run_external_capped のタイムアウト
+        // 経路とプロセスの自然終了が競合した場合の安全性）。
+        let mut command = Command::new("/usr/bin/true");
+        command
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().expect("failed to spawn /usr/bin/true");
+        let pid = child.id();
+        let status = child.wait().expect("failed to wait for /usr/bin/true");
+        assert!(status.success(), "/usr/bin/true should exit successfully");
+
+        // 完全に reap 済みの pid に対して呼んでもパニックしないこと自体が
+        // このテストの主張（アサーションは「ここまで到達した」ことで十分）。
+        kill_pid(pid);
     }
 
     /// carapace が孫プロセス（git 等）を spawn するケースの再現テスト。

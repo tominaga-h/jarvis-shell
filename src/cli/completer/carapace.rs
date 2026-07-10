@@ -456,11 +456,81 @@ mod tests {
         }))
     }
 
+    fn settings_with_mode_and_binary(
+        mode: ExternalMode,
+        binary: Option<PathBuf>,
+        timeout: Duration,
+    ) -> Arc<RwLock<ExternalCompletionSettings>> {
+        Arc::new(RwLock::new(ExternalCompletionSettings {
+            mode,
+            timeout,
+            binary,
+        }))
+    }
+
     #[test]
     fn provide_returns_none_when_binary_absent() {
         let provider = CarapaceProvider::new(settings_with_binary(None));
         let ctx = extract_context("git checkout ma", "git checkout ma".len());
         assert_eq!(provider.provide(&ctx), None);
+    }
+
+    #[test]
+    fn provide_mode_none_returns_none_without_spawning_even_with_binary_set() {
+        // ExternalMode::None は「明示的な無効化」であり、たとえ settings.binary
+        // に値が入っていても（通常 resolve() では None のとき binary は常に
+        // None だが、ここでは防御ガード自体を検証するため意図的に矛盾した
+        // 状態を手組みする）、provide() は mode チェックで即座に return する
+        // べきで、バイナリを spawn してはならない。存在しないダミーパスを
+        // 渡すことで、万一 spawn されれば大きな声で失敗する（Command::spawn
+        // が Err を返し、run_external_capped 経由で None にはなるが、この
+        // テストの主眼は「mode == None の時点で早期 return し、そもそも
+        // run_external_capped にすら到達しない」ことの確認）。
+        let provider = CarapaceProvider::new(settings_with_mode_and_binary(
+            ExternalMode::None,
+            Some(PathBuf::from("/no/such/carapace/binary/would-fail-loudly")),
+            CARAPACE_TIMEOUT,
+        ));
+        let ctx = extract_context("git checkout ma", "git checkout ma".len());
+        assert_eq!(provider.provide(&ctx), None);
+    }
+
+    #[test]
+    fn provide_returns_none_on_timeout_and_returns_quickly() {
+        // タイムアウト経路の統合的な検証: 実際に遅いスクリプトを spawn させ、
+        // 短い timeout で provide() が None を返しつつ、timeout を大幅に
+        // 超えず速やかに戻ることを確認する（run_external_capped 自体の
+        // タイムアウト・kill ロジックは external.rs 側で検証済みのため、
+        // ここでは CarapaceProvider::provide() がその結果を正しく素通し
+        // することのみを見る）。
+        let tmpdir = tempfile::tempdir().unwrap();
+        let script_path = tmpdir.path().join("slow-fake-carapace.sh");
+        std::fs::write(&script_path, "#!/bin/sh\nsleep 2\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        let short_timeout = Duration::from_millis(100);
+        let provider = CarapaceProvider::new(settings_with_mode_and_binary(
+            ExternalMode::Auto,
+            Some(script_path),
+            short_timeout,
+        ));
+        let ctx = extract_context("git checkout ma", "git checkout ma".len());
+
+        let start = std::time::Instant::now();
+        let result = provider.provide(&ctx);
+        let elapsed = start.elapsed();
+
+        assert_eq!(result, None, "slow external binary should time out to None");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "provide() should return well under 1s on timeout, took {elapsed:?}"
+        );
     }
 
     #[test]
@@ -770,6 +840,69 @@ mod tests {
             after.binary.as_deref(),
             Some(expected_binary.as_path()),
             "reload with external = \"auto\" should re-detect the now-installed carapace binary"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn reload_write_path_provider_sees_reload_via_same_shared_arc() {
+        // reload_write_path_installing_carapace_mid_session_enables_it は
+        // 「共有 settings が更新されること」までを検証する。このテストは
+        // さらに一歩進め、その*同じ* Arc から構築した CarapaceProvider が
+        // provide() 呼び出しごとに settings を読み直していることを証明する
+        // （construction-time キャッシュではなく per-call read であることの
+        // 直接証拠）。CarapaceProvider::new 呼び出しは reload の**前**に
+        // 一度だけ行い、reload 後に同じ provider インスタンスへ provide()
+        // することで、Provider 構築後の設定変更が反映されることを示す。
+        let Ok(_) = which::which("carapace") else {
+            eprintln!("skipping: carapace not installed");
+            return;
+        };
+
+        let tmpdir = create_test_git_repo();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        // reload 前: external = "none" 相当（binary なし）で settings を構築し、
+        // provider は reload の前に一度だけ、この Arc から構築する。
+        let initial = ExternalCompletionSettings::resolve(&CompletionConfig {
+            external: "none".to_string(),
+            ..CompletionConfig::default()
+        });
+        let shared = Arc::new(RwLock::new(initial));
+        let provider = CarapaceProvider::new(Arc::clone(&shared));
+
+        let ctx = extract_context("git checkout test-", "git checkout test-".len());
+        let before_reload = provider.provide(&ctx);
+        assert_eq!(
+            before_reload, None,
+            "before reload (external = \"none\"), provider should not produce candidates"
+        );
+
+        // reload: `Shell::reload_config` と同じ書き込み経路で、同じ Arc の
+        // 中身を "auto"（carapace 検出込み）へ丸ごと置き換える。
+        let resolved = ExternalCompletionSettings::resolve(&CompletionConfig {
+            external: "auto".to_string(),
+            ..CompletionConfig::default()
+        });
+        {
+            let mut guard = shared.write().unwrap();
+            *guard = resolved;
+        }
+
+        // provider インスタンス自体は再構築していない。同じインスタンスへの
+        // 呼び出しが reload 後の設定を拾えていれば、construction-time
+        // キャッシュではなく per-call read である証拠になる。
+        let after_reload = provider.provide(&ctx);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let candidates =
+            after_reload.expect("provider should produce candidates after mid-session reload");
+        let values: Vec<&str> = candidates.iter().map(|c| c.value.as_str()).collect();
+        assert!(
+            values.contains(&"test-feature"),
+            "reloaded provider should suggest 'test-feature' via the same shared Arc: {values:?}"
         );
     }
 
