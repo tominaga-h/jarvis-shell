@@ -176,7 +176,7 @@ starship = false              # true にすると Starship プロンプトを使
 
 [completion]
 git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
-external = "auto"             # "auto" | "carapace" | "none" — 外部補完（carapace）の使用方針
+external = "auto"             # "auto" | "carapace" | "zsh" | "none" | ["carapace", "zsh"] — 外部補完の使用方針（文字列 or 配列）
 external_timeout_ms = 400     # 外部補完プロセスのタイムアウト（ミリ秒）
 
 [startup]
@@ -217,14 +217,18 @@ Jarvish は `starship prompt` に `--status`、`--cmd-duration`、`--terminal-wi
 
 Jarvish の Tab 補完は [carapace](https://github.com/carapace-sh/carapace-bin) と連携できます。carapace は git・docker・kubectl など 500 以上の CLI ツールの補完を提供するマルチシェル対応の補完エンジンです。`brew install carapace` でインストールできます。
 
-- **自動検出**: `[completion] external = "auto"`（デフォルト）は、起動時に `carapace` バイナリが `PATH` 上に見つかれば自動的に使用します。追加設定は不要です。`external = "carapace"` にすると明示的に必須化され（バイナリ未検出時は警告を表示）、`external = "none"` にすると外部補完を完全に無効化します。
-- **タイムアウト + フォールバック**: 各 carapace 呼び出しは `external_timeout_ms`（デフォルト 400ms）でタイムアウトします。carapace がハング・エラー・候補なしを返した場合、Jarvish は自動的にビルトインのパス補完へフォールバックします — Tab キーが外部プロセス待ちでブロックされることはありません。
-- **ホットリロード**: `external` と `external_timeout_ms` は `source` ビルトインで再読み込みされ、そのたびに carapace バイナリの再検出（`which`）も行われます。つまりセッション中に `brew install carapace` した後、`source ~/.config/jarvish/config.toml` を実行するだけで、再起動なしに即座に有効化できます。
+- **`[completion] external` は文字列と配列の両方を受け付けます**:
+  - `"auto"`（デフォルト）は各プロバイダを優先順（carapace → [zsh ブリッジ](#zsh-補完ブリッジ)）で試し、バイナリが見つかったものだけを有効化します。追加設定は不要です。
+  - `"none"` は外部補完を完全に無効化します。
+  - `"carapace"` / `"zsh"` はそのプロバイダのみを有効化します（バイナリ未検出時は警告を表示）。
+  - `["zsh", "carapace"]` のような配列を指定すると、その記載順を優先順として明示指定できます。各要素は左から順に試され、バイナリが見つかったものだけが有効化されます。不正な要素は警告のうえスキップされ、残りの要素は引き続き適用されます。
+- **タイムアウト + フォールバック**: 各外部補完呼び出しは `external_timeout_ms`（デフォルト 400ms）でタイムアウトします。あるプロバイダがハング・エラー・候補なしを返した場合、Jarvish は自動的に次のプロバイダ（最終的にはビルトインのパス補完）へフォールバックします — Tab キーが外部プロセス待ちでブロックされることはありません。
+- **ホットリロード**: `external` と `external_timeout_ms` は `source` ビルトインで再読み込みされ、そのたびに設定済みの各プロバイダのバイナリの再検出（`which`）も行われます。つまりセッション中に `brew install carapace` した後、`source ~/.config/jarvish/config.toml` を実行するだけで、再起動なしに即座に有効化できます（注意: 配列の**並び順**の変更 — 例えば `["carapace", "zsh"]` を `["zsh", "carapace"]` に入れ替える — は次回の Jarvish 起動まで反映されません。プロバイダの有効/無効化とバイナリの再検出は即座に反映されます）。
 - **カバレッジの拡大**: carapace は実際のシェル補完関数（zsh の `compsys` など）へのブリッジもサポートしています。`config.toml` の `[export]` セクションで `CARAPACE_BRIDGES`（例: `CARAPACE_BRIDGES = "zsh"`）を設定すると、carapace が標準搭載していない補完も取り込めます。
 
 ### zsh 補完ブリッジ
 
-[carapace](#外部補完連携-carapace) が対象コマンドの候補を持っていない場合、Jarvish はビルトインの zsh ブリッジにフォールバックします。バックグラウンドで実際の zsh を起動し、その本物の補完システム（`compsys`、`_*` 補完関数群）に候補を尋ねます。つまり、zsh 上で動く補完関数であれば（サードパーティ製のものも含めて）、carapace の対応有無に関わらず Jarvish でも使えます。
+[carapace](#外部補完連携-carapace) が対象コマンドの候補を持っていない（または有効化されていない）場合、Jarvish はビルトインの zsh ブリッジにフォールバックします。バックグラウンドで実際の zsh を起動し、その本物の補完システム（`compsys`、`_*` 補完関数群）に候補を尋ねます。つまり、zsh 上で動く補完関数であれば（サードパーティ製のものも含めて）、carapace の対応有無に関わらず Jarvish でも使えます。上記と同じ `[completion] external` 設定で制御します（例: `external = "zsh"` で zsh ブリッジのみを使用、`external = ["zsh", "carapace"]` で carapace より優先）。
 
 - **ブリッジ用 zshrc**: ブリッジ zsh は、あなたの実 `~/.zshrc` ではなく `~/.config/jarvish/zsh-bridge/.zshrc` を読み込みます。そのため対話シェルの設定から隔離されています。このファイルが存在しない場合、ブリッジ初回実行時にコメント付きテンプレートとして Jarvish が自動生成します — 以後は一切上書きされないため、自分で加えた変更は安全です。
 - **補完の追加方法**: ブリッジ用 zshrc には普通の zsh 構文がそのまま書けます。例えば Homebrew でインストールした [`zsh-completions`](https://github.com/zsh-users/zsh-completions) を取り込むには:

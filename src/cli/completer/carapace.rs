@@ -33,116 +33,220 @@ use super::context::CompletionContext;
 use super::external::run_external_capped;
 use super::provider::{Candidate, CompletionProvider};
 
-/// `[completion] external` の使用方針。
+/// 個々の外部補完プロバイダの種別。
 ///
 /// [`ExternalCompletionSettings`] が [`super::JarvishCompleter::new`]（`pub`）の
 /// 引数型に現れるため `pub` にしている（`private_interfaces` lint 対応）。
 /// 実際の生成箇所は `Shell::new` / `reload_config` に限られ、外部クレートからの
 /// 利用は想定していない。
+///
+/// バリアントの追加順（`ALL` の並び）が `"auto"` 解決時のデフォルト優先順
+/// （carapace → zsh）を兼ねる。carapace の方が起動コストが低く description
+/// が付きやすいため先に試す（`mod.rs` のプロバイダチェーンと同じ理由）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalMode {
-    /// バイナリが検出できた場合のみ使用する（デフォルト）。
-    Auto,
-    /// 明示的に有効化。バイナリ未検出なら無効化して警告する。
+pub enum ExternalKind {
+    /// carapace-bin ブリッジ（[`CarapaceProvider`]）。
     Carapace,
-    /// 無効化。
-    None,
+    /// zsh compsys ブリッジ（[`super::zsh_bridge::ZshBridgeProvider`]）。
+    Zsh,
 }
 
-impl ExternalMode {
+impl ExternalKind {
+    /// `"auto"` 解決時に試す既定の優先順（carapace → zsh）。
+    const ALL: [ExternalKind; 2] = [ExternalKind::Carapace, ExternalKind::Zsh];
+
     /// `config.toml` の `external` 値として書ける正規の文字列表現を返す。
-    ///
-    /// `source` ビルトインのサマリー表示（`src/shell/mod.rs` の
-    /// `reload_config`）で、raw な設定文字列ではなく「実際に解決された
-    /// モード」を表示するために使う（未知の値が `auto` へフォールバック
-    /// した事実を隠さないための対応、#88 / #89）。
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            ExternalMode::Auto => "auto",
-            ExternalMode::Carapace => "carapace",
-            ExternalMode::None => "none",
+            ExternalKind::Carapace => "carapace",
+            ExternalKind::Zsh => "zsh",
+        }
+    }
+
+    /// `which()` で検出する実行ファイル名。
+    fn binary_name(self) -> &'static str {
+        match self {
+            ExternalKind::Carapace => "carapace",
+            ExternalKind::Zsh => "zsh",
+        }
+    }
+
+    /// `config.toml` の文字列表現から対応する種別を引く（`"auto"` / `"none"` は含まない）。
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "carapace" => Some(ExternalKind::Carapace),
+            "zsh" => Some(ExternalKind::Zsh),
+            _ => None,
         }
     }
 }
 
-impl fmt::Display for ExternalMode {
+impl fmt::Display for ExternalKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-/// `[completion]` の外部補完（carapace）関連設定を解決した実行時状態。
+/// 解決済みの外部補完プロバイダ 1 件（優先順のうちの 1 エントリ）。
+///
+/// `binary` が `None` の場合、そのプロバイダはバイナリ未検出のため無効
+/// （`CarapaceProvider` / `ZshBridgeProvider` は `binary_path()` 経由でこれを
+/// 見て自身を無効化する）。無効なエントリもリストからは削除せず残す —
+/// `source` サマリーで「carapace: not found」のように可視化するため。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedExternal {
+    pub(crate) kind: ExternalKind,
+    pub(crate) binary: Option<PathBuf>,
+}
+
+/// `[completion]` の外部補完（carapace / zsh ブリッジ）関連設定を解決した実行時状態。
 ///
 /// `Shell::new` で構築し、`Arc<RwLock<_>>` として `editor::build_editor` 経由で
-/// [`CarapaceProvider`] と共有する（`git_branch_commands` と同じ配管パターン）。
-/// `Shell::reload_config`（`source` ビルトイン）が `which()` 再検出込みで
-/// 更新するため、セッション中に carapace をインストールしてから `source` する
-/// だけで再起動なしに有効化できる。
+/// [`CarapaceProvider`] / [`super::zsh_bridge::ZshBridgeProvider`] と共有する
+/// （`git_branch_commands` と同じ配管パターン）。`Shell::reload_config`
+/// （`source` ビルトイン）が `which()` 再検出込みで更新するため、セッション中に
+/// carapace/zsh をインストールしてから `source` するだけで再起動なしに
+/// 有効化できる。
 #[derive(Debug, Clone)]
 pub struct ExternalCompletionSettings {
-    pub(crate) mode: ExternalMode,
     pub(crate) timeout: Duration,
-    /// 検出済みの carapace バイナリパス（`mode == None` または未検出なら `None`）。
-    pub(crate) binary: Option<PathBuf>,
+    /// 解決済みの有効プロバイダ列（優先順）。`resolve()` が構築する。
+    /// `"none"` の場合は空。
+    pub(crate) enabled: Vec<ResolvedExternal>,
 }
 
 impl ExternalCompletionSettings {
     /// `[completion]` 設定から実行時状態を解決する。
     ///
-    /// `external` の値に応じて `which::which("carapace")` を実行し、バイナリの
-    /// 有無を確定する:
-    /// - `"auto"`: 検出できれば使用、できなければ黙って無効（`binary = None`）
-    /// - `"carapace"`: 検出できれば使用、できなければ警告を出して無効化
-    /// - `"none"`: 検出自体を行わず無効
-    /// - それ以外（未知の値）: `"auto"` として扱い警告を出す
+    /// `external`（[`ExternalSetting`](crate::config::ExternalSetting)）の
+    /// 形式に応じて以下のように優先順リストを組み立てる:
+    /// - 文字列 `"auto"`（デフォルト）: [`ExternalKind::ALL`] の順（carapace →
+    ///   zsh）で、それぞれのバイナリが検出できたものだけを有効化する
+    ///   （検出できなくても警告は出さない — 未インストールは通常運用）。
+    /// - 文字列 `"none"`: 全プロバイダ無効（`which()` すら呼ばない）。
+    /// - 文字列 `"carapace"` / `"zsh"`: そのプロバイダのみを対象にする。
+    ///   バイナリ未検出なら警告を出し、`binary = None` のエントリとして残す
+    ///   （「明示指定したのに無効」という事実を隠さない）。
+    /// - 配列（例: `["zsh", "carapace"]`）: 要素の記載順をそのまま優先順として
+    ///   採用する。各要素は `"carapace"` / `"zsh"` のみ有効 — それ以外の要素
+    ///   （`"auto"` / `"none"` / 不正な値）は警告を出してその要素だけ
+    ///   スキップする（配列全体は無効にしない）。
+    /// - 文字列の未知の値: `"auto"` として扱い警告を出す。
     pub(crate) fn resolve(config: &CompletionConfig) -> Self {
-        let mode = match config.external.as_str() {
-            "auto" => ExternalMode::Auto,
-            "carapace" => ExternalMode::Carapace,
-            "none" => ExternalMode::None,
-            other => {
-                warn!(
-                    value = %other,
-                    "Unknown [completion] external value; falling back to \"auto\""
-                );
-                ExternalMode::Auto
-            }
-        };
         let timeout = Duration::from_millis(config.external_timeout_ms);
+        let enabled = resolve_enabled_kinds(&config.external);
+        Self { timeout, enabled }
+    }
 
-        let binary = match mode {
-            ExternalMode::None => None,
-            ExternalMode::Auto => which::which("carapace").ok(),
-            ExternalMode::Carapace => match which::which("carapace") {
-                Ok(path) => Some(path),
-                Err(_) => {
-                    warn!(
-                        "[completion] external = \"carapace\" but the carapace binary was not \
-                         found on PATH; external completion disabled"
-                    );
-                    None
-                }
-            },
-        };
-
-        Self {
-            mode,
-            timeout,
-            binary,
-        }
+    /// 指定した種別のプロバイダが有効化されており、かつバイナリが検出済みなら
+    /// そのパスを返す。無効化されている・リストに存在しない・バイナリ未検出の
+    /// いずれの場合も `None`。
+    pub(crate) fn binary_path(&self, kind: ExternalKind) -> Option<&PathBuf> {
+        self.enabled
+            .iter()
+            .find(|entry| entry.kind == kind)
+            .and_then(|entry| entry.binary.as_ref())
     }
 }
 
-/// `source` ビルトインのサマリーに載せる `external:` 行の右辺（binary 部分は
-/// 含まない）を組み立てる純粋関数。
+/// `"auto"` 相当の優先順（[`ExternalKind::ALL`]）で、実機に検出できた
+/// バイナリのプロバイダだけを有効化する。検出できなくても警告は出さない
+/// （未インストールは通常運用のため — `resolve_enabled_kinds` の "auto" /
+/// 未知の値フォールバックの両方から共有される）。
+fn resolve_auto_order() -> Vec<ResolvedExternal> {
+    ExternalKind::ALL
+        .iter()
+        .filter_map(|&kind| {
+            which::which(kind.binary_name())
+                .ok()
+                .map(|binary| ResolvedExternal {
+                    kind,
+                    binary: Some(binary),
+                })
+        })
+        .collect()
+}
+
+/// `"carapace"` / `"zsh"` の単一種別を明示指定した場合の解決。
+/// バイナリ未検出なら警告を出しつつ、エントリ自体は
+/// `binary = None` で残す（明示指定したのに無効という事実を隠さない）。
+fn resolve_single_kind(kind: ExternalKind, raw: &str) -> ResolvedExternal {
+    let binary = which::which(kind.binary_name()).ok();
+    if binary.is_none() {
+        warn!(
+            value = %raw,
+            "[completion] external = \"{raw}\" but its binary was not found \
+             on PATH; external completion disabled for this provider"
+        );
+    }
+    ResolvedExternal { kind, binary }
+}
+
+/// [`crate::config::ExternalSetting`] を実際の優先順リストへ解決する。
 ///
-/// `raw`（`config.toml` の `[completion] external` の生文字列）と、それを
-/// [`ExternalCompletionSettings::resolve`] が実際に解決した後の
-/// `settings.mode` を突き合わせ、以下のいずれかを返す:
-/// - `raw` が既知の値（`"auto"` / `"carapace"` / `"none"`）と一致する場合は
-///   解決後モードをそのまま表示する（例: `"carapace"`）。
-/// - `raw` が未知の値の場合は `resolve()` の暗黙フォールバック（`auto`）を
-///   隠さず、その旨を明示するマーカー付きで表示する
+/// `ExternalCompletionSettings::resolve` から切り出した純粋寄りのヘルパー
+/// （`which()` の呼び出しは残るため完全な純粋関数ではないが、`Duration` 計算
+/// を含まないぶん `resolve()` 本体よりテストしやすい）。
+///
+/// 単一文字列（[`ExternalSetting::Single`]）と配列（[`ExternalSetting::List`]）
+/// のどちらも [`ExternalSetting::raw_entries`] 経由でいったん `&str` 列に
+/// 揃えてから解決するが、`"auto"` / `"none"` はスカラー文字列専用の特別扱い
+/// （配列内に書いても無効な要素として skip される — 配列は優先順の明示指定
+/// 専用の記法という設計）のため、`Single` と `List` を分けて処理する。
+fn resolve_enabled_kinds(external: &crate::config::ExternalSetting) -> Vec<ResolvedExternal> {
+    use crate::config::ExternalSetting;
+
+    match external {
+        ExternalSetting::Single(_) => {
+            let entries = external.raw_entries();
+            let raw = entries
+                .first()
+                .copied()
+                .expect("ExternalSetting::Single always yields exactly one raw entry");
+            match raw {
+                "auto" => resolve_auto_order(),
+                "none" => Vec::new(),
+                other => match ExternalKind::from_str(other) {
+                    Some(kind) => vec![resolve_single_kind(kind, other)],
+                    None => {
+                        warn!(
+                            value = %other,
+                            "Unknown [completion] external value; falling back to \"auto\""
+                        );
+                        resolve_auto_order()
+                    }
+                },
+            }
+        }
+        ExternalSetting::List(_) => external
+            .raw_entries()
+            .into_iter()
+            .filter_map(|raw| match ExternalKind::from_str(raw) {
+                Some(kind) => Some(resolve_single_kind(kind, raw)),
+                None => {
+                    warn!(
+                        value = %raw,
+                        "Unknown [completion] external array entry; skipping it"
+                    );
+                    None
+                }
+            })
+            .collect(),
+    }
+}
+
+/// `source` ビルトインのサマリーに載せる `external:` 行の右辺を組み立てる純粋関数。
+///
+/// `raw`（`config.toml` の `[completion] external` の生の [`Display`]
+/// 表現）と、[`ExternalCompletionSettings::resolve`] が実際に解決した結果
+/// （`settings.enabled` の優先順リスト）を突き合わせ、以下を返す:
+/// - 有効なプロバイダが 1 つ以上あれば `"carapace, zsh"` のように種別名を
+///   優先順にカンマ区切りで列挙する（各プロバイダのバイナリパス自体は
+///   呼び出し側 — `Shell::reload_config` — が別行で表示する）。
+/// - 有効なプロバイダが 0 件なら `"none"`。
+/// - `raw` が既知の値（`"auto"` / `"carapace"` / `"zsh"` / `"none"` /
+///   これらのみからなる配列）でない場合は、`resolve()` の暗黙フォールバック
+///   （`auto` 相当の解決）を隠さず、その旨を明示するマーカー付きで表示する
 ///   （例: `auto (未対応の値 "bogus" のため auto を使用)`）。
 ///
 /// `Shell` 全体を組み立てずにユニットテストできるよう、`&str` と
@@ -151,13 +255,49 @@ impl ExternalCompletionSettings {
 /// [`ExternalCompletionSettings`] と同じ理由（`mod.rs` の `pub use` 経由で
 /// `Shell::reload_config` から利用するため）で `pub` にしている。
 pub fn format_external_summary(raw: &str, settings: &ExternalCompletionSettings) -> String {
-    let resolved = settings.mode.as_str();
-    let is_known_value = matches!(raw, "auto" | "carapace" | "none");
+    let resolved = resolved_order_display(settings);
+    let is_known_value = is_known_external_value(raw);
     if is_known_value {
-        resolved.to_string()
+        resolved
     } else {
-        format!("{resolved} (未対応の値 \"{raw}\" のため {resolved} を使用)")
+        format!("{resolved} (未対応の値 \"{raw}\" のため auto を使用)")
     }
+}
+
+/// `settings.enabled` の優先順を `"carapace, zsh"` のようなカンマ区切り文字列
+/// にする。空なら `"none"`。
+fn resolved_order_display(settings: &ExternalCompletionSettings) -> String {
+    if settings.enabled.is_empty() {
+        return "none".to_string();
+    }
+    settings
+        .enabled
+        .iter()
+        .map(|entry| entry.kind.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `raw`（`config.toml` の `external` 値の [`Display`] 表現）が既知の値かどうか
+/// を判定する: `"auto"` / `"carapace"` / `"zsh"` / `"none"`、または
+/// `"carapace"` / `"zsh"` のみからなる配列表記（`format_external_summary` の
+/// 呼び出し元が渡す raw は `ExternalSetting` の `Display` 実装が生成した文字列
+/// のため、配列は `["carapace", "zsh"]` の形で渡ってくる）。
+fn is_known_external_value(raw: &str) -> bool {
+    if matches!(raw, "auto" | "carapace" | "zsh" | "none") {
+        return true;
+    }
+    // 配列表記 `["a", "b"]` の各要素が carapace/zsh のみで構成されているかを見る。
+    let Some(inner) = raw.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
+        return false;
+    };
+    if inner.trim().is_empty() {
+        return false;
+    }
+    inner.split(',').all(|entry| {
+        let trimmed = entry.trim().trim_matches('"');
+        matches!(trimmed, "carapace" | "zsh")
+    })
 }
 
 /// carapace の JSON 出力全体（`#[serde(default)]` で壊れたフィールドがあっても
@@ -200,16 +340,13 @@ impl CompletionProvider for CarapaceProvider {
     fn provide(&self, ctx: &CompletionContext) -> Option<Vec<Candidate>> {
         // 短命な read ロック: バイナリパスと timeout を clone したら即座に drop する
         // （`mod.rs` の aliases スナップショットと同じ方針）。
-        let (mode, binary, timeout) = {
+        let (binary, timeout) = {
             let settings = self.settings.read().ok()?;
-            (settings.mode, settings.binary.clone(), settings.timeout)
+            (
+                settings.binary_path(ExternalKind::Carapace).cloned(),
+                settings.timeout,
+            )
         };
-        if mode == ExternalMode::None {
-            // 明示的な無効化。`resolve()` は mode == None のとき binary を
-            // 常に None にするが、意図を読み取りやすくするためここでも
-            // 明示的にガードする。
-            return None;
-        }
         let binary = binary?;
 
         if ctx.is_first_token {
@@ -449,22 +586,47 @@ mod tests {
     const CARAPACE_TIMEOUT: Duration = Duration::from_millis(400);
 
     fn settings_with_binary(binary: Option<PathBuf>) -> Arc<RwLock<ExternalCompletionSettings>> {
+        let enabled = binary
+            .map(|b| {
+                vec![ResolvedExternal {
+                    kind: ExternalKind::Carapace,
+                    binary: Some(b),
+                }]
+            })
+            .unwrap_or_default();
         Arc::new(RwLock::new(ExternalCompletionSettings {
-            mode: ExternalMode::Auto,
             timeout: CARAPACE_TIMEOUT,
-            binary,
+            enabled,
         }))
     }
 
-    fn settings_with_mode_and_binary(
-        mode: ExternalMode,
-        binary: Option<PathBuf>,
+    fn settings_with_binary_and_timeout(
+        binary: PathBuf,
         timeout: Duration,
     ) -> Arc<RwLock<ExternalCompletionSettings>> {
         Arc::new(RwLock::new(ExternalCompletionSettings {
-            mode,
             timeout,
-            binary,
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Carapace,
+                binary: Some(binary),
+            }],
+        }))
+    }
+
+    fn settings_disabled_with_dangling_binary(
+        binary: PathBuf,
+        timeout: Duration,
+    ) -> Arc<RwLock<ExternalCompletionSettings>> {
+        // enabled が空 = carapace は無効化されている、という状態を意図的に
+        // 手組みする（通常の resolve() 経路では到達しないが、provide() 側の
+        // 「無効なら enabled に存在しないので None」というガード自体を
+        // 検証するために使う）。binary 引数は「誤って spawn されたら
+        // 大きな声で失敗する」ためのダミーパスとして受け取るが、この
+        // ヘルパー自体は enabled に含めないため使用しない。
+        let _ = binary;
+        Arc::new(RwLock::new(ExternalCompletionSettings {
+            timeout,
+            enabled: Vec::new(),
         }))
     }
 
@@ -476,21 +638,35 @@ mod tests {
     }
 
     #[test]
-    fn provide_mode_none_returns_none_without_spawning_even_with_binary_set() {
-        // ExternalMode::None は「明示的な無効化」であり、たとえ settings.binary
-        // に値が入っていても（通常 resolve() では None のとき binary は常に
-        // None だが、ここでは防御ガード自体を検証するため意図的に矛盾した
-        // 状態を手組みする）、provide() は mode チェックで即座に return する
+    fn provide_disabled_returns_none_without_spawning_even_with_binary_set() {
+        // carapace が enabled リストに含まれていない（= 無効化されている）場合、
+        // provide() は binary_path() が None を返すことで即座に return する
         // べきで、バイナリを spawn してはならない。存在しないダミーパスを
         // 渡すことで、万一 spawn されれば大きな声で失敗する（Command::spawn
         // が Err を返し、run_external_capped 経由で None にはなるが、この
-        // テストの主眼は「mode == None の時点で早期 return し、そもそも
+        // テストの主眼は「enabled に無い時点で早期 return し、そもそも
         // run_external_capped にすら到達しない」ことの確認）。
-        let provider = CarapaceProvider::new(settings_with_mode_and_binary(
-            ExternalMode::None,
-            Some(PathBuf::from("/no/such/carapace/binary/would-fail-loudly")),
+        let provider = CarapaceProvider::new(settings_disabled_with_dangling_binary(
+            PathBuf::from("/no/such/carapace/binary/would-fail-loudly"),
             CARAPACE_TIMEOUT,
         ));
+        let ctx = extract_context("git checkout ma", "git checkout ma".len());
+        assert_eq!(provider.provide(&ctx), None);
+    }
+
+    #[test]
+    fn provide_returns_none_when_only_zsh_is_enabled() {
+        // enabled に zsh のみが含まれ carapace が含まれない場合、
+        // CarapaceProvider::binary_path(Carapace) は None を返し provide() は
+        // 早期 return する（他プロバイダの設定に巻き込まれてはならない）。
+        let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            timeout: CARAPACE_TIMEOUT,
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Zsh,
+                binary: Some(PathBuf::from("/bin/zsh")),
+            }],
+        }));
+        let provider = CarapaceProvider::new(settings);
         let ctx = extract_context("git checkout ma", "git checkout ma".len());
         assert_eq!(provider.provide(&ctx), None);
     }
@@ -515,11 +691,8 @@ mod tests {
         }
 
         let short_timeout = Duration::from_millis(100);
-        let provider = CarapaceProvider::new(settings_with_mode_and_binary(
-            ExternalMode::Auto,
-            Some(script_path),
-            short_timeout,
-        ));
+        let provider =
+            CarapaceProvider::new(settings_with_binary_and_timeout(script_path, short_timeout));
         let ctx = extract_context("git checkout ma", "git checkout ma".len());
 
         let start = std::time::Instant::now();
@@ -607,56 +780,173 @@ mod tests {
 
     // ── ExternalCompletionSettings::resolve ──
 
+    use crate::config::ExternalSetting;
+
+    fn config_with_external(external: ExternalSetting) -> CompletionConfig {
+        CompletionConfig {
+            external,
+            ..CompletionConfig::default()
+        }
+    }
+
     #[test]
-    fn resolve_auto_mode_with_carapace_installed_detects_binary() {
+    fn resolve_auto_string_with_carapace_installed_detects_binary() {
         let Ok(_) = which::which("carapace") else {
             eprintln!("skipping: carapace not installed");
             return;
         };
-        let config = CompletionConfig {
-            external: "auto".to_string(),
-            ..CompletionConfig::default()
-        };
+        let config = config_with_external(ExternalSetting::Single("auto".to_string()));
         let settings = ExternalCompletionSettings::resolve(&config);
-        assert_eq!(settings.mode, ExternalMode::Auto);
-        assert!(settings.binary.is_some());
+        assert!(settings.binary_path(ExternalKind::Carapace).is_some());
     }
 
     #[test]
-    fn resolve_none_mode_never_detects_binary_even_when_installed() {
-        let config = CompletionConfig {
-            external: "none".to_string(),
-            ..CompletionConfig::default()
-        };
+    fn resolve_none_string_never_detects_any_binary_even_when_installed() {
+        let config = config_with_external(ExternalSetting::Single("none".to_string()));
         let settings = ExternalCompletionSettings::resolve(&config);
-        assert_eq!(settings.mode, ExternalMode::None);
-        assert!(settings.binary.is_none());
+        assert!(settings.enabled.is_empty());
+        assert!(settings.binary_path(ExternalKind::Carapace).is_none());
+        assert!(settings.binary_path(ExternalKind::Zsh).is_none());
     }
 
     #[test]
-    fn resolve_unknown_mode_falls_back_to_auto() {
-        let config = CompletionConfig {
-            external: "bogus".to_string(),
-            ..CompletionConfig::default()
-        };
+    fn resolve_unknown_string_falls_back_to_auto_order() {
+        let config = config_with_external(ExternalSetting::Single("bogus".to_string()));
         let settings = ExternalCompletionSettings::resolve(&config);
-        assert_eq!(settings.mode, ExternalMode::Auto);
-    }
-
-    // ── ExternalMode::as_str / Display ──
-
-    #[test]
-    fn external_mode_as_str_matches_config_toml_values() {
-        assert_eq!(ExternalMode::Auto.as_str(), "auto");
-        assert_eq!(ExternalMode::Carapace.as_str(), "carapace");
-        assert_eq!(ExternalMode::None.as_str(), "none");
+        // auto と同じ解決になるはず: 有効化されたプロバイダは carapace → zsh の
+        // 優先順のうち実機に存在するものだけ。
+        let auto_settings = ExternalCompletionSettings::resolve(&config_with_external(
+            ExternalSetting::Single("auto".to_string()),
+        ));
+        let kinds: Vec<ExternalKind> = settings.enabled.iter().map(|e| e.kind).collect();
+        let auto_kinds: Vec<ExternalKind> = auto_settings.enabled.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, auto_kinds);
     }
 
     #[test]
-    fn external_mode_display_matches_as_str() {
-        assert_eq!(ExternalMode::Auto.to_string(), "auto");
-        assert_eq!(ExternalMode::Carapace.to_string(), "carapace");
-        assert_eq!(ExternalMode::None.to_string(), "none");
+    fn resolve_carapace_string_only_targets_carapace() {
+        let config = config_with_external(ExternalSetting::Single("carapace".to_string()));
+        let settings = ExternalCompletionSettings::resolve(&config);
+        assert_eq!(settings.enabled.len(), 1);
+        assert_eq!(settings.enabled[0].kind, ExternalKind::Carapace);
+    }
+
+    #[test]
+    fn resolve_zsh_string_only_targets_zsh() {
+        let config = config_with_external(ExternalSetting::Single("zsh".to_string()));
+        let settings = ExternalCompletionSettings::resolve(&config);
+        assert_eq!(settings.enabled.len(), 1);
+        assert_eq!(settings.enabled[0].kind, ExternalKind::Zsh);
+    }
+
+    #[test]
+    fn resolve_array_form_preserves_explicit_order() {
+        let config = config_with_external(ExternalSetting::List(vec![
+            "zsh".to_string(),
+            "carapace".to_string(),
+        ]));
+        let settings = ExternalCompletionSettings::resolve(&config);
+        let kinds: Vec<ExternalKind> = settings.enabled.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, vec![ExternalKind::Zsh, ExternalKind::Carapace]);
+    }
+
+    #[test]
+    fn resolve_array_form_single_entry_only_enables_that_kind() {
+        let config = config_with_external(ExternalSetting::List(vec!["zsh".to_string()]));
+        let settings = ExternalCompletionSettings::resolve(&config);
+        let kinds: Vec<ExternalKind> = settings.enabled.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, vec![ExternalKind::Zsh]);
+    }
+
+    #[test]
+    fn resolve_array_form_invalid_entry_is_skipped_others_kept() {
+        // 不正な要素 ("bogus") は警告のうえスキップされ、有効な要素だけが残る。
+        let config = config_with_external(ExternalSetting::List(vec![
+            "zsh".to_string(),
+            "bogus".to_string(),
+            "carapace".to_string(),
+        ]));
+        let settings = ExternalCompletionSettings::resolve(&config);
+        let kinds: Vec<ExternalKind> = settings.enabled.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, vec![ExternalKind::Zsh, ExternalKind::Carapace]);
+    }
+
+    #[test]
+    fn resolve_array_form_all_invalid_entries_yields_empty() {
+        let config = config_with_external(ExternalSetting::List(vec![
+            "auto".to_string(),
+            "none".to_string(),
+        ]));
+        let settings = ExternalCompletionSettings::resolve(&config);
+        assert!(
+            settings.enabled.is_empty(),
+            "array form only accepts \"carapace\"/\"zsh\" entries; \
+             \"auto\"/\"none\" inside an array should be skipped entirely"
+        );
+    }
+
+    // ── ExternalKind::as_str / Display ──
+
+    #[test]
+    fn external_kind_as_str_matches_config_toml_values() {
+        assert_eq!(ExternalKind::Carapace.as_str(), "carapace");
+        assert_eq!(ExternalKind::Zsh.as_str(), "zsh");
+    }
+
+    #[test]
+    fn external_kind_display_matches_as_str() {
+        assert_eq!(ExternalKind::Carapace.to_string(), "carapace");
+        assert_eq!(ExternalKind::Zsh.to_string(), "zsh");
+    }
+
+    #[test]
+    fn external_kind_all_order_is_carapace_then_zsh() {
+        // "auto" 解決順の前提（carapace の方が起動コストが低いため先）。
+        assert_eq!(
+            ExternalKind::ALL,
+            [ExternalKind::Carapace, ExternalKind::Zsh]
+        );
+    }
+
+    // ── binary_path ──
+
+    #[test]
+    fn binary_path_returns_none_for_kind_not_in_enabled_list() {
+        let settings = ExternalCompletionSettings {
+            timeout: Duration::from_millis(400),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Carapace,
+                binary: Some(PathBuf::from("/usr/local/bin/carapace")),
+            }],
+        };
+        assert!(settings.binary_path(ExternalKind::Zsh).is_none());
+    }
+
+    #[test]
+    fn binary_path_returns_none_when_entry_present_but_binary_not_found() {
+        let settings = ExternalCompletionSettings {
+            timeout: Duration::from_millis(400),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Carapace,
+                binary: None,
+            }],
+        };
+        assert!(settings.binary_path(ExternalKind::Carapace).is_none());
+    }
+
+    #[test]
+    fn binary_path_returns_path_when_enabled_and_detected() {
+        let settings = ExternalCompletionSettings {
+            timeout: Duration::from_millis(400),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Zsh,
+                binary: Some(PathBuf::from("/bin/zsh")),
+            }],
+        };
+        assert_eq!(
+            settings.binary_path(ExternalKind::Zsh),
+            Some(&PathBuf::from("/bin/zsh"))
+        );
     }
 
     // ── format_external_summary（`source` サマリーの external: 行）──
@@ -665,50 +955,82 @@ mod tests {
     // 純粋関数のみを検証する。
 
     #[test]
-    fn format_external_summary_known_value_shows_resolved_mode_only() {
+    fn format_external_summary_known_single_value_shows_resolved_kind_only() {
         let settings = ExternalCompletionSettings {
-            mode: ExternalMode::Carapace,
             timeout: Duration::from_millis(400),
-            binary: Some(PathBuf::from("/usr/local/bin/carapace")),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Carapace,
+                binary: Some(PathBuf::from("/usr/local/bin/carapace")),
+            }],
         };
         assert_eq!(format_external_summary("carapace", &settings), "carapace");
     }
 
     #[test]
-    fn format_external_summary_known_auto_value_shows_auto_without_fallback_marker() {
+    fn format_external_summary_known_auto_value_shows_resolved_order_without_fallback_marker() {
         let settings = ExternalCompletionSettings {
-            mode: ExternalMode::Auto,
             timeout: Duration::from_millis(400),
-            binary: None,
+            enabled: vec![
+                ResolvedExternal {
+                    kind: ExternalKind::Carapace,
+                    binary: Some(PathBuf::from("/usr/local/bin/carapace")),
+                },
+                ResolvedExternal {
+                    kind: ExternalKind::Zsh,
+                    binary: Some(PathBuf::from("/bin/zsh")),
+                },
+            ],
         };
         let out = format_external_summary("auto", &settings);
-        assert_eq!(out, "auto");
+        assert_eq!(out, "carapace, zsh");
         assert!(!out.contains("未対応"));
     }
 
     #[test]
-    fn format_external_summary_none_mode_shows_none() {
+    fn format_external_summary_none_value_shows_none() {
         let settings = ExternalCompletionSettings {
-            mode: ExternalMode::None,
             timeout: Duration::from_millis(400),
-            binary: None,
+            enabled: Vec::new(),
         };
         assert_eq!(format_external_summary("none", &settings), "none");
     }
 
     #[test]
-    fn format_external_summary_unknown_value_shows_fallback_marker_with_raw_value() {
-        // resolve() は未知の値を auto にフォールバックさせるため、
-        // settings.mode は Auto になっている前提。
+    fn format_external_summary_known_array_value_shows_resolved_order() {
         let settings = ExternalCompletionSettings {
-            mode: ExternalMode::Auto,
             timeout: Duration::from_millis(400),
-            binary: None,
+            enabled: vec![
+                ResolvedExternal {
+                    kind: ExternalKind::Zsh,
+                    binary: Some(PathBuf::from("/bin/zsh")),
+                },
+                ResolvedExternal {
+                    kind: ExternalKind::Carapace,
+                    binary: Some(PathBuf::from("/usr/local/bin/carapace")),
+                },
+            ],
+        };
+        let raw = ExternalSetting::List(vec!["zsh".to_string(), "carapace".to_string()]);
+        let out = format_external_summary(&raw.to_string(), &settings);
+        assert_eq!(out, "zsh, carapace");
+        assert!(!out.contains("未対応"));
+    }
+
+    #[test]
+    fn format_external_summary_unknown_value_shows_fallback_marker_with_raw_value() {
+        // resolve() は未知の値を auto として解決する。ここでは carapace のみ
+        // 検出された想定の settings を手組みして検証する。
+        let settings = ExternalCompletionSettings {
+            timeout: Duration::from_millis(400),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Carapace,
+                binary: Some(PathBuf::from("/usr/local/bin/carapace")),
+            }],
         };
         let out = format_external_summary("bogus", &settings);
         assert!(
-            out.contains("auto"),
-            "fallback summary should mention the resolved mode: {out:?}"
+            out.contains("carapace"),
+            "fallback summary should mention the resolved order: {out:?}"
         );
         assert!(
             out.contains("bogus"),
@@ -718,25 +1040,26 @@ mod tests {
             out.contains("未対応"),
             "fallback summary should carry a visible fallback marker: {out:?}"
         );
+        assert!(
+            out.contains("auto"),
+            "fallback summary should mention that auto was used: {out:?}"
+        );
     }
 
     #[test]
     fn format_external_summary_unknown_value_end_to_end_via_resolve() {
         // resolve() が実際に fallback した結果を format_external_summary に
         // 渡す統合的な確認（raw と settings の食い違いを実際の呼び出し経路で検証）。
-        let config = CompletionConfig {
-            external: "typo-value".to_string(),
-            ..CompletionConfig::default()
-        };
+        let config = config_with_external(ExternalSetting::Single("typo-value".to_string()));
         let settings = ExternalCompletionSettings::resolve(&config);
-        let out = format_external_summary(&config.external, &settings);
-        assert!(out.contains("auto"));
+        let out = format_external_summary(&config.external.to_string(), &settings);
         assert!(out.contains("typo-value"));
+        assert!(out.contains("未対応"));
     }
 
     #[test]
     #[serial]
-    fn resolve_carapace_mode_missing_binary_disables_without_panic() {
+    fn resolve_carapace_string_missing_binary_disables_without_panic() {
         // PATH に無いことを保証するため、空の PATH で解決する。
         let original_path = std::env::var("PATH").ok();
         // SAFETY: テスト単体プロセス内で一時的に環境変数を書き換える。
@@ -745,10 +1068,7 @@ mod tests {
             std::env::set_var("PATH", "");
         }
 
-        let config = CompletionConfig {
-            external: "carapace".to_string(),
-            ..CompletionConfig::default()
-        };
+        let config = config_with_external(ExternalSetting::Single("carapace".to_string()));
         let settings = ExternalCompletionSettings::resolve(&config);
 
         unsafe {
@@ -758,19 +1078,55 @@ mod tests {
             }
         }
 
-        assert_eq!(settings.mode, ExternalMode::Carapace);
-        assert!(settings.binary.is_none());
+        // エントリ自体は残り（「明示指定したのに無効」であることが可視化される）、
+        // バイナリだけが未検出になる。
+        assert_eq!(settings.enabled.len(), 1);
+        assert_eq!(settings.enabled[0].kind, ExternalKind::Carapace);
+        assert!(settings.enabled[0].binary.is_none());
+        assert!(settings.binary_path(ExternalKind::Carapace).is_none());
     }
 
     #[test]
     fn resolve_timeout_converts_millis_to_duration() {
         let config = CompletionConfig {
-            external: "none".to_string(),
+            external: ExternalSetting::Single("none".to_string()),
             external_timeout_ms: 1234,
             ..CompletionConfig::default()
         };
         let settings = ExternalCompletionSettings::resolve(&config);
         assert_eq!(settings.timeout, Duration::from_millis(1234));
+    }
+
+    // ── is_known_external_value ──
+
+    #[test]
+    fn is_known_external_value_recognizes_scalar_keywords() {
+        assert!(is_known_external_value("auto"));
+        assert!(is_known_external_value("carapace"));
+        assert!(is_known_external_value("zsh"));
+        assert!(is_known_external_value("none"));
+    }
+
+    #[test]
+    fn is_known_external_value_recognizes_valid_array_display() {
+        let raw = ExternalSetting::List(vec!["zsh".to_string(), "carapace".to_string()]);
+        assert!(is_known_external_value(&raw.to_string()));
+    }
+
+    #[test]
+    fn is_known_external_value_rejects_unknown_scalar() {
+        assert!(!is_known_external_value("bogus"));
+    }
+
+    #[test]
+    fn is_known_external_value_rejects_array_with_invalid_entry() {
+        let raw = ExternalSetting::List(vec!["zsh".to_string(), "bogus".to_string()]);
+        assert!(!is_known_external_value(&raw.to_string()));
+    }
+
+    #[test]
+    fn is_known_external_value_rejects_empty_array() {
+        assert!(!is_known_external_value("[]"));
     }
 
     // ── hot-reload 伝播（`Shell::reload_config` の書き込み経路を模擬） ──
@@ -780,18 +1136,20 @@ mod tests {
     // 直接シミュレートする（git_branch_commands の hot-reload テストと同じ方針）。
 
     #[test]
-    fn reload_write_path_updates_shared_settings_timeout_and_mode() {
-        let initial = ExternalCompletionSettings::resolve(&CompletionConfig {
-            external: "none".to_string(),
-            external_timeout_ms: 400,
-            ..CompletionConfig::default()
-        });
+    fn reload_write_path_updates_shared_settings_timeout_and_enabled() {
+        let initial = ExternalCompletionSettings::resolve(&config_with_external(
+            ExternalSetting::Single("none".to_string()),
+        ));
+        let initial = ExternalCompletionSettings {
+            timeout: Duration::from_millis(400),
+            ..initial
+        };
         let shared = Arc::new(RwLock::new(initial));
 
         // `Shell::reload_config` と同じ書き込み経路: 新しい config から再解決し、
         // 書き込みロックで丸ごと置き換える。
         let reloaded_config = CompletionConfig {
-            external: "none".to_string(),
+            external: ExternalSetting::Single("none".to_string()),
             external_timeout_ms: 900,
             ..CompletionConfig::default()
         };
@@ -802,7 +1160,7 @@ mod tests {
         }
 
         let after = shared.read().unwrap();
-        assert_eq!(after.mode, ExternalMode::None);
+        assert!(after.enabled.is_empty());
         assert_eq!(after.timeout, Duration::from_millis(900));
     }
 
@@ -816,20 +1174,22 @@ mod tests {
             return;
         };
 
-        let initial = ExternalCompletionSettings::resolve(&CompletionConfig {
-            external: "none".to_string(),
-            ..CompletionConfig::default()
-        });
+        let initial = ExternalCompletionSettings::resolve(&config_with_external(
+            ExternalSetting::Single("none".to_string()),
+        ));
         let shared = Arc::new(RwLock::new(initial));
         assert!(
-            shared.read().unwrap().binary.is_none(),
+            shared
+                .read()
+                .unwrap()
+                .binary_path(ExternalKind::Carapace)
+                .is_none(),
             "external = \"none\" should never resolve a binary"
         );
 
-        let resolved = ExternalCompletionSettings::resolve(&CompletionConfig {
-            external: "auto".to_string(),
-            ..CompletionConfig::default()
-        });
+        let resolved = ExternalCompletionSettings::resolve(&config_with_external(
+            ExternalSetting::Single("auto".to_string()),
+        ));
         {
             let mut guard = shared.write().unwrap();
             *guard = resolved;
@@ -837,8 +1197,8 @@ mod tests {
 
         let after = shared.read().unwrap();
         assert_eq!(
-            after.binary.as_deref(),
-            Some(expected_binary.as_path()),
+            after.binary_path(ExternalKind::Carapace),
+            Some(&expected_binary),
             "reload with external = \"auto\" should re-detect the now-installed carapace binary"
         );
     }
@@ -865,10 +1225,9 @@ mod tests {
 
         // reload 前: external = "none" 相当（binary なし）で settings を構築し、
         // provider は reload の前に一度だけ、この Arc から構築する。
-        let initial = ExternalCompletionSettings::resolve(&CompletionConfig {
-            external: "none".to_string(),
-            ..CompletionConfig::default()
-        });
+        let initial = ExternalCompletionSettings::resolve(&config_with_external(
+            ExternalSetting::Single("none".to_string()),
+        ));
         let shared = Arc::new(RwLock::new(initial));
         let provider = CarapaceProvider::new(Arc::clone(&shared));
 
@@ -881,10 +1240,9 @@ mod tests {
 
         // reload: `Shell::reload_config` と同じ書き込み経路で、同じ Arc の
         // 中身を "auto"（carapace 検出込み）へ丸ごと置き換える。
-        let resolved = ExternalCompletionSettings::resolve(&CompletionConfig {
-            external: "auto".to_string(),
-            ..CompletionConfig::default()
-        });
+        let resolved = ExternalCompletionSettings::resolve(&config_with_external(
+            ExternalSetting::Single("auto".to_string()),
+        ));
         {
             let mut guard = shared.write().unwrap();
             *guard = resolved;

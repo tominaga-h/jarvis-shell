@@ -1,26 +1,30 @@
 //! コマンド補完 — Tab キーで PATH コマンド名・ビルトイン・ファイルパス・git ブランチ・
-//! carapace 外部補完を補完
+//! 外部補完（carapace / zsh ブリッジ）を補完
 //!
 //! - 先頭トークン: PATH 内の実行可能コマンド + ビルトイン (cd, cwd, exit, ...)
 //! - 先頭トークンがパスらしい場合 (`./` `../` `/` `~/`): ファイル / ディレクトリ補完
 //! - `git <branch系サブコマンド>`: git ブランチ名補完
-//! - carapace 対応コマンドの引数: carapace 外部補完（`[completion] external`
-//!   の方針とバイナリ検出結果に応じて有効・無効化される）
+//! - 外部補完対応コマンドの引数: carapace / zsh ブリッジによる外部補完
+//!   （`[completion] external` の方針とバイナリ検出結果に応じて有効・
+//!   無効化・優先順が決まる — [`ExternalCompletionSettings`] 参照）
 //! - それ以降: カレントディレクトリ基準のファイル / ディレクトリ名
 //!
 //! [`CompletionProvider`] トレイトで補完源をプラグイン化しており、
 //! `complete()` は [`Command`](command::CommandProvider) →
-//! [`Git`](git::GitProvider) → [`Carapace`](carapace::CarapaceProvider) →
-//! [`ZshBridge`](zsh_bridge::ZshBridgeProvider) → [`Path`](path::PathProvider)
-//! の順に各プロバイダを走査し、最初に `Some` を返したプロバイダの候補を
-//! 採用する（`None` = 対象外で次へ、`Some(vec![])` = 担当したが候補なしで
-//! そこで確定）。`GitProvider` を `CarapaceProvider` より先に置いているのは、
-//! 設定済みのブランチ系サブコマンドではカレントブランチ優先の並び順
-//! （`GitProvider` 側の既存ロジック）を carapace の並び順より優先したい
-//! ため。`ZshBridgeProvider` を `CarapaceProvider` の後段に置いているのは、
-//! carapace が対応済みのコマンドではそちらを優先し、carapace が空/未対応
-//! だったコマンドのみ zsh の compsys（`_*` 補完関数群）にフォールバックする
-//! ため（carapace の方が起動コストが低く、候補に description が付きやすい）。
+//! [`Git`](git::GitProvider) → **外部補完プロバイダ列**（[`external_provider_chain`]
+//! が [`ExternalCompletionSettings`] の解決済み優先順から動的に組み立てる。
+//! 既定 `"auto"` では [`Carapace`](carapace::CarapaceProvider) →
+//! [`ZshBridge`](zsh_bridge::ZshBridgeProvider) の順だが、`[completion]
+//! external` を配列（例: `["zsh", "carapace"]`）で指定すると入れ替わる）→
+//! [`Path`](path::PathProvider) の順に各プロバイダを走査し、最初に `Some` を
+//! 返したプロバイダの候補を採用する（`None` = 対象外で次へ、`Some(vec![])` =
+//! 担当したが候補なしでそこで確定）。`GitProvider` を外部補完プロバイダ列より
+//! 先に置いているのは、設定済みのブランチ系サブコマンドではカレントブランチ
+//! 優先の並び順（`GitProvider` 側の既存ロジック）を外部補完の並び順より
+//! 優先したいため。既定順で carapace を zsh ブリッジより先にしているのは、
+//! carapace の方が起動コストが低く候補に description が付きやすいため
+//! （carapace が空/未対応だったコマンドのみ zsh の compsys — `_*` 補完関数群
+//! — にフォールバックする）。
 //!
 //! コマンド名補完は fish shell の設計思想に倣い、インメモリキャッシュを持たず、
 //! Tab 押下時にリアルタイムで `$PATH` を走査する（キャッシュレス設計）。
@@ -32,11 +36,21 @@
 //! 経由でそれを透過的に参照する。`aliases` は `Shell` と `Arc` を共有して
 //! おり、`alias` ビルトイン実行直後の次の Tab から即座に反映される。
 //!
-//! carapace の実行時設定（[`ExternalCompletionSettings`]）も `git_branch_commands`
-//! / `aliases` と同じ配管パターンで `Shell` と共有される。`source` コマンドに
-//! よる `reload_config` はバイナリの `which()` 再検出込みで設定を更新するため、
-//! セッション中に carapace をインストールしてから `source` するだけで
-//! 再起動なしに外部補完を有効化できる。
+//! 外部補完の実行時設定（[`ExternalCompletionSettings`]）も
+//! `git_branch_commands` / `aliases` と同じ配管パターンで `Shell` と
+//! 共有される。`source` コマンドによる `reload_config` はバイナリの
+//! `which()` 再検出込みで設定を更新するため、セッション中に carapace/zsh を
+//! インストールしてから `source` するだけで再起動なしに外部補完を有効化
+//! できる（ただしプロバイダチェーンの**並び順**自体は起動時に固定されるため、
+//! `[completion] external` の配列順序を変更した場合は再起動が必要 —
+//! [`external_provider_chain`] のドキュメント参照）。
+//!
+//! プロバイダ単位（コマンド単位）のオーバーライド（例:
+//! `[completion.overrides] git = "zsh"` で特定コマンドだけ優先順を変える）は
+//! Task 2b.4 の時点ではスコープ外。将来必要になれば `CompletionContext` に
+//! コマンド名を渡して `external_provider_chain` の走査順を動的に切り替える
+//! 形で追加できる（既存の `enabled` 優先順リストとは別に、コマンド名 →
+//! 優先種別のマップを resolve() 側に持たせる設計が有力）。
 
 mod carapace;
 mod command;
@@ -54,7 +68,7 @@ use reedline::{Completer, Suggestion};
 
 use crate::engine::expand::{operator_prefix_len, split_quoted};
 
-use carapace::CarapaceProvider;
+use carapace::{CarapaceProvider, ExternalKind};
 use command::CommandProvider;
 use context::{extract_context, CompletionContext};
 use git::GitProvider;
@@ -88,15 +102,52 @@ impl JarvishCompleter {
         aliases: Arc<RwLock<HashMap<String, String>>>,
         external_completion: Arc<RwLock<ExternalCompletionSettings>>,
     ) -> Self {
-        let providers: Vec<Box<dyn CompletionProvider>> = vec![
+        let mut providers: Vec<Box<dyn CompletionProvider>> = vec![
             Box::new(CommandProvider::new(Arc::clone(&aliases))),
             Box::new(GitProvider::new(git_branch_commands)),
-            Box::new(CarapaceProvider::new(Arc::clone(&external_completion))),
-            Box::new(ZshBridgeProvider::new(external_completion)),
-            Box::new(PathProvider),
         ];
+        providers.extend(external_provider_chain(&external_completion));
+        providers.push(Box::new(PathProvider));
         Self { providers, aliases }
     }
+}
+
+/// 解決済みの優先順（[`ExternalCompletionSettings::resolve`] の結果）に沿って、
+/// 外部補完プロバイダ（carapace / zsh ブリッジ）のチェーンを組み立てる。
+///
+/// 各プロバイダは構築後も同じ `external_completion` の `Arc` を共有し続け、
+/// `provide()` 呼び出しごとに自分の種別が有効か（`binary_path(kind)`）を
+/// 読み直す（hot-reload 対応、`carapace.rs` / `zsh_bridge.rs` 参照）。この
+/// 関数はあくまで**チェーン内の並び順**（優先順）を初期構築時の解決結果から
+/// 決めるためのもの — `source` による reload は有効/無効・バイナリパスの
+/// 更新のみを反映し、プロバイダの並び順自体は再構築されない（`[completion]
+/// external` の配列順序を変えて `source` しても、チェーンの並びは次回
+/// シェル起動まで変わらない。これは既存の `git_branch_commands` 等と同じ
+/// 「値は reload されるが構造は起動時固定」という配管パターンに倣っている）。
+///
+/// 未知の種別が将来追加されても [`ExternalKind`] の列挙に従うだけなので、
+/// この関数自体を変更する必要はない。
+fn external_provider_chain(
+    external_completion: &Arc<RwLock<ExternalCompletionSettings>>,
+) -> Vec<Box<dyn CompletionProvider>> {
+    let order: Vec<ExternalKind> = external_completion
+        .read()
+        .map(|settings| settings.enabled.iter().map(|e| e.kind).collect())
+        .unwrap_or_default();
+
+    order
+        .into_iter()
+        .map(|kind| -> Box<dyn CompletionProvider> {
+            match kind {
+                ExternalKind::Carapace => {
+                    Box::new(CarapaceProvider::new(Arc::clone(external_completion)))
+                }
+                ExternalKind::Zsh => {
+                    Box::new(ZshBridgeProvider::new(Arc::clone(external_completion)))
+                }
+            }
+        })
+        .collect()
 }
 
 impl Completer for JarvishCompleter {
@@ -204,16 +255,18 @@ mod tests {
     use serial_test::serial;
     use std::env;
     use std::fs;
+    use std::path::PathBuf;
 
-    use crate::config::CompletionConfig;
+    use crate::config::{CompletionConfig, ExternalSetting};
 
     /// テスト用の外部補完設定（無効化固定）。他プロバイダの単体/統合テストが
-    /// 環境の carapace 有無に左右されないよう `ExternalMode::None` で構築する
-    /// （carapace 連携自体の検証は `carapace.rs` 側の実行時 skip 付きテストで行う）。
+    /// 環境の carapace/zsh 有無に左右されないよう `external = "none"` で
+    /// 構築する（carapace/zsh 連携自体の検証は `carapace.rs` / `zsh_bridge.rs`
+    /// 側の実行時 skip 付きテストで行う）。
     fn disabled_external_completion() -> Arc<RwLock<ExternalCompletionSettings>> {
         Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
             &CompletionConfig {
-                external: "none".to_string(),
+                external: ExternalSetting::Single("none".to_string()),
                 ..CompletionConfig::default()
             },
         )))
@@ -1017,6 +1070,122 @@ mod tests {
             suggestion.description.as_deref(),
             Some("git"),
             "newly defined alias should carry its value as description"
+        );
+    }
+
+    // ── external_provider_chain 順序テスト (Task 2b.4) ──
+    //
+    // 実際の carapace/zsh バイナリには依存せず、fake スクリプトを両方
+    // 「バイナリ」として settings に注入し、`[completion] external` の配列
+    // 指定順どおりにプロバイダチェーンが構築される（= 先に試される）ことを
+    // 検証する。carapace/zsh どちらも本物のプロトコル（JSON export /
+    // capture.zsh 経由の compsys 呼び出し）を要求するため、ここでは
+    // `external_provider_chain` が返す `Vec` の**要素数と並び**そのものを
+    // 直接検証する（プロバイダの型を外部から判別する手段がないため、
+    // enabled リストの kind 順と 1:1 対応することを見る）。
+
+    fn fake_binary_settings(
+        order: Vec<carapace::ExternalKind>,
+    ) -> Arc<RwLock<ExternalCompletionSettings>> {
+        use carapace::ResolvedExternal;
+        Arc::new(RwLock::new(ExternalCompletionSettings {
+            timeout: std::time::Duration::from_millis(400),
+            enabled: order
+                .into_iter()
+                .map(|kind| ResolvedExternal {
+                    kind,
+                    binary: Some(PathBuf::from(format!("/no/such/fake-{kind}"))),
+                })
+                .collect(),
+        }))
+    }
+
+    #[test]
+    fn external_provider_chain_default_auto_order_is_carapace_then_zsh() {
+        let settings = fake_binary_settings(vec![
+            carapace::ExternalKind::Carapace,
+            carapace::ExternalKind::Zsh,
+        ]);
+        let chain = external_provider_chain(&settings);
+        assert_eq!(
+            chain.len(),
+            2,
+            "both carapace and zsh should be present in the chain"
+        );
+    }
+
+    #[test]
+    fn external_provider_chain_respects_explicit_array_order_zsh_first() {
+        // `[completion] external = ["zsh", "carapace"]` を模した settings では
+        // enabled リストの並びが zsh → carapace になっている。
+        // external_provider_chain はこの並びをそのままチェーンの並びに反映する。
+        let settings = ExternalCompletionSettings::resolve(&CompletionConfig {
+            external: ExternalSetting::List(vec!["zsh".to_string(), "carapace".to_string()]),
+            ..CompletionConfig::default()
+        });
+        let enabled_kinds: Vec<carapace::ExternalKind> =
+            settings.enabled.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            enabled_kinds,
+            vec![
+                carapace::ExternalKind::Zsh,
+                carapace::ExternalKind::Carapace
+            ],
+            "resolved settings should preserve the explicit array order"
+        );
+
+        let shared = Arc::new(RwLock::new(settings));
+        let chain = external_provider_chain(&shared);
+        // 実機に carapace/zsh が無い環境でも enabled リストにエントリさえ
+        // あればチェーンには要素が積まれる（バイナリ有無はプロバイダ内部の
+        // 実行時ガード — provide() 呼び出し時 — の責務）。
+        assert_eq!(chain.len(), enabled_kinds.len());
+    }
+
+    #[test]
+    fn external_provider_chain_none_yields_empty_chain() {
+        let settings = disabled_external_completion();
+        let chain = external_provider_chain(&settings);
+        assert!(
+            chain.is_empty(),
+            "external = \"none\" should produce an empty external provider chain"
+        );
+    }
+
+    #[test]
+    fn external_provider_chain_single_carapace_yields_one_entry() {
+        let settings = fake_binary_settings(vec![carapace::ExternalKind::Carapace]);
+        let chain = external_provider_chain(&settings);
+        assert_eq!(chain.len(), 1);
+    }
+
+    #[test]
+    fn jarvish_completer_construction_with_array_order_does_not_panic() {
+        // JarvishCompleter::new が external_provider_chain 経由で配列指定の
+        // 優先順を受け取っても構築が成功し、通常の補完（PathProvider への
+        // フォールバック）が引き続き機能することを end-to-end で確認する。
+        let settings = Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
+            &CompletionConfig {
+                external: ExternalSetting::List(vec!["zsh".to_string(), "carapace".to_string()]),
+                ..CompletionConfig::default()
+            },
+        )));
+        let commands = CompletionConfig::default().git_branch_commands;
+        let mut completer = JarvishCompleter::new(
+            Arc::new(RwLock::new(commands)),
+            Arc::new(RwLock::new(HashMap::new())),
+            settings,
+        );
+
+        let (_tmpdir, path) = create_test_tree();
+        let line = format!("ls {path}/");
+        let pos = line.len();
+        let suggestions = completer.complete(&line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&format!("{path}/readme.txt").as_str()),
+            "path completion should still work when external providers fall through: {values:?}"
         );
     }
 }

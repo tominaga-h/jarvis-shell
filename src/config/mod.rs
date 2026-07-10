@@ -28,7 +28,7 @@
 //!
 //! [completion]
 //! git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
-//! external = "auto"             # "auto" | "carapace" | "none" — 外部補完（carapace）の使用方針
+//! external = "auto"             # "auto" | "carapace" | "zsh" | "none" | ["carapace", "zsh"]（配列で優先順を明示指定）
 //! external_timeout_ms = 400     # 外部補完プロセスのタイムアウト（ミリ秒）
 //!
 //! [startup]
@@ -120,11 +120,14 @@ impl Default for PromptConfig {
 pub struct CompletionConfig {
     /// ブランチ名補完を提供する git サブコマンド
     pub git_branch_commands: Vec<String>,
-    /// 外部補完（carapace）の使用方針。
-    /// `"auto"`（デフォルト・バイナリ検出時のみ使用） / `"carapace"`（明示的に有効化。
-    /// バイナリ未検出なら無効化して警告） / `"none"`（無効化）。未知の値は
-    /// `"auto"` として扱い警告を出す。
-    pub external: String,
+    /// 外部補完（carapace / zsh ブリッジ）の使用方針。
+    ///
+    /// TOML 上では文字列（`"auto"` / `"carapace"` / `"zsh"` / `"none"`）と
+    /// 配列（例: `["zsh", "carapace"]`、優先順を明示指定）のどちらでも書ける
+    /// （[`ExternalSetting`] の untagged パース）。実際の有効化判定・
+    /// バイナリ検出は `cli::completer::carapace::ExternalCompletionSettings::resolve`
+    /// が行う。
+    pub external: ExternalSetting,
     /// 外部補完プロセスのタイムアウト（ミリ秒）
     pub external_timeout_ms: u64,
 }
@@ -148,9 +151,73 @@ impl Default for CompletionConfig {
             .into_iter()
             .map(String::from)
             .collect(),
-            external: "auto".to_string(),
+            external: ExternalSetting::default(),
             external_timeout_ms: 400,
         }
+    }
+}
+
+/// `[completion] external` の生設定値（TOML パース直後の未解決形）。
+///
+/// 文字列 1 個（`"auto"` / `"carapace"` / `"zsh"` / `"none"`）と、配列
+/// （例: `["zsh", "carapace"]` — プロバイダの優先順を明示指定）の両方の
+/// TOML 表現を受け付ける untagged enum。バイナリ検出やフォールバック判定は
+/// 行わない（それは `ExternalCompletionSettings::resolve` の責務）。
+///
+/// `#[serde(default)]` の `CompletionConfig` から参照されるため、この型自体も
+/// `Default` を実装する（値は `Single("auto")` — 後方互換の起点）。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ExternalSetting {
+    /// `external = "auto"` のような単一文字列形式（既存の後方互換形式）。
+    Single(String),
+    /// `external = ["zsh", "carapace"]` のような配列形式（明示的な優先順）。
+    List(Vec<String>),
+}
+
+impl Default for ExternalSetting {
+    fn default() -> Self {
+        ExternalSetting::Single("auto".to_string())
+    }
+}
+
+impl ExternalSetting {
+    /// 解決前の生の値を文字列のリストとして返す（`Single` は 1 要素）。
+    ///
+    /// `resolve()` 側で「既知の値かどうか」の判定や警告メッセージ組み立てに使う。
+    pub(crate) fn raw_entries(&self) -> Vec<&str> {
+        match self {
+            ExternalSetting::Single(s) => vec![s.as_str()],
+            ExternalSetting::List(list) => list.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+impl std::fmt::Display for ExternalSetting {
+    /// ログ出力・`source` サマリーの raw 値表示に使う。
+    /// `Single` はそのまま、`List` は TOML の配列表記に近い `["a", "b"]` 形式。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExternalSetting::Single(s) => write!(f, "{s}"),
+            ExternalSetting::List(list) => {
+                write!(f, "[")?;
+                for (i, entry) in list.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{entry:?}")?;
+                }
+                write!(f, "]")
+            }
+        }
+    }
+}
+
+impl PartialEq<&str> for ExternalSetting {
+    /// テスト・呼び出し側の可読性のための比較補助
+    /// （`Single("auto") == "auto"`）。配列形式とは常に不一致。
+    fn eq(&self, other: &&str) -> bool {
+        matches!(self, ExternalSetting::Single(s) if s == other)
     }
 }
 
@@ -480,6 +547,99 @@ external = "bogus"
 "#;
         let config = load_from_str(toml);
         assert_eq!(config.completion.external, "bogus");
+    }
+
+    // ── ExternalSetting: 文字列 / 配列両対応 (Task 2b.4) ──
+
+    #[test]
+    fn parse_completion_config_external_zsh_string() {
+        let toml = r#"
+[completion]
+external = "zsh"
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(config.completion.external, "zsh");
+    }
+
+    #[test]
+    fn parse_completion_config_external_array_form_explicit_order() {
+        let toml = r#"
+[completion]
+external = ["zsh", "carapace"]
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(
+            config.completion.external,
+            ExternalSetting::List(vec!["zsh".to_string(), "carapace".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_completion_config_external_array_form_single_entry() {
+        let toml = r#"
+[completion]
+external = ["carapace"]
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(
+            config.completion.external,
+            ExternalSetting::List(vec!["carapace".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_completion_config_external_array_form_with_invalid_entry() {
+        // 不正な要素を含む配列でも TOML パース自体は成功する（要素単位の
+        // 妥当性検査・警告は resolve() の責務、raw_entries() 経由）。
+        let toml = r#"
+[completion]
+external = ["zsh", "bogus", "carapace"]
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(
+            config.completion.external,
+            ExternalSetting::List(vec![
+                "zsh".to_string(),
+                "bogus".to_string(),
+                "carapace".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn external_setting_default_is_single_auto_string_form() {
+        // 既存の文字列形式との後方互換の起点: デフォルトは Single("auto")。
+        assert_eq!(
+            ExternalSetting::default(),
+            ExternalSetting::Single("auto".to_string())
+        );
+        assert_eq!(ExternalSetting::default(), "auto");
+    }
+
+    #[test]
+    fn external_setting_raw_entries_single_returns_one_element() {
+        let setting = ExternalSetting::Single("carapace".to_string());
+        assert_eq!(setting.raw_entries(), vec!["carapace"]);
+    }
+
+    #[test]
+    fn external_setting_raw_entries_list_returns_all_elements_in_order() {
+        let setting = ExternalSetting::List(vec!["zsh".to_string(), "carapace".to_string()]);
+        assert_eq!(setting.raw_entries(), vec!["zsh", "carapace"]);
+    }
+
+    #[test]
+    fn external_setting_display_single_matches_raw_string() {
+        assert_eq!(
+            ExternalSetting::Single("auto".to_string()).to_string(),
+            "auto"
+        );
+    }
+
+    #[test]
+    fn external_setting_display_list_shows_bracketed_order() {
+        let setting = ExternalSetting::List(vec!["zsh".to_string(), "carapace".to_string()]);
+        assert_eq!(setting.to_string(), r#"["zsh", "carapace"]"#);
     }
 
     #[test]

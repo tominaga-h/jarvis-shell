@@ -176,7 +176,7 @@ starship = false              # Set to true to use Starship prompt (requires: st
 
 [completion]
 git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
-external = "auto"             # "auto" | "carapace" | "none" — external completion (carapace) policy
+external = "auto"             # "auto" | "carapace" | "zsh" | "none" | ["carapace", "zsh"] — external completion policy (string or array)
 external_timeout_ms = 400     # Timeout for the external completion process (milliseconds)
 
 [startup]
@@ -217,14 +217,18 @@ If `starship = true` is set but the prerequisites are not met, Jarvish falls bac
 
 Jarvish's Tab completion can bridge to [carapace](https://github.com/carapace-sh/carapace-bin), a multi-shell completion engine that ships completions for 500+ CLI tools (git, docker, kubectl, etc.). Install it with `brew install carapace`.
 
-- **Auto-detection**: `[completion] external = "auto"` (the default) uses carapace automatically if the `carapace` binary is found on `PATH` at startup — no further configuration needed. Set `external = "carapace"` to require it explicitly (a warning is printed if the binary is missing) or `external = "none"` to disable external completion entirely.
-- **Timeout + fallback**: Each carapace invocation is capped by `external_timeout_ms` (default 400ms). If carapace hangs, errors, or returns no candidates, Jarvish silently falls back to its built-in path completion — Tab never blocks waiting on an external process.
-- **Hot-reload**: `external` and `external_timeout_ms` are re-read by the `source` builtin, and the carapace binary is re-detected (via `which`) on every reload. This means you can `brew install carapace` mid-session and run `source ~/.config/jarvish/config.toml` to enable it immediately, without restarting Jarvish.
+- **`[completion] external` accepts a string or an array**:
+  - `"auto"` (the default) tries each provider in priority order (carapace, then the [zsh bridge](#zsh-completion-bridge)) and enables whichever binaries are found on `PATH` — no further configuration needed.
+  - `"none"` disables external completion entirely.
+  - `"carapace"` / `"zsh"` enables only that one provider (a warning is printed if its binary is missing).
+  - An array such as `["zsh", "carapace"]` explicitly sets the priority order — providers are tried left to right, and each is enabled only if its binary is found. Unrecognized array entries are skipped with a warning; the rest of the array still applies.
+- **Timeout + fallback**: Each external completion invocation is capped by `external_timeout_ms` (default 400ms). If a provider hangs, errors, or returns no candidates, Jarvish silently falls through to the next provider (and ultimately to its built-in path completion) — Tab never blocks waiting on an external process.
+- **Hot-reload**: `external` and `external_timeout_ms` are re-read by the `source` builtin, and every configured provider's binary is re-detected (via `which`) on every reload. This means you can `brew install carapace` mid-session and run `source ~/.config/jarvish/config.toml` to enable it immediately, without restarting Jarvish. (Note: changing the *order* of an array — e.g. swapping `["carapace", "zsh"]` to `["zsh", "carapace"]` — takes effect on the next Jarvish restart, not on `source`; enabling/disabling a provider and re-detecting its binary does apply immediately.)
 - **Widening coverage**: carapace also supports bridging to real shell completion functions (e.g. zsh's `compsys`). Export `CARAPACE_BRIDGES` (e.g. `CARAPACE_BRIDGES = "zsh"`) in the `[export]` section of `config.toml` to pull in completions that carapace doesn't natively ship.
 
 ### zsh Completion Bridge
 
-If [carapace](#external-completion-carapace) doesn't have candidates for a command, Jarvish falls back to a built-in zsh bridge: it spawns a real zsh in the background and asks its native completion system (`compsys`, the `_*` functions) for suggestions. This means any completion function that works in zsh — including ones from third-party packages — can work in Jarvish too, without carapace support.
+If [carapace](#external-completion-carapace) doesn't have candidates for a command (or isn't enabled), Jarvish falls back to a built-in zsh bridge: it spawns a real zsh in the background and asks its native completion system (`compsys`, the `_*` functions) for suggestions. This means any completion function that works in zsh — including ones from third-party packages — can work in Jarvish too, without carapace support. Like carapace, it is controlled by the same `[completion] external` setting described above (e.g. `external = "zsh"` to use only the zsh bridge, or `external = ["zsh", "carapace"]` to prefer it over carapace).
 
 - **Bridge zshrc**: The bridge zsh sources `~/.config/jarvish/zsh-bridge/.zshrc` instead of your real `~/.zshrc`, so it stays isolated from your interactive shell setup. Jarvish auto-generates this file (with commented examples) the first time the bridge runs, if it doesn't already exist — it is never overwritten afterward, so your edits are safe.
 - **Adding completions**: Write ordinary zsh syntax in the bridge zshrc. For example, to pull in the [`zsh-completions`](https://github.com/zsh-users/zsh-completions) project installed via Homebrew:

@@ -285,9 +285,9 @@ impl Shell {
         if let Ok(mut cmds) = self.git_branch_commands.write() {
             *cmds = config.completion.git_branch_commands.clone();
         }
-        // 外部補完（carapace）は which() の再検出込みで反映する。これにより
-        // セッション中に carapace をインストールしてから `source` するだけで
-        // 再起動なしに有効化できる。
+        // 外部補完（carapace / zsh ブリッジ）は which() の再検出込みで反映する。
+        // これによりセッション中に carapace/zsh をインストールしてから
+        // `source` するだけで再起動なしに有効化できる。
         let resolved_external = ExternalCompletionSettings::resolve(&config.completion);
         if let Ok(mut ext) = self.external_completion.write() {
             *ext = resolved_external.clone();
@@ -302,13 +302,27 @@ impl Shell {
         } else {
             format!("{:?}", config.ai.ignore_auto_investigation_cmds)
         };
-        let external_binary_display = resolved_external
-            .binary
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "not found".to_string());
         let external_mode_display =
-            format_external_summary(&config.completion.external, &resolved_external);
+            format_external_summary(&config.completion.external.to_string(), &resolved_external);
+        // 解決済みの優先順に沿って、各プロバイダのバイナリパス（未検出なら
+        // "not found"）を1行ずつ列挙する。`enabled` が空（external = "none"
+        // または全プロバイダ無効化）の場合は空行なし。
+        let external_binaries_display = if resolved_external.enabled.is_empty() {
+            String::new()
+        } else {
+            resolved_external
+                .enabled
+                .iter()
+                .map(|entry| {
+                    let binary_display = entry
+                        .binary
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "not found".to_string());
+                    format!("\x20\x20\x20 {}: {binary_display}\n", entry.kind)
+                })
+                .collect::<String>()
+        };
         let summary = format!(
             "Loaded {}\n\
              \x20 [ai]\n\
@@ -323,7 +337,8 @@ impl Shell {
              \x20 [export]  {} {}\n\
              \x20 [prompt]  nerd_font: {}, starship: {}\n\
              \x20 [completion]  git_branch_commands: {} {}\n\
-             \x20\x20 external: {} (binary: {})\n\
+             \x20\x20 external: {}\n\
+             {}\
              \x20\x20 external_timeout_ms: {}\n\
              \x20 [startup]  {} {}\n",
             path.display(),
@@ -355,7 +370,7 @@ impl Shell {
                 "commands"
             },
             external_mode_display,
-            external_binary_display,
+            external_binaries_display,
             config.completion.external_timeout_ms,
             config.startup.commands.len(),
             if config.startup.commands.len() == 1 {

@@ -57,7 +57,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use super::carapace::{ExternalCompletionSettings, ExternalMode};
+use super::carapace::{ExternalCompletionSettings, ExternalKind};
 use super::context::CompletionContext;
 use super::external::run_external_capped;
 use super::provider::{Candidate, CompletionProvider};
@@ -138,12 +138,6 @@ fn ensure_bridge_zshrc(dir: &Path) -> std::io::Result<PathBuf> {
     Ok(zshrc)
 }
 
-/// zsh ブリッジの有効化フラグ。
-///
-/// TODO(Task 2b.4): `[completion]` 設定でのプロバイダ順・有効化制御に
-/// 置き換える。それまでは常に有効（zsh バイナリの有無のみで実質ゲート）。
-const ENABLED: bool = true;
-
 /// `zsh --no-rcs -c <script>` のハードタイムアウト予算。
 ///
 /// ワンショットの内側 zsh 起動 + compinit は環境によって 100〜300ms
@@ -156,13 +150,12 @@ const MIN_TIMEOUT_MS: u64 = 800;
 /// zsh 補完ブリッジ Provider。
 ///
 /// `ExternalCompletionSettings` を [`super::carapace::CarapaceProvider`] と
-/// 同じ `Arc<RwLock<_>>` で共有する（Task 2b.4 で有効化・優先順を専用設定に
-/// 切り出すまでの暫定配管）。`mode == ExternalMode::None`（`[completion]
-/// external = "none"`）のときは `CarapaceProvider` と同様に無効化する —
-/// 現時点で zsh ブリッジ専用の有効/無効設定はまだない（Task 2b.4）ため、
-/// carapace と共通の無効化スイッチに乗せておくのが「外部補完を丸ごと切る」
-/// ユーザー意図と整合する。それ以外のモード（`Auto` / `Carapace`）では
-/// zsh バイナリの有無のみでゲートする。timeout も同じ設定から間借りする。
+/// 同じ `Arc<RwLock<_>>` で共有する（`git_branch_commands` と同じ配管
+/// パターン）。有効化判定は `settings.binary_path(ExternalKind::Zsh)` が
+/// `Some` を返すかどうかに一本化されている — `[completion] external` の
+/// 値（`"auto"` / `"zsh"` / 配列での明示指定など）に応じて `resolve()` が
+/// このプロバイダを優先順リストに含めるかどうか・zsh バイナリを検出するか
+/// どうかを決める（Task 2b.4）。timeout も同じ共有設定から取得する。
 pub(super) struct ZshBridgeProvider {
     settings: Arc<RwLock<ExternalCompletionSettings>>,
     /// テスト用に zsh の場所を差し替えられるようにするフック。
@@ -220,21 +213,19 @@ impl ZshBridgeProvider {
 
 impl CompletionProvider for ZshBridgeProvider {
     fn provide(&self, ctx: &CompletionContext) -> Option<Vec<Candidate>> {
-        if !ENABLED {
-            return None;
-        }
         if ctx.is_first_token {
             // コマンド名自体の補完は CommandProvider の担当。
             return None;
         }
 
         let timeout = {
-            // 短命な read ロック: mode と timeout を取得したら即座に drop する
-            // （`carapace.rs` / `mod.rs` の aliases スナップショットと同じ方針）。
+            // 短命な read ロック: 有効化判定と timeout を取得したら即座に drop
+            // する（`carapace.rs` / `mod.rs` の aliases スナップショットと
+            // 同じ方針）。zsh が優先順リストに含まれていない（無効化されて
+            // いる、または carapace のみが指定されている等）場合は
+            // binary_path が None を返し、ここで早期 return する。
             let settings = self.settings.read().ok()?;
-            if settings.mode == ExternalMode::None {
-                return None;
-            }
+            settings.binary_path(ExternalKind::Zsh)?;
             settings
                 .timeout
                 .max(std::time::Duration::from_millis(MIN_TIMEOUT_MS))
@@ -390,7 +381,7 @@ fn unquote_backslashes(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::CompletionConfig;
+    use crate::config::{CompletionConfig, ExternalSetting};
     use serial_test::serial;
     use std::env;
     use std::process::Command;
@@ -502,36 +493,50 @@ mod tests {
 
     // ── provider-contract テスト ──
 
-    /// `mode == None` で明示的に無効化した設定
+    /// 外部補完が明示的に無効化された設定（`external = "none"`）
     /// （`JarvishCompleter` の他プロバイダの単体テストと同じ方針で、
     /// このファイル内でも「外部補完まるごと無効」を再現するために使う）。
     fn disabled_external_completion() -> Arc<RwLock<ExternalCompletionSettings>> {
         Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
             &CompletionConfig {
-                external: "none".to_string(),
+                external: ExternalSetting::Single("none".to_string()),
                 ..CompletionConfig::default()
             },
         )))
     }
 
-    /// `mode == Auto` で有効化した設定。バイナリ検出（carapace）自体は
-    /// `ZshBridgeProvider` の判定に使わないため、carapace の実機有無に
-    /// 左右されずゲート（first-token / zsh 有無 / spans 長さ）だけを
-    /// 単体テストできる。
-    fn enabled_external_completion() -> Arc<RwLock<ExternalCompletionSettings>> {
+    /// zsh のみを明示的に有効化した設定（`external = "zsh"`）。carapace の
+    /// 実機有無に左右されずゲート（first-token / zsh 有無 / spans 長さ）だけを
+    /// 単体テストできる。zsh バイナリ自体は `/bin/zsh`（macOS 標準）が
+    /// 前提だが、`ZshBridgeProvider::with_zsh_binary` でオーバーライドする
+    /// テストでは resolve() 自体が実機で zsh を検出できるかは問わない
+    /// （`binary_path` が Some を返すことだけがゲート判定に使われる）。
+    fn zsh_enabled_external_completion() -> Arc<RwLock<ExternalCompletionSettings>> {
         Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
             &CompletionConfig {
-                external: "auto".to_string(),
+                external: ExternalSetting::Single("zsh".to_string()),
+                ..CompletionConfig::default()
+            },
+        )))
+    }
+
+    /// carapace のみを明示的に有効化した設定（`external = "carapace"`）。
+    /// zsh は優先順リストに含まれないため、`ZshBridgeProvider` は
+    /// `binary_path(Zsh)` が常に `None` を返すことで無効化される
+    /// （「他プロバイダの設定に巻き込まれない」ことの検証に使う）。
+    fn carapace_only_external_completion() -> Arc<RwLock<ExternalCompletionSettings>> {
+        Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
+            &CompletionConfig {
+                external: ExternalSetting::Single("carapace".to_string()),
                 ..CompletionConfig::default()
             },
         )))
     }
 
     #[test]
-    fn provide_returns_none_when_mode_is_disabled() {
+    fn provide_returns_none_when_external_is_disabled() {
         // 外部補完が `[completion] external = "none"` で無効化されている場合、
-        // zsh バイナリがあり非 first-token でも候補を返さない
-        // （carapace と共通の無効化スイッチに乗る、という設計の直接検証）。
+        // zsh バイナリがあり非 first-token でも候補を返さない。
         let settings = disabled_external_completion();
         let provider = ZshBridgeProvider::with_zsh_binary(settings, PathBuf::from("/bin/zsh"));
         let ctx = super::super::context::extract_context("git chec", 8);
@@ -540,8 +545,20 @@ mod tests {
     }
 
     #[test]
+    fn provide_returns_none_when_only_carapace_is_enabled() {
+        // `external = "carapace"` のとき zsh は優先順リストに含まれないため、
+        // ZshBridgeProvider は他プロバイダ（carapace）の有効化設定に
+        // 巻き込まれず無効のままであるべき。
+        let settings = carapace_only_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary(settings, PathBuf::from("/bin/zsh"));
+        let ctx = super::super::context::extract_context("git chec", 8);
+        assert!(!ctx.is_first_token);
+        assert!(provider.provide(&ctx).is_none());
+    }
+
+    #[test]
     fn provide_returns_none_for_first_token() {
-        let settings = enabled_external_completion();
+        let settings = zsh_enabled_external_completion();
         let provider = ZshBridgeProvider::with_zsh_binary(settings, PathBuf::from("/bin/zsh"));
         let ctx = super::super::context::extract_context("gi", 2);
         assert!(ctx.is_first_token);
@@ -550,7 +567,7 @@ mod tests {
 
     #[test]
     fn provide_returns_none_when_zsh_missing() {
-        let settings = enabled_external_completion();
+        let settings = zsh_enabled_external_completion();
         let provider = ZshBridgeProvider::with_zsh_binary(
             settings,
             PathBuf::from("/no/such/zsh/binary/zzjarvish"),
@@ -565,7 +582,7 @@ mod tests {
     #[test]
     fn provide_returns_none_when_spans_too_short() {
         // spans が [head, partial] 未満 = コマンド名しかない状態。
-        let settings = enabled_external_completion();
+        let settings = zsh_enabled_external_completion();
         let provider = ZshBridgeProvider::with_zsh_binary(settings, PathBuf::from("/bin/zsh"));
         let ctx = super::super::context::extract_context("git", 3);
         // "git" は非空白なので first-token 扱いになりこちらのガードで弾かれる。
@@ -607,7 +624,7 @@ mod tests {
 
         let settings = Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
             &CompletionConfig {
-                external: "auto".to_string(),
+                external: ExternalSetting::Single("auto".to_string()),
                 external_timeout_ms: 3000,
                 ..CompletionConfig::default()
             },
@@ -639,7 +656,7 @@ mod tests {
         // `ZshBridgeProvider::new`（`which::which("zsh")` を都度引く本番経路）
         // + 有効化設定でも、first-token では担当外として None を返すことを
         // 確認する（`resolve_zsh` のオーバーライドなし経路のカバレッジ）。
-        let settings = enabled_external_completion();
+        let settings = zsh_enabled_external_completion();
         let provider = ZshBridgeProvider::new(settings);
         let ctx = super::super::context::extract_context("gi", 2);
         assert!(provider.provide(&ctx).is_none());
@@ -651,7 +668,7 @@ mod tests {
         // MIN_TIMEOUT_MS を下回らないことを保証する（compinit の重さ対策）。
         let settings = Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
             &CompletionConfig {
-                external: "none".to_string(),
+                external: ExternalSetting::Single("none".to_string()),
                 external_timeout_ms: 50,
                 ..CompletionConfig::default()
             },
@@ -751,7 +768,7 @@ mod tests {
 
         let settings = Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
             &CompletionConfig {
-                external: "auto".to_string(),
+                external: ExternalSetting::Single("auto".to_string()),
                 external_timeout_ms: 3000,
                 ..CompletionConfig::default()
             },
