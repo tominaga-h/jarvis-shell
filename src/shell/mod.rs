@@ -325,6 +325,7 @@ impl Shell {
              \x20\x20 external: {}\n\
              {}\
              \x20\x20 external_timeout_ms: {}\n\
+             \x20\x20 external_zsh_daemon: {}\n\
              \x20 [startup]  {} {}\n",
             path.display(),
             config.ai.model,
@@ -357,6 +358,7 @@ impl Shell {
             external_mode_display,
             external_binaries_display,
             config.completion.external_timeout_ms,
+            resolved_external.zsh_daemon_enabled,
             config.startup.commands.len(),
             if config.startup.commands.len() == 1 {
                 "command"

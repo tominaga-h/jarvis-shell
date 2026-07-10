@@ -30,6 +30,7 @@
 //! git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
 //! external = "auto"             # "auto" | "carapace" | "zsh" | "none" | ["carapace", "zsh"]（配列で優先順を明示指定）
 //! external_timeout_ms = 400     # 外部補完プロセスのタイムアウト（ミリ秒）
+//! external_zsh_daemon = true    # zsh ブリッジを常駐デーモン化するか（Tab ごとの起動コストを削減）
 //!
 //! [startup]
 //! commands = ["echo 'Welcome to jarvish!'", "export JAVA_HOME=/usr/lib/jvm/default"]
@@ -130,6 +131,19 @@ pub struct CompletionConfig {
     pub external: ExternalSetting,
     /// 外部補完プロセスのタイムアウト（ミリ秒）
     pub external_timeout_ms: u64,
+    /// zsh 補完ブリッジを常駐デーモン化するかどうか（Task 2b.3, #89）。
+    ///
+    /// `true`（デフォルト）: 初回の zsh 補完リクエスト時に `zsh -i` を
+    /// jarvish の子プロセスとして 1 本 spawn し、以後のセッション中は
+    /// 使い回す（Tab ごとの `zsh --no-rcs` 再起動コストを避ける）。
+    /// `false`: 常に [`ExternalKind::Zsh`](crate::cli::completer::ExternalKind)
+    /// のワンショット経路（`zsh --no-rcs -c capture.zsh`）を使う（従来動作）。
+    ///
+    /// `source` ビルトインでホットリロードされる — `false` に切り替えると
+    /// 稼働中のデーモンは即座に shutdown され（次回 Tab はワンショットに
+    /// フォールバック）、`true` に戻すと次回 zsh 補完リクエストで
+    /// 遅延 spawn される。
+    pub external_zsh_daemon: bool,
 }
 
 impl Default for CompletionConfig {
@@ -153,6 +167,7 @@ impl Default for CompletionConfig {
             .collect(),
             external: ExternalSetting::default(),
             external_timeout_ms: 400,
+            external_zsh_daemon: true,
         }
     }
 }
@@ -259,6 +274,7 @@ impl JarvishConfig {
                         git_branch_commands = config.completion.git_branch_commands.len(),
                         completion_external = %config.completion.external,
                         completion_external_timeout_ms = config.completion.external_timeout_ms,
+                        completion_external_zsh_daemon = config.completion.external_zsh_daemon,
                         startup_commands = config.startup.commands.len(),
                         "Config loaded successfully"
                     );
@@ -333,6 +349,7 @@ mod tests {
         assert_eq!(config.completion.git_branch_commands.len(), 11);
         assert_eq!(config.completion.external, "auto");
         assert_eq!(config.completion.external_timeout_ms, 400);
+        assert!(config.completion.external_zsh_daemon);
     }
 
     #[test]
@@ -476,6 +493,7 @@ EDITOR = "vim"
         assert!(content.contains("[completion]"));
         assert!(content.contains("external = \"auto\""));
         assert!(content.contains("external_timeout_ms = 400"));
+        assert!(content.contains("external_zsh_daemon = true"));
 
         let config: JarvishConfig = toml::from_str(&content).unwrap();
         assert_eq!(config.ai.model, "gpt-4o");
@@ -650,6 +668,54 @@ external_timeout_ms = 1500
 "#;
         let config = load_from_str(toml);
         assert_eq!(config.completion.external_timeout_ms, 1500);
+    }
+
+    // ── external_zsh_daemon (Task 2b.3, #89) ──
+
+    #[test]
+    fn external_zsh_daemon_defaults_to_true() {
+        assert!(CompletionConfig::default().external_zsh_daemon);
+    }
+
+    #[test]
+    fn parse_completion_config_external_zsh_daemon_explicit_false() {
+        let toml = r#"
+[completion]
+external_zsh_daemon = false
+"#;
+        let config = load_from_str(toml);
+        assert!(!config.completion.external_zsh_daemon);
+    }
+
+    #[test]
+    fn parse_completion_config_external_zsh_daemon_explicit_true() {
+        let toml = r#"
+[completion]
+external_zsh_daemon = true
+"#;
+        let config = load_from_str(toml);
+        assert!(config.completion.external_zsh_daemon);
+    }
+
+    #[test]
+    fn parse_completion_config_without_external_zsh_daemon_key_defaults_true() {
+        // 後方互換: 既存の config.toml（キー未記載）でもパースが失敗せず、
+        // デフォルト値 true が使われる。
+        let toml = r#"
+[completion]
+external_timeout_ms = 1500
+"#;
+        let config = load_from_str(toml);
+        assert!(config.completion.external_zsh_daemon);
+        assert_eq!(config.completion.external_timeout_ms, 1500);
+    }
+
+    #[test]
+    fn parse_config_without_completion_section_at_all_defaults_zsh_daemon_true() {
+        // completion セクション自体が存在しない設定ファイル（旧バージョン）
+        // でもパースが失敗しないことの確認。
+        let config = load_from_str("");
+        assert!(config.completion.external_zsh_daemon);
     }
 
     // ── startup ──

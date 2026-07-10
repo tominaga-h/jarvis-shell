@@ -1092,6 +1092,7 @@ mod tests {
     ) -> Arc<RwLock<ExternalCompletionSettings>> {
         use carapace::ResolvedExternal;
         Arc::new(RwLock::new(ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: std::time::Duration::from_millis(400),
             enabled: order
                 .into_iter()

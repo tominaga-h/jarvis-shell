@@ -46,6 +46,10 @@ impl super::JarvishConfig {
 #                              #                   | "none"（外部補完を無効化）
 #                              # 配列で書く場合: ["zsh", "carapace"] のように優先順を明示指定できる
 # external_timeout_ms = 400   # 外部補完プロセス（carapace / zsh ブリッジ）のタイムアウト（ミリ秒）
+# external_zsh_daemon = true  # zsh ブリッジを常駐デーモン化するか（既定 true）。
+#                              # true: 初回の zsh 補完で `zsh -i` を jarvish の子プロセスとして
+#                              #       1本 spawn し、以後の Tab はそれを使い回す（起動コスト削減）。
+#                              # false: 毎回 `zsh --no-rcs` を起動するワンショット方式に固定する。
 
 [startup]
 # シェル起動時に順次実行するコマンド（-c オプション実行時はスキップ）

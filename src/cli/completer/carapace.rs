@@ -113,6 +113,13 @@ pub struct ExternalCompletionSettings {
     /// 解決済みの有効プロバイダ列（優先順）。`resolve()` が構築する。
     /// `"none"` の場合は空。
     pub(crate) enabled: Vec<ResolvedExternal>,
+    /// `[completion] external_zsh_daemon`（Task 2b.3, #89）。`true` なら
+    /// [`super::zsh_bridge::ZshBridgeProvider`] は温存デーモン
+    /// （[`super::zsh_daemon::ZshDaemon`]）経由でリクエストを処理し、
+    /// `false` なら常にワンショット経路（`zsh --no-rcs -c capture.zsh`）を
+    /// 使う。`reload_external_completion`（`source` ビルトイン）が
+    /// 都度読み直すため、セッション中のホットリロードに対応する。
+    pub(crate) zsh_daemon_enabled: bool,
 }
 
 impl ExternalCompletionSettings {
@@ -135,7 +142,11 @@ impl ExternalCompletionSettings {
     pub(crate) fn resolve(config: &CompletionConfig) -> Self {
         let timeout = Duration::from_millis(config.external_timeout_ms);
         let enabled = resolve_enabled_kinds(&config.external);
-        Self { timeout, enabled }
+        Self {
+            timeout,
+            enabled,
+            zsh_daemon_enabled: config.external_zsh_daemon,
+        }
     }
 
     /// 指定した種別のプロバイダが有効化されており、かつバイナリが検出済みなら
@@ -655,6 +666,7 @@ mod tests {
             })
             .unwrap_or_default();
         Arc::new(RwLock::new(ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: CARAPACE_TIMEOUT,
             enabled,
         }))
@@ -665,6 +677,7 @@ mod tests {
         timeout: Duration,
     ) -> Arc<RwLock<ExternalCompletionSettings>> {
         Arc::new(RwLock::new(ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout,
             enabled: vec![ResolvedExternal {
                 kind: ExternalKind::Carapace,
@@ -685,6 +698,7 @@ mod tests {
         // ヘルパー自体は enabled に含めないため使用しない。
         let _ = binary;
         Arc::new(RwLock::new(ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout,
             enabled: Vec::new(),
         }))
@@ -720,6 +734,7 @@ mod tests {
         // CarapaceProvider::binary_path(Carapace) は None を返し provide() は
         // 早期 return する（他プロバイダの設定に巻き込まれてはならない）。
         let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: CARAPACE_TIMEOUT,
             enabled: vec![ResolvedExternal {
                 kind: ExternalKind::Zsh,
@@ -973,6 +988,7 @@ mod tests {
     #[test]
     fn binary_path_returns_none_for_kind_not_in_enabled_list() {
         let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: vec![ResolvedExternal {
                 kind: ExternalKind::Carapace,
@@ -985,6 +1001,7 @@ mod tests {
     #[test]
     fn binary_path_returns_none_when_entry_present_but_binary_not_found() {
         let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: vec![ResolvedExternal {
                 kind: ExternalKind::Carapace,
@@ -997,6 +1014,7 @@ mod tests {
     #[test]
     fn binary_path_returns_path_when_enabled_and_detected() {
         let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: vec![ResolvedExternal {
                 kind: ExternalKind::Zsh,
@@ -1021,6 +1039,7 @@ mod tests {
         // enabled リストが空（= 全プロバイダ無効化）なら、どの kind を
         // 指定しても None。
         let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: Vec::new(),
         }));
@@ -1032,6 +1051,7 @@ mod tests {
     fn gate_returns_none_when_kind_not_in_enabled_list() {
         // enabled に別の kind (carapace) だけがある状態で zsh を問い合わせると None。
         let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: vec![ResolvedExternal {
                 kind: ExternalKind::Carapace,
@@ -1045,6 +1065,7 @@ mod tests {
     fn gate_returns_none_when_binary_not_detected() {
         // エントリはあるが binary が None（明示指定したのに未検出のケース）。
         let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: vec![ResolvedExternal {
                 kind: ExternalKind::Carapace,
@@ -1059,6 +1080,7 @@ mod tests {
         // min_timeout = None のとき、設定 timeout がどれだけ短くてもそのまま使う
         // （carapace の実際の呼び出し方: フロアなし）。
         let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(50),
             enabled: vec![ResolvedExternal {
                 kind: ExternalKind::Carapace,
@@ -1079,6 +1101,7 @@ mod tests {
         // min_timeout = Some(floor) かつ設定 timeout がそれ未満のとき、
         // floor まで引き上げられる（zsh ブリッジの実際の呼び出し方）。
         let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(50),
             enabled: vec![ResolvedExternal {
                 kind: ExternalKind::Zsh,
@@ -1099,6 +1122,7 @@ mod tests {
         // 設定 timeout が floor を上回るときは floor に切り下げない（max の
         // 意味論をそのまま検証する）。
         let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(5000),
             enabled: vec![ResolvedExternal {
                 kind: ExternalKind::Zsh,
@@ -1122,6 +1146,7 @@ mod tests {
     #[test]
     fn format_external_summary_known_single_value_shows_resolved_kind_only() {
         let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: vec![ResolvedExternal {
                 kind: ExternalKind::Carapace,
@@ -1134,6 +1159,7 @@ mod tests {
     #[test]
     fn format_external_summary_known_auto_value_shows_resolved_order_without_fallback_marker() {
         let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: vec![
                 ResolvedExternal {
@@ -1154,6 +1180,7 @@ mod tests {
     #[test]
     fn format_external_summary_none_value_shows_none() {
         let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: Vec::new(),
         };
@@ -1163,6 +1190,7 @@ mod tests {
     #[test]
     fn format_external_summary_known_array_value_shows_resolved_order() {
         let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: vec![
                 ResolvedExternal {
@@ -1186,6 +1214,7 @@ mod tests {
         // resolve() は未知の値を auto として解決する。ここでは carapace のみ
         // 検出された想定の settings を手組みして検証する。
         let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: vec![ResolvedExternal {
                 kind: ExternalKind::Carapace,
@@ -1231,6 +1260,7 @@ mod tests {
     #[test]
     fn format_external_binaries_display_empty_when_no_providers_enabled() {
         let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: Vec::new(),
         };
@@ -1240,6 +1270,7 @@ mod tests {
     #[test]
     fn format_external_binaries_display_shows_binary_path_for_detected_entry() {
         let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: vec![ResolvedExternal {
                 kind: ExternalKind::Carapace,
@@ -1253,6 +1284,7 @@ mod tests {
     #[test]
     fn format_external_binaries_display_shows_not_found_for_missing_binary() {
         let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: vec![ResolvedExternal {
                 kind: ExternalKind::Zsh,
@@ -1266,6 +1298,7 @@ mod tests {
     #[test]
     fn format_external_binaries_display_lists_multiple_entries_in_order() {
         let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             enabled: vec![
                 ResolvedExternal {
@@ -1369,6 +1402,7 @@ mod tests {
             ExternalSetting::Single("none".to_string()),
         ));
         let initial = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
             timeout: Duration::from_millis(400),
             ..initial
         };

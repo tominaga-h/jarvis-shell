@@ -62,12 +62,14 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, SystemTime};
 
 use super::carapace::{gate, ExternalCompletionSettings, ExternalKind};
 use super::context::CompletionContext;
 use super::external::run_external_capped;
 use super::provider::{Candidate, CompletionProvider};
+use super::zsh_daemon::ZshDaemon;
 
 /// zsh ブリッジ本体（`assets/zsh/capture.zsh` を vendor したもの）。
 const CAPTURE_SCRIPT: &str = include_str!("../../../assets/zsh/capture.zsh");
@@ -221,6 +223,19 @@ fn is_symlink(path: &Path) -> io::Result<bool> {
 /// （[`crate::cli::completer::carapace::gate`] のドキュメント参照）。
 const MIN_TIMEOUT_MS: u64 = 2000;
 
+/// 温存デーモン（[`ZshDaemon`]）を使ったウォームリクエストの実効タイムアウトに
+/// 適用する下限値（Task 2b.3, #89）。
+///
+/// [`MIN_TIMEOUT_MS`]（2000ms）は zsh の `compinit` 起動コストを含む
+/// **コールド**経路（ワンショット呼び出し全体、またはデーモンの初回
+/// spawn+初期化+初回リクエスト）専用のフロアであり、デーモンが温まった
+/// 後の2回目以降のリクエストには過大（実測は概ね数十ms、`zsh_daemon.rs`
+/// のモジュールドキュメント参照）。ウォームリクエストは設定された
+/// `external_timeout_ms`（デフォルト 400ms）をほぼそのまま使いたいが、
+/// 極端に短い値（数ms等）を設定された場合でもハング検知が機能するよう、
+/// 小さな床（100ms）だけは維持する。
+const WARM_MIN_TIMEOUT_MS: u64 = 100;
+
 /// zsh 補完ブリッジ Provider。
 ///
 /// `ExternalCompletionSettings` を [`super::carapace::CarapaceProvider`] と
@@ -230,8 +245,36 @@ const MIN_TIMEOUT_MS: u64 = 2000;
 /// 値（`"auto"` / `"zsh"` / 配列での明示指定など）に応じて `resolve()` が
 /// このプロバイダを優先順リストに含めるかどうか・zsh バイナリを検出するか
 /// どうかを決める（Task 2b.4）。timeout も同じ共有設定から取得する。
+///
+/// # 温存デーモン配線（Task 2b.3, #89）
+/// `[completion] external_zsh_daemon`（`settings.zsh_daemon_enabled`）が
+/// `true` の間、`provide()` は [`ZshDaemon`] を遅延 spawn して使い回す。
+/// completer は reedline の UI スレッド上で同期的に呼ばれる（並行呼び出し
+/// なし）ため、`daemon` フィールドの `Mutex` は `&self` からの内部可変性
+/// 確保のみが目的であり、実際の競合排他は発生しない。
+/// - **コールド**（デーモン未 spawn、または直前のリクエストで dead 化した
+///   直後の再 spawn）: `MIN_TIMEOUT_MS` フロア（spawn + init + 初回
+///   リクエストの合計を賄う）。
+/// - **ウォーム**（既に生きているデーモンへの2回目以降のリクエスト）:
+///   設定された `external_timeout_ms` に [`WARM_MIN_TIMEOUT_MS`] の
+///   小さな床だけを適用する。
+/// - **失敗時**（タイムアウト/desync）: [`ZshDaemon::request`] が内部で
+///   子プロセスを kill 済み・`is_alive() == false` になる。`provide()` は
+///   この Tab では `None` を返す（同一キー押下内でのワンショット
+///   フォールバックは行わない — 仕様どおり）。次回 Tab で `daemon` スロットが
+///   `None`（dead インスタンスは捨てる）になっているため、遅延 respawn が
+///   自然に起きる。
+/// - **再起動トリガ**: 毎リクエスト前にブリッジ `.zshrc` の mtime を
+///   spawn 時点のものと比較する（`stat` のみで安価）。変化していれば
+///   ユーザーが `fpath`/`compdef` を編集したとみなし、既存デーモンを
+///   shutdown してから同一リクエスト内で新しいデーモンを遅延 spawn する。
+///   `settings.zsh_daemon_enabled` が `false` に変わった場合も同様に
+///   既存デーモンを shutdown する（以後はワンショット経路を使う）。
 pub(super) struct ZshBridgeProvider {
     settings: Arc<RwLock<ExternalCompletionSettings>>,
+    /// 温存デーモン本体。`None` は「未 spawn」または「直前のリクエストで
+    /// dead 化して捨てた」を意味する（次回リクエストで遅延 respawn）。
+    daemon: Mutex<Option<DaemonSlot>>,
     /// テスト用に zsh の場所を差し替えられるようにするフック。
     /// 本番は `None` で `which::which("zsh")` を都度引く。
     zsh_override: Option<PathBuf>,
@@ -254,10 +297,22 @@ pub(super) struct ZshBridgeProvider {
     extra_envs: Vec<(String, String)>,
 }
 
+/// spawn 済みの [`ZshDaemon`] と、その spawn 時点でのブリッジ `.zshrc` の
+/// mtime を対にして保持する（mtime 再起動トリガの比較基準）。
+///
+/// `.zshrc` が存在しなかった／`stat` に失敗した場合は `None` を保持し、
+/// 以後の比較で「常に変化なし」として扱う（mtime を取得できない環境で
+/// 誤って毎回再起動しないための安全側フォールバック）。
+struct DaemonSlot {
+    daemon: ZshDaemon,
+    zshrc_mtime_at_spawn: Option<SystemTime>,
+}
+
 impl ZshBridgeProvider {
     pub(super) fn new(settings: Arc<RwLock<ExternalCompletionSettings>>) -> Self {
         Self {
             settings,
+            daemon: Mutex::new(None),
             zsh_override: None,
             bridge_dir_override: None,
             #[cfg(test)]
@@ -269,6 +324,7 @@ impl ZshBridgeProvider {
     fn with_zsh_binary(settings: Arc<RwLock<ExternalCompletionSettings>>, zsh: PathBuf) -> Self {
         Self {
             settings,
+            daemon: Mutex::new(None),
             zsh_override: Some(zsh),
             bridge_dir_override: None,
             extra_envs: Vec::new(),
@@ -283,6 +339,7 @@ impl ZshBridgeProvider {
     ) -> Self {
         Self {
             settings,
+            daemon: Mutex::new(None),
             zsh_override: Some(zsh),
             bridge_dir_override: Some(bridge_dir),
             extra_envs: Vec::new(),
@@ -301,6 +358,7 @@ impl ZshBridgeProvider {
     ) -> Self {
         Self {
             settings,
+            daemon: Mutex::new(None),
             zsh_override: Some(zsh),
             bridge_dir_override: Some(bridge_dir),
             extra_envs,
@@ -317,6 +375,105 @@ impl ZshBridgeProvider {
     fn resolve_bridge_dir(&self) -> PathBuf {
         self.bridge_dir_override.clone().unwrap_or_else(bridge_dir)
     }
+
+    /// 現在のテスト用 `extra_envs`（本番ビルドでは常に空）を返す。
+    #[cfg(test)]
+    fn extra_envs(&self) -> Vec<(String, String)> {
+        self.extra_envs.clone()
+    }
+
+    #[cfg(not(test))]
+    fn extra_envs(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// デーモン経路でのリクエストを試みる。
+    ///
+    /// `zsh` / `bridge_dir` / `escaped_spans` は呼び出し元（`provide()`）で
+    /// 解決済みの値をそのまま受け取る（ワンショット経路と共有するため）。
+    /// 戻り値は [`parse_capture_output`] にそのまま渡せる生テキスト
+    /// （`None` はデーモン経路自体が使えなかった/失敗したことを示し、
+    /// 呼び出し元はワンショットへフォールバックしない仕様 —
+    /// 型ドキュメント参照）。
+    fn request_via_daemon(
+        &self,
+        zsh: &Path,
+        bridge_dir: &Path,
+        escaped_spans: &[String],
+        cold_timeout: Duration,
+        warm_timeout: Duration,
+    ) -> Option<String> {
+        let zshrc_path = bridge_zshrc_path(bridge_dir);
+        let current_mtime = fs::metadata(&zshrc_path).and_then(|m| m.modified()).ok();
+
+        let mut slot_guard = self.daemon.lock().ok()?;
+
+        // 再起動トリガ: 既存デーモンがあり、spawn 時点の mtime と現在の
+        // mtime が食い違う（両方 Some で不一致）場合は shutdown する。
+        // どちらかが None（stat 不能）の場合は「変化なし」として扱い、
+        // 誤検知で毎回再起動しない安全側に倒す。
+        if let Some(slot) = slot_guard.as_ref() {
+            let mtime_changed = matches!(
+                (slot.zshrc_mtime_at_spawn, current_mtime),
+                (Some(a), Some(b)) if a != b
+            );
+            if mtime_changed {
+                tracing::debug!("zsh daemon: bridge .zshrc changed since spawn, restarting daemon");
+                *slot_guard = None;
+            }
+        }
+
+        let effective_timeout = if slot_guard.is_some() {
+            warm_timeout
+        } else {
+            cold_timeout
+        };
+
+        if slot_guard.is_none() {
+            let extra_envs = self.extra_envs();
+            match ZshDaemon::spawn(zsh, bridge_dir, &extra_envs, cold_timeout) {
+                Ok(daemon) => {
+                    *slot_guard = Some(DaemonSlot {
+                        daemon,
+                        zshrc_mtime_at_spawn: current_mtime,
+                    });
+                }
+                Err(err) => {
+                    tracing::debug!("zsh daemon: failed to spawn: {err}");
+                    return None;
+                }
+            }
+        }
+
+        let line = escaped_spans.join(" ");
+        let slot = slot_guard.as_mut()?;
+        let result = slot.daemon.request(&line, effective_timeout);
+
+        if !slot.daemon.is_alive() {
+            // request() 内部で timeout/desync により kill 済み。次回リクエスト
+            // で遅延 respawn できるようスロットを空にする（Task 2b.3 の
+            // 「デーモンは kill され、この Tab は None、次の Tab で遅延
+            // respawn」という仕様どおり）。
+            *slot_guard = None;
+        }
+
+        result
+    }
+
+    /// `[completion] external_zsh_daemon` が `false`（初期設定 or `source`
+    /// による reload で off にされた）場合に呼ぶ。生きているデーモンが
+    /// 残っていれば明示的に shutdown してスロットを空にする（`ZshDaemon`
+    /// の `Drop` に任せず、設定変更の**その場**で確実に子プロセスを畳む —
+    /// タスク指示: "turning it off shuts the daemon down"）。デーモンが
+    /// 元々無ければ no-op。
+    fn shutdown_daemon_if_running(&self) {
+        let Ok(mut slot_guard) = self.daemon.lock() else {
+            return;
+        };
+        if let Some(mut slot) = slot_guard.take() {
+            slot.daemon.shutdown();
+        }
+    }
 }
 
 impl CompletionProvider for ZshBridgeProvider {
@@ -330,14 +487,24 @@ impl CompletionProvider for ZshBridgeProvider {
         // `carapace.rs` / `mod.rs` の aliases スナップショットと同じ方針）。
         // zsh が優先順リストに含まれていない（無効化されている、または
         // carapace のみが指定されている等）場合は `gate` が `None` を返し、
-        // ここで早期 return する。`MIN_TIMEOUT_MS` フロアは zsh ブリッジ
-        // 専用（compinit の重さ対策 — 定数のドキュメント参照）なので
-        // `Some(...)` で渡す。
-        let (_gated_binary, timeout) = gate(
+        // ここで早期 return する。`MIN_TIMEOUT_MS` フロアはワンショット経路
+        // /デーモンのコールド経路専用（compinit の重さ対策 — 定数のドキュ
+        // メント参照）なので `Some(...)` で渡す。
+        let (_gated_binary, cold_timeout) = gate(
             &self.settings,
             ExternalKind::Zsh,
-            Some(std::time::Duration::from_millis(MIN_TIMEOUT_MS)),
+            Some(Duration::from_millis(MIN_TIMEOUT_MS)),
         )?;
+
+        // ウォーム経路用の実効タイムアウト（設定値 + 小さな床）。
+        // `gate` はコールド用フロアしか計算しないため、ここでは共有設定の
+        // 生 timeout を別途読み直す（`Arc<RwLock<_>>` への短命な read ロック
+        // — 他の共有設定アクセスと同じ方針）。
+        let (daemon_enabled, raw_timeout) = match self.settings.read() {
+            Ok(guard) => (guard.zsh_daemon_enabled, guard.timeout),
+            Err(_) => (false, cold_timeout),
+        };
+        let warm_timeout = raw_timeout.max(Duration::from_millis(WARM_MIN_TIMEOUT_MS));
 
         let zsh = self.resolve_zsh()?;
 
@@ -350,16 +517,8 @@ impl CompletionProvider for ZshBridgeProvider {
 
         let escaped_spans = escape_spans(&spans)?;
 
-        let mut args = vec![
-            "--no-rcs".to_string(),
-            "-c".to_string(),
-            CAPTURE_SCRIPT.to_string(),
-            "--".to_string(),
-        ];
-        args.extend(escaped_spans);
-
         // ブリッジディレクトリ + テンプレート .zshrc の存在を保証してから
-        // ZDOTDIR で渡す。存在保証を spawn の直前に必ず行うことで、
+        // 使う。存在保証を spawn/リクエストの直前に必ず行うことで、
         // ZDOTDIR が指すディレクトリが空だったために zsh が $HOME に
         // フォールバックし、ユーザーの実 ~/.zshrc を読んでしまう事故を防ぐ
         // （モジュール冒頭ドキュメント参照）。
@@ -368,6 +527,35 @@ impl CompletionProvider for ZshBridgeProvider {
             tracing::debug!("zsh bridge: failed to prepare bridge dir at {bridge_dir:?}, skipping");
             return None;
         }
+
+        if daemon_enabled {
+            let stdout = self.request_via_daemon(
+                &zsh,
+                &bridge_dir,
+                &escaped_spans,
+                cold_timeout,
+                warm_timeout,
+            )?;
+            let candidates = parse_capture_output(&stdout);
+            if candidates.is_empty() {
+                return None;
+            }
+            return Some(candidates);
+        } else {
+            // 設定でデーモンが無効化された（または reload で off にされた）。
+            // 生きているデーモンが残っていれば shutdown し、以後はワン
+            // ショット経路のみを使う。
+            self.shutdown_daemon_if_running();
+        }
+
+        let mut args = vec![
+            "--no-rcs".to_string(),
+            "-c".to_string(),
+            CAPTURE_SCRIPT.to_string(),
+            "--".to_string(),
+        ];
+        args.extend(escaped_spans);
+
         #[cfg_attr(not(test), allow(unused_mut))]
         let mut envs = vec![(
             "ZDOTDIR".to_string(),
@@ -376,7 +564,7 @@ impl CompletionProvider for ZshBridgeProvider {
         #[cfg(test)]
         envs.extend(self.extra_envs.iter().cloned());
 
-        let stdout = run_external_capped(&zsh, &args, &envs, timeout)?;
+        let stdout = run_external_capped(&zsh, &args, &envs, cold_timeout)?;
 
         let candidates = parse_capture_output(&stdout);
         if candidates.is_empty() {
@@ -1359,5 +1547,403 @@ mod tests {
             !values.contains(&"current-is-4"),
             "current-is-4 indicates the multi-word span was split into two words: {values:?}"
         );
+    }
+
+    // ── 温存デーモン配線テスト (Task 2b.3 Task 2, #89) ──
+    //
+    // `disabled_external_completion` / `zsh_enabled_external_completion` は
+    // `CompletionConfig::default()` を土台にしており、そのデフォルトは
+    // `external_zsh_daemon = true` のため、このファイル内の既存の
+    // "one-shot" 統合テスト（`integration_git_checkout_prefix_suggests_branch`
+    // 等）は本タスク以降、実際にはデーモン経路を経由する。それでも出力
+    // フォーマット（`parse_capture_output` が読む "value -- description"
+    // 形式）は capture.zsh と daemon_init.zsh で共通のため、既存アサーション
+    // は変更なしにそのまま通る（daemon_init.zsh のモジュールドキュメント
+    // 参照）。ここでは daemon 固有の契約（遅延 spawn・使い回し・ホット
+    // リロードでの off 切り替え・mtime 再起動トリガ・失敗時のこの Tab
+    // での None）を直接検証する。
+
+    /// zsh のみを有効化し、かつ `external_zsh_daemon = false` を明示した
+    /// 設定（ワンショット経路のみを強制するテスト専用ヘルパー）。
+    fn zsh_enabled_daemon_off_external_completion() -> Arc<RwLock<ExternalCompletionSettings>> {
+        Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
+            &CompletionConfig {
+                external: ExternalSetting::Single("zsh".to_string()),
+                external_timeout_ms: 3000,
+                external_zsh_daemon: false,
+                ..CompletionConfig::default()
+            },
+        )))
+    }
+
+    /// デーモンテスト用の隔離フィクスチャ。`zsh_bridge.rs` の既存 E2E
+    /// テスト（`e2e_user_zshrc_fpath_completion_is_used_via_zdotdir` 等）と
+    /// 同じ理由（`compinit -d ~/.zcompdump_capture` は `$ZDOTDIR` ではなく
+    /// **`$HOME`** 基準の固定パスに compdump キャッシュを読み書きするため、
+    /// 実 `$HOME` を共有したまま複数テストを並行実行すると compdump の
+    /// 汚染・衝突で `#compdef` 関数が認識されず、デフォルトのファイル名
+    /// 補完へ静かにフォールバックしてしまう ── 実機検証で確認済みの
+    /// フレーク要因）で、`HOME` も専用 tempdir に隔離する。呼び出し元は
+    /// `extra_envs()` で得られる `HOME` の env ペアを
+    /// `with_zsh_binary_bridge_dir_and_envs` に渡すこと。
+    fn zsh_daemon_test_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let zdotdir = tmpdir.path().join("zdotdir");
+        let fpath_dir = tmpdir.path().join("completions");
+        let home = tmpdir.path().join("home");
+        fs::create_dir_all(&zdotdir).unwrap();
+        fs::create_dir_all(&fpath_dir).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::write(
+            fpath_dir.join("_jarvishtestcmd"),
+            "#compdef jarvishtestcmd\ncompadd -- alpha beta gamma\n",
+        )
+        .unwrap();
+        fs::write(
+            zdotdir.join(".zshrc"),
+            format!("fpath=({} $fpath)\n", fpath_dir.display()),
+        )
+        .unwrap();
+        (tmpdir, zdotdir, fpath_dir)
+    }
+
+    /// [`zsh_daemon_test_fixture`] の tmpdir から隔離 `HOME` の env ペアを
+    /// 組み立てる（`with_zsh_binary_bridge_dir_and_envs` にそのまま渡せる形）。
+    fn zsh_daemon_test_home_envs(tmpdir: &tempfile::TempDir) -> Vec<(String, String)> {
+        vec![(
+            "HOME".to_string(),
+            tmpdir.path().join("home").to_string_lossy().into_owned(),
+        )]
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_flag_off_never_spawns_daemon_one_shot_still_serves_candidates() {
+        // フラグ off: `provide()` は一度も daemon フィールドを埋めず、
+        // 常にワンショット経路（`run_external_capped` 経由）で候補を返す。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, _fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+
+        let settings = zsh_enabled_daemon_off_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
+            settings,
+            zsh,
+            zdotdir.clone(),
+            home_envs,
+        );
+
+        let line = "jarvishtestcmd ";
+        let ctx = super::super::context::extract_context(line, line.len());
+        let result = provider.provide(&ctx);
+
+        let candidates = result.expect("one-shot path should still serve candidates");
+        let values: Vec<&str> = candidates.iter().map(|c| c.value.as_str()).collect();
+        assert!(values.contains(&"alpha"), "got {values:?}");
+
+        assert!(
+            provider.daemon.lock().unwrap().is_none(),
+            "daemon slot must remain empty when external_zsh_daemon = false"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_path_e2e_serves_candidates_via_warm_daemon() {
+        // デーモン経路 (external_zsh_daemon = true, デフォルト) で、
+        // capture.zsh と同じユーザー fpath 補完がそのまま反映されることを
+        // 実機で証明する。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, _fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+
+        let settings = zsh_enabled_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
+            settings,
+            zsh,
+            zdotdir.clone(),
+            home_envs,
+        );
+
+        let line = "jarvishtestcmd ";
+        let ctx = super::super::context::extract_context(line, line.len());
+        let result = provider.provide(&ctx);
+
+        let candidates = result.expect("daemon path should serve candidates");
+        let values: Vec<&str> = candidates.iter().map(|c| c.value.as_str()).collect();
+        assert!(values.contains(&"alpha"), "got {values:?}");
+        assert!(values.contains(&"beta"), "got {values:?}");
+        assert!(values.contains(&"gamma"), "got {values:?}");
+
+        assert!(
+            provider.daemon.lock().unwrap().is_some(),
+            "daemon slot must be populated after a successful daemon-path request"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_path_reuses_same_daemon_across_requests() {
+        // 2回連続でリクエストしても同じ ZshDaemon インスタンス（同じ子
+        // プロセス pid）が使い回されることを、実際の pid を比較して直接
+        // 証明する（ウォームリクエストが「起動コストなしの計算のみ」に
+        // なっているという本タスクの動機の核心）。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, _fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+
+        let settings = zsh_enabled_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
+            settings,
+            zsh,
+            zdotdir.clone(),
+            home_envs,
+        );
+
+        let line = "jarvishtestcmd ";
+        let ctx = super::super::context::extract_context(line, line.len());
+
+        let first = provider.provide(&ctx);
+        assert!(first.is_some(), "first request should succeed");
+        let pid_after_first = {
+            let guard = provider.daemon.lock().unwrap();
+            guard.as_ref().unwrap().daemon.child_pid_for_test()
+        };
+
+        let second = provider.provide(&ctx);
+        assert!(second.is_some(), "second request should succeed");
+        let pid_after_second = {
+            let guard = provider.daemon.lock().unwrap();
+            guard.as_ref().unwrap().daemon.child_pid_for_test()
+        };
+
+        assert_eq!(
+            pid_after_first, pid_after_second,
+            "the same daemon child process must serve both requests (no respawn)"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_path_restarts_when_bridge_zshrc_mtime_changes() {
+        // ブリッジ .zshrc を最初のリクエスト後に touch（新しい補完関数を
+        // 追加した想定）すると、次のリクエストで既存デーモンが shutdown
+        // され、新しいデーモン（新しい pid）が遅延 spawn される。かつ、
+        // 新しく追加した補完関数の候補がちゃんと反映される
+        // （respawn 後は新しい ZDOTDIR/.zshrc を source し直しているという
+        // 直接証拠）。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+
+        let settings = zsh_enabled_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
+            settings,
+            zsh,
+            zdotdir.clone(),
+            home_envs,
+        );
+
+        let line = "jarvishtestcmd ";
+        let ctx = super::super::context::extract_context(line, line.len());
+        let first = provider.provide(&ctx).expect("first request should work");
+        assert!(first.iter().any(|c| c.value == "alpha"));
+
+        let pid_before = {
+            let guard = provider.daemon.lock().unwrap();
+            guard.as_ref().unwrap().daemon.child_pid_for_test()
+        };
+
+        // mtime が確実に進むよう、ファイルシステムの mtime 解像度を超える
+        // だけ待ってから書き換える（多くの環境で mtime は最低でも秒未満
+        // 精度を持つが、安全側に倒して確実に差分を作る）。
+        std::thread::sleep(Duration::from_millis(1100));
+
+        // 新しい補完関数を追加し、.zshrc をそれを拾うよう書き換える
+        // （mtime が更新される）。
+        fs::write(
+            fpath_dir.join("_jarvishtestcmd3"),
+            "#compdef jarvishtestcmd3\ncompadd -- delta\n",
+        )
+        .unwrap();
+        fs::write(
+            zdotdir.join(".zshrc"),
+            format!(
+                "fpath=({} $fpath)\n# touched to bump mtime\n",
+                fpath_dir.display()
+            ),
+        )
+        .unwrap();
+
+        let line2 = "jarvishtestcmd3 ";
+        let ctx2 = super::super::context::extract_context(line2, line2.len());
+        let second = provider
+            .provide(&ctx2)
+            .expect("request after .zshrc touch should still work (daemon respawned)");
+        assert!(
+            second.iter().any(|c| c.value == "delta"),
+            "respawned daemon should have re-sourced the updated bridge .zshrc: {second:?}"
+        );
+
+        let pid_after = {
+            let guard = provider.daemon.lock().unwrap();
+            guard.as_ref().unwrap().daemon.child_pid_for_test()
+        };
+        assert_ne!(
+            pid_before, pid_after,
+            "daemon must be restarted (new child pid) after bridge .zshrc mtime changes"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_failure_returns_none_this_tab_and_respawns_lazily_next_tab() {
+        // ハングする補完関数でタイムアウトさせ、その Tab は None を返す
+        // （ワンショットへのフォールバックはしない）。次の Tab では
+        // 遅延 respawn されて通常どおり候補を返すことを確認する。
+        //
+        // 実装ノート: 隔離 `HOME`（`zsh_daemon_test_home_envs`）を必ず渡す
+        // こと。`compinit -d ~/.zcompdump_capture` は `$HOME` 基準の固定
+        // パスに compdump キャッシュを読み書きするため、実 `$HOME` を
+        // 共有したまま並行実行すると `#compdef jarvishtesthang` が
+        // 一時的に認識されず zsh のデフォルトのファイル名補完へ静かに
+        // フォールバックしてしまい、`sleep 30` で本来ハングするはずの
+        // リクエストが即座に（誤った）候補を返す desync として観測される
+        // ── 実機検証で確認済みのフレーク要因（`zsh_daemon_test_fixture`
+        // のドキュメント参照）。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+        fs::write(
+            fpath_dir.join("_jarvishtesthang"),
+            "#compdef jarvishtesthang\nsleep 30\ncompadd -- neverseen\n",
+        )
+        .unwrap();
+
+        // 短いタイムアウトでハング補完を確実に timeout させる。
+        let settings = Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
+            &CompletionConfig {
+                external: ExternalSetting::Single("zsh".to_string()),
+                external_timeout_ms: 500,
+                external_zsh_daemon: true,
+                ..CompletionConfig::default()
+            },
+        )));
+        let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
+            settings,
+            zsh,
+            zdotdir.clone(),
+            home_envs,
+        );
+
+        // 1回目のリクエストでコールド spawn させておく。決定的な補完
+        // 関数（zsh_daemon_test_fixture が用意する _jarvishtestcmd、
+        // 固定ワードリスト）を使い、レスポンスが素早く確定することを
+        // 確認してからハング側のリクエストへ進む。
+        let warm_line = "jarvishtestcmd ";
+        let warm_ctx = super::super::context::extract_context(warm_line, warm_line.len());
+        let cold_result = provider.provide(&warm_ctx);
+        let cold_candidates = cold_result.expect("cold-spawn request should succeed");
+        assert!(cold_candidates.iter().any(|c| c.value == "alpha"));
+        assert!(
+            provider.daemon.lock().unwrap().is_some(),
+            "daemon should have been spawned by the first request"
+        );
+
+        let hang_line = "jarvishtesthang ";
+        let hang_ctx = super::super::context::extract_context(hang_line, hang_line.len());
+        let start = std::time::Instant::now();
+        let hung_result = provider.provide(&hang_ctx);
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            hung_result, None,
+            "hung completion must yield None for this Tab (no one-shot fallback)"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "provide() should return promptly after the configured timeout, took {elapsed:?}"
+        );
+        assert!(
+            provider.daemon.lock().unwrap().is_none(),
+            "daemon slot must be cleared after a timeout so the next Tab respawns lazily"
+        );
+
+        // 次の Tab: 遅延 respawn されて再び通常の補完が使えることを確認する。
+        let retry = provider.provide(&warm_ctx);
+        let candidates = retry.expect("next Tab should lazily respawn and succeed");
+        assert!(candidates.iter().any(|c| c.value == "alpha"));
+        assert!(provider.daemon.lock().unwrap().is_some());
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_turned_off_mid_session_shuts_down_running_daemon() {
+        // ホットリロードのシミュレーション: 稼働中のデーモンがある状態から
+        // 共有 settings の `zsh_daemon_enabled` を false に書き換えると、
+        // 次の `provide()` 呼び出しでデーモンが shutdown され、以後は
+        // ワンショット経路にフォールバックする（`reload_config` が
+        // `Arc<RwLock<_>>` の中身を丸ごと差し替える経路の模擬 —
+        // `carapace.rs` の hot-reload テストと同じ方針）。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, _fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+
+        let settings = zsh_enabled_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
+            Arc::clone(&settings),
+            zsh,
+            zdotdir,
+            home_envs,
+        );
+
+        let line = "jarvishtestcmd ";
+        let ctx = super::super::context::extract_context(line, line.len());
+        let first = provider.provide(&ctx);
+        assert!(first.is_some(), "daemon path should work before reload");
+        assert!(provider.daemon.lock().unwrap().is_some());
+
+        // reload: 同じ Arc の中身を daemon off の設定に丸ごと差し替える。
+        {
+            let mut guard = settings.write().unwrap();
+            guard.zsh_daemon_enabled = false;
+        }
+
+        let second = provider.provide(&ctx);
+        assert!(
+            second.is_some(),
+            "one-shot fallback should still serve candidates after daemon is turned off"
+        );
+        assert!(
+            provider.daemon.lock().unwrap().is_none(),
+            "running daemon must be shut down as soon as external_zsh_daemon flips to false"
+        );
+    }
+
+    #[test]
+    fn daemon_enabled_default_true_uses_daemon_field_type() {
+        // ExternalCompletionSettings::resolve のデフォルト（CompletionConfig
+        // ::default()）で zsh_daemon_enabled が true になっていることの
+        // 単体確認（zsh 不要、実機非依存）。
+        let settings = zsh_enabled_external_completion();
+        assert!(settings.read().unwrap().zsh_daemon_enabled);
     }
 }

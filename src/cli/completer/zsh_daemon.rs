@@ -50,17 +50,13 @@
 //! 再武装するラッパー ZLE widget**（`jarvish-complete-word`）を `^I` に
 //! 束縛することで解決している（詳細は同ファイルのコメント参照）。
 //!
-//! # このタスクのスコープ（Task 2b.3 の Task 1）
-//! ここでは init スクリプトと [`ZshDaemon`] のライフサイクル（spawn /
-//! request / shutdown / Drop）のみを実装する。`JarvishCompleter` の
-//! provider チェーンへの実配線（`ZshBridgeProvider` からの切り替え、
-//! 死亡時の自動 respawn 等）は Task 2 のスコープのため、本タスクの時点
-//! では `ZshDaemon` はまだどこからも呼ばれない。`cargo clippy -D warnings`
-//! の dead_code 検査に対しては、下記の `#![allow(dead_code)]` で
-//! モジュール全体を一時的に許容する（各アイテムはユニットテスト・zsh
-//! 実機統合テストの両方で実際に exercise 済み — 末尾の `tests` モジュール
-//! 参照。Task 2 で実配線されれば通常の到達可能性で警告は自然に消える）。
-#![allow(dead_code)]
+//! # `JarvishCompleter` への配線（Task 2b.3 の Task 2）
+//! [`super::zsh_bridge::ZshBridgeProvider`] が `Mutex<Option<ZshDaemon>>` を
+//! 保持し、`[completion] external_zsh_daemon` が有効な間は初回リクエストで
+//! 遅延 spawn、以後は同じインスタンスを使い回す。タイムアウト/desync で
+//! `is_alive()` が `false` になった場合や、ブリッジ `.zshrc` の mtime が
+//! spawn 時から変わっていた場合は shutdown して次回リクエストで再 spawn
+//! する（`zsh_bridge.rs` のモジュールドキュメント参照）。
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -210,6 +206,15 @@ impl ZshDaemon {
     /// killed されていない）かどうか。
     pub(crate) fn is_alive(&self) -> bool {
         self.alive
+    }
+
+    /// 子プロセスの pid を返す（テスト専用: [`super::zsh_bridge`] の
+    /// 「同じ子プロセスが複数リクエストにわたって使い回されているか」
+    /// 「mtime 変化で実際に respawn（新しい pid）されたか」を実機の pid
+    /// 比較で直接証明するためのアクセサ）。
+    #[cfg(test)]
+    pub(crate) fn child_pid_for_test(&self) -> u32 {
+        self.child.id()
     }
 
     /// 補完リクエストを1回実行する。
