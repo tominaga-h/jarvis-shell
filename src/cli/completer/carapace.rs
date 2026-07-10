@@ -217,6 +217,17 @@ impl CompletionProvider for CarapaceProvider {
             return None;
         }
 
+        if ctx.head_command() == Some("cd") {
+            // 防御的ガード（#88 / #89）: carapace-bin 1.7.3 は cd 用の spec を
+            // 同梱しておらず、`values` は事実上 PathProvider の dirs_only
+            // フィルタだけを頼りに空になる（=フォールスルー）。しかし将来の
+            // carapace/bridge バージョンが cd 補完（ファイルを含みうる）を
+            // 発行し始めた場合、ここで通してしまうと dirs-only 契約が
+            // 静かに壊れる。cd は常に PathProvider（dirs_only 判定を持つ）
+            // に担当させるため、carapace 側は最初から手を引く。
+            return None;
+        }
+
         let spans = ctx.spans();
         if spans.len() < 2 {
             // spans[0] (コマンド名) しかない = まだサブコマンド/引数の
@@ -463,6 +474,45 @@ mod tests {
         let ctx = extract_context("gi", "gi".len());
         assert!(ctx.is_first_token);
         assert_eq!(provider.provide(&ctx), None);
+    }
+
+    #[test]
+    fn provide_returns_none_for_cd_even_when_binary_would_emit_files() {
+        // 防御的ガード（#88 / #89）の証明: たとえ carapace（または将来の
+        // ブリッジ実装）が cd 用の spec を持ち、ファイル + ディレクトリ混在の
+        // JSON を返す状況になっても、CarapaceProvider は cd を一切担当せず
+        // 即座に None を返す（PathProvider の dirs_only フィルタに完全に
+        // 委譲する）。これを実証するため、実行されれば file + dir 混在の
+        // 合成 JSON フィクスチャを吐く偽 carapace スクリプトを用意し、
+        // ガードがスクリプト起動より先に効いて None を返すことを確認する
+        // （スクリプトが実際に実行されていれば stdout パース経由で
+        // 候補が返り、このテストは失敗するはず）。
+        let tmpdir = tempfile::tempdir().unwrap();
+        let script_path = tmpdir.path().join("fake-carapace-cd.sh");
+        let fixture_json = r#"{"version":"v1.13.0","messages":[],"noprefix":"","nospace":"/","usage":"","values":[{"value":"readme.txt","display":"readme.txt","tag":"files"},{"value":"subdir/","display":"subdir/","tag":"files"}]}"#;
+        std::fs::write(
+            &script_path,
+            format!("#!/bin/sh\ncat <<'EOF'\n{fixture_json}\nEOF\n"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        let provider = CarapaceProvider::new(settings_with_binary(Some(script_path)));
+        let ctx = extract_context("cd sub", "cd sub".len());
+        assert_eq!(ctx.head_command(), Some("cd"));
+
+        assert_eq!(
+            provider.provide(&ctx),
+            None,
+            "CarapaceProvider must defer cd entirely to PathProvider's dirs_only filter, \
+             even when the (would-be) carapace output mixes files and dirs"
+        );
     }
 
     #[test]
