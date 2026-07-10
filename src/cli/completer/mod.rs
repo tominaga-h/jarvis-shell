@@ -11,12 +11,16 @@
 //! [`CompletionProvider`] トレイトで補完源をプラグイン化しており、
 //! `complete()` は [`Command`](command::CommandProvider) →
 //! [`Git`](git::GitProvider) → [`Carapace`](carapace::CarapaceProvider) →
-//! [`Path`](path::PathProvider) の順に各プロバイダを走査し、最初に `Some`
-//! を返したプロバイダの候補を採用する（`None` = 対象外で次へ、
-//! `Some(vec![])` = 担当したが候補なしでそこで確定）。`GitProvider` を
-//! `CarapaceProvider` より先に置いているのは、設定済みのブランチ系
-//! サブコマンドではカレントブランチ優先の並び順（`GitProvider` 側の既存
-//! ロジック）を carapace の並び順より優先したいため。
+//! [`ZshBridge`](zsh_bridge::ZshBridgeProvider) → [`Path`](path::PathProvider)
+//! の順に各プロバイダを走査し、最初に `Some` を返したプロバイダの候補を
+//! 採用する（`None` = 対象外で次へ、`Some(vec![])` = 担当したが候補なしで
+//! そこで確定）。`GitProvider` を `CarapaceProvider` より先に置いているのは、
+//! 設定済みのブランチ系サブコマンドではカレントブランチ優先の並び順
+//! （`GitProvider` 側の既存ロジック）を carapace の並び順より優先したい
+//! ため。`ZshBridgeProvider` を `CarapaceProvider` の後段に置いているのは、
+//! carapace が対応済みのコマンドではそちらを優先し、carapace が空/未対応
+//! だったコマンドのみ zsh の compsys（`_*` 補完関数群）にフォールバックする
+//! ため（carapace の方が起動コストが低く、候補に description が付きやすい）。
 //!
 //! コマンド名補完は fish shell の設計思想に倣い、インメモリキャッシュを持たず、
 //! Tab 押下時にリアルタイムで `$PATH` を走査する（キャッシュレス設計）。
@@ -41,6 +45,7 @@ mod external;
 mod git;
 mod path;
 mod provider;
+mod zsh_bridge;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -55,6 +60,7 @@ use context::{extract_context, CompletionContext};
 use git::GitProvider;
 use path::PathProvider;
 use provider::{escape_for_insert, CompletionProvider};
+use zsh_bridge::ZshBridgeProvider;
 
 pub use carapace::{format_external_summary, ExternalCompletionSettings};
 
@@ -85,7 +91,8 @@ impl JarvishCompleter {
         let providers: Vec<Box<dyn CompletionProvider>> = vec![
             Box::new(CommandProvider::new(Arc::clone(&aliases))),
             Box::new(GitProvider::new(git_branch_commands)),
-            Box::new(CarapaceProvider::new(external_completion)),
+            Box::new(CarapaceProvider::new(Arc::clone(&external_completion))),
+            Box::new(ZshBridgeProvider::new(external_completion)),
             Box::new(PathProvider),
         ];
         Self { providers, aliases }
