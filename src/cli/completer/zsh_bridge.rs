@@ -469,7 +469,15 @@ fn zsh_escape_span(span: &str) -> Option<String> {
 /// PTY 由来の `\r\n` で分割し、末尾の空要素（トレイリング改行）は捨てる。
 /// 各行は ANSI 除去 → バックスラッシュ unquote → 最初の `" -- "` で
 /// value/description に分割、の順で処理する。
-fn parse_capture_output(stdout: &str) -> Vec<Candidate> {
+///
+/// `pub(super)` なのは [`super::zsh_daemon::ZshDaemon`]（Task 2b.3、#89）が
+/// 温存デーモンから読み取った候補行ブロック（NUL センチネル間、
+/// `assets/zsh/daemon_init.zsh` の `compadd` オーバーライドが
+/// `assets/zsh/capture.zsh` と同一の "value -- description" 形式で出力する）
+/// をパースするために再利用するため。パースロジックの重複を避ける
+/// （タスク指示: "Response parsing MUST reuse the existing zsh_bridge
+/// parsing helpers"）。
+pub(super) fn parse_capture_output(stdout: &str) -> Vec<Candidate> {
     let mut lines: Vec<&str> = stdout.split("\r\n").collect();
     // 末尾の空要素（トレイリング区切りの結果）を捨てる。
     if lines.last() == Some(&"") {

@@ -144,8 +144,13 @@ pub(crate) fn run_external_capped(
 /// 収集を kill より前に行うのは、kill 後に子孫プロセスツリーを辿ろうと
 /// すると reap 済みで `ps` から消えてしまい後追いできなくなるため（先に
 /// 収集 → kill の順序が必須）。
+///
+/// `pub(crate)` なのは [`super::zsh_daemon::ZshDaemon`] のタイムアウト/Drop
+/// 経路が同じロジックを再利用するため（Task 2b.3、#89）。`ZshDaemon` は
+/// `run_external_capped` を経由しない独自の PTY セッションを直接管理する
+/// ため、このヘルパー単体を呼べる必要がある。
 #[cfg(unix)]
-fn kill_tree(pid: u32) {
+pub(crate) fn kill_tree(pid: u32) {
     // 子孫は kill する前に収集する（kill 後は ps から消えて辿れなくなる）。
     let descendants = collect_descendants(pid);
 
@@ -241,7 +246,7 @@ fn collect_descendants(root: u32) -> Vec<u32> {
 }
 
 #[cfg(not(unix))]
-fn kill_tree(_pid: u32) {
+pub(crate) fn kill_tree(_pid: u32) {
     // Windows 等では子プロセス kill の別実装が必要になるが、Phase 2a の
     // 外部補完プロバイダは carapace / zsh ブリッジいずれも unix 前提のため
     // 現状は未実装（no-op）。

@@ -60,6 +60,7 @@ mod git;
 mod path;
 mod provider;
 mod zsh_bridge;
+mod zsh_daemon;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
