@@ -240,6 +240,8 @@ If [carapace](#external-completion-carapace) doesn't have candidates for a comma
   You can also add `compdef` lines to bind a completion function to a specific command, just as you would in a normal `~/.zshrc`.
 - **Timeout + fallback**: Like carapace, every bridge invocation is capped by a timeout (shared with `external_timeout_ms`, with a higher floor to accommodate zsh's `compinit` startup cost). If the bridge hangs, errors, or returns nothing, Jarvish falls back to built-in path completion — Tab never blocks the UI.
 
+**Troubleshooting: bridge completions suddenly return nothing after editing `fpath`.** If you add a directory to `fpath` in the bridge zshrc (as in the example above) and the zsh bridge stops returning candidates for *every* command, the cause is almost always zsh's `compinit` security check. `compinit` runs `compaudit`, which inspects not just the directories you added to `fpath` but also their parent directories, and refuses to proceed if any of them are group-writable — instead it prints an interactive `Ignore insecure directories and continue [ny]?` prompt. Since the bridge zsh runs inside an invisible `zpty` session, nothing can answer that prompt, so `compinit` hangs and completions silently fail across the board. This is common on Intel Macs, where Homebrew's `/usr/local/share` is group-writable by default (Apple Silicon's `/opt/homebrew` is much less likely to hit this). Run `compaudit` to list the offending directories, then fix it the same way Homebrew recommends: `chmod g-w /usr/local/share`.
+
 ## 🏗️ Architecture
 
 Jarvish is composed of four highly modular core components:

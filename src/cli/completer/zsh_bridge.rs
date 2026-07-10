@@ -92,6 +92,15 @@ const BRIDGE_ZSHRC_TEMPLATE: &str = r#"# jarvish zsh completion bridge — ~/.co
 # Example: add Homebrew's zsh-completions to fpath
 #   brew install zsh-completions
 # fpath=(/opt/homebrew/share/zsh-completions $fpath)
+#
+# 注意: 追加するディレクトリやその親ディレクトリが group-writable だと、
+# zsh の compinit セキュリティ検査（compaudit）に引っかかり補完が全滅
+# することがあります（例: Intel Mac の /usr/local/share）。`compaudit`
+# で確認し、必要なら `chmod g-w /usr/local/share` を実行してください。
+# Warning: if the directory you add (or its parent) is group-writable,
+# zsh's compinit security check (compaudit) may flag it and silently
+# break all completions (e.g. /usr/local/share on Intel Macs). Check
+# with `compaudit`, and if needed run `chmod g-w /usr/local/share`.
 
 # 例2: 自作/追加の補完関数を任意のディレクトリから読み込む
 # Example: load custom completion functions from your own directory

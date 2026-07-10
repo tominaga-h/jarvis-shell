@@ -240,6 +240,8 @@ Jarvish の Tab 補完は [carapace](https://github.com/carapace-sh/carapace-bin
   通常の `~/.zshrc` と同じように `compdef` 行を追加して、特定コマンドに補完関数を紐付けることもできます。
 - **タイムアウト + フォールバック**: carapace と同様、各ブリッジ呼び出しはタイムアウトで保護されています（`external_timeout_ms` と共有しつつ、zsh の `compinit` 起動コストを見込んだ下限値を設けています）。ブリッジがハング・エラー・候補なしを返した場合は、ビルトインのパス補完へフォールバックします — Tab キーが UI をブロックすることはありません。
 
+**トラブルシューティング: `fpath` を編集したらブリッジ補完が全コマンドで何も返さなくなった。** 上記の例のようにブリッジ用 zshrc の `fpath` にディレクトリを追加した結果、ブリッジ補完が*すべての*コマンドで候補を返さなくなった場合、原因はほぼ確実に zsh の `compinit` セキュリティ検査です。`compinit` は内部で `compaudit` を実行しますが、これは `fpath` に追加したディレクトリだけでなく、その**親ディレクトリ**も検査対象にします。いずれかが group-writable だと安全でないと判定され、`Ignore insecure directories and continue [ny]?` という対話的プロンプトを表示します。ブリッジ用の zsh は不可視の `zpty` セッション内で動いているため、このプロンプトに誰も答えられず `compinit` がハングし、補完が全滅したように見えます。これは Intel Mac で特によく起こります（Homebrew の `/usr/local/share` が既定で group-writable なため）。Apple Silicon の `/opt/homebrew` ではこの問題はほとんど発生しません。`compaudit` コマンドで該当ディレクトリを確認し、Homebrew 公式が推奨するのと同じ対処 `chmod g-w /usr/local/share` を行ってください。
+
 ## 🏗️ アーキテクチャ
 
 Jarvish は、高度にモジュール化された4つのコアコンポーネントで構成されています。
