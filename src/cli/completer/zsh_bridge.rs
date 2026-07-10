@@ -272,9 +272,11 @@ const WARM_MIN_TIMEOUT_MS: u64 = 100;
 ///   既存デーモンを shutdown する（以後はワンショット経路を使う）。
 pub(super) struct ZshBridgeProvider {
     settings: Arc<RwLock<ExternalCompletionSettings>>,
-    /// 温存デーモン本体。`None` は「未 spawn」または「直前のリクエストで
-    /// dead 化して捨てた」を意味する（次回リクエストで遅延 respawn）。
-    daemon: Mutex<Option<DaemonSlot>>,
+    /// 温存デーモン本体（`Shell` と共有する `Arc<Mutex<_>>`、Task A, #89）。
+    /// `None` は「未 spawn」または「直前のリクエストで dead 化して捨てた」、
+    /// あるいは `Shell` 側がライフサイクルイベント（reload/exit/restart）で
+    /// shutdown 済みであることを意味する（次回リクエストで遅延 respawn）。
+    daemon: SharedDaemonSlot,
     /// テスト用に zsh の場所を差し替えられるようにするフック。
     /// 本番は `None` で `which::which("zsh")` を都度引く。
     zsh_override: Option<PathBuf>,
@@ -303,16 +305,69 @@ pub(super) struct ZshBridgeProvider {
 /// `.zshrc` が存在しなかった／`stat` に失敗した場合は `None` を保持し、
 /// 以後の比較で「常に変化なし」として扱う（mtime を取得できない環境で
 /// 誤って毎回再起動しないための安全側フォールバック）。
-struct DaemonSlot {
+pub struct DaemonSlot {
     daemon: ZshDaemon,
     zshrc_mtime_at_spawn: Option<SystemTime>,
 }
 
+impl DaemonSlot {
+    /// このスロットが保持するデーモン子プロセスの pid を返す（テスト専用:
+    /// `shell::mod` 等、他モジュールの統合テストが「本当に spawn された
+    /// 子プロセスが shutdown 後に死んでいるか」を ESRCH ポーリングで直接
+    /// 証明するためのアクセサ。[`ZshDaemon::child_pid_for_test`] への薄い
+    /// 委譲）。
+    #[cfg(test)]
+    pub(crate) fn daemon_pid_for_test(&self) -> u32 {
+        self.daemon.child_pid_for_test()
+    }
+}
+
+/// 温存デーモンスロットの共有ハンドル。
+///
+/// `ExternalCompletionSettings` と同じ「`Shell::new` で構築し
+/// `Arc` として `Shell` / `ZshBridgeProvider` の両方に配る」パターン
+/// （`git_branch_commands` / `external_completion` と同じ配管方針）。
+/// `Shell` はこのハンドルを経由して、`reload_config`（設定変更の**その場**）
+/// や exit / restart 経路など、`provide()` が次に呼ばれるとは限らない
+/// ライフサイクルイベント上でもデーモンを確実に shutdown できる
+/// （A1〜A4, #89 レビュー指摘 — `Drop` にのみ依存すると `Command::exec`
+/// や `std::process::exit` では一切実行されないため）。
+pub type SharedDaemonSlot = Arc<Mutex<Option<DaemonSlot>>>;
+
+/// 共有デーモンスロットが埋まっていれば shutdown してスロットを空にする。
+///
+/// スロットが既に空なら no-op（冪等）。`Mutex` の poison（他スレッドの
+/// panic 経由）はロック取得失敗として扱い、安全側に倒して何もしない
+/// （poison 状態から shutdown を試みても panic を伝播させるだけで
+/// 状況が改善しないため — 呼び出し元はいずれも「ベストエフォートで
+/// 畳めれば畳む」性質の経路: reload / exit / restart 直前）。
+///
+/// `Shell::reload_config`（設定変更の**その場**での shutdown, A3/A4）、
+/// `Shell::exec_restart`（exec 直前, A1）、`main.rs` の正常終了経路
+/// （`std::process::exit` 直前, A2）から共通で呼ばれる。
+pub fn shutdown_shared_daemon(slot: &SharedDaemonSlot) {
+    let Ok(mut guard) = slot.lock() else {
+        return;
+    };
+    if let Some(mut slot) = guard.take() {
+        slot.daemon.shutdown();
+    }
+}
+
+/// 新しい（空の）共有デーモンスロットを作る。`Shell::new` / `build_editor`
+/// から呼び、`Shell` と [`ZshBridgeProvider::new`] の両方に配る。
+pub fn new_shared_daemon_slot() -> SharedDaemonSlot {
+    Arc::new(Mutex::new(None))
+}
+
 impl ZshBridgeProvider {
-    pub(super) fn new(settings: Arc<RwLock<ExternalCompletionSettings>>) -> Self {
+    pub(super) fn new(
+        settings: Arc<RwLock<ExternalCompletionSettings>>,
+        daemon: SharedDaemonSlot,
+    ) -> Self {
         Self {
             settings,
-            daemon: Mutex::new(None),
+            daemon,
             zsh_override: None,
             bridge_dir_override: None,
             #[cfg(test)]
@@ -324,7 +379,7 @@ impl ZshBridgeProvider {
     fn with_zsh_binary(settings: Arc<RwLock<ExternalCompletionSettings>>, zsh: PathBuf) -> Self {
         Self {
             settings,
-            daemon: Mutex::new(None),
+            daemon: new_shared_daemon_slot(),
             zsh_override: Some(zsh),
             bridge_dir_override: None,
             extra_envs: Vec::new(),
@@ -339,7 +394,7 @@ impl ZshBridgeProvider {
     ) -> Self {
         Self {
             settings,
-            daemon: Mutex::new(None),
+            daemon: new_shared_daemon_slot(),
             zsh_override: Some(zsh),
             bridge_dir_override: Some(bridge_dir),
             extra_envs: Vec::new(),
@@ -358,7 +413,26 @@ impl ZshBridgeProvider {
     ) -> Self {
         Self {
             settings,
-            daemon: Mutex::new(None),
+            daemon: new_shared_daemon_slot(),
+            zsh_override: Some(zsh),
+            bridge_dir_override: Some(bridge_dir),
+            extra_envs,
+        }
+    }
+
+    /// テスト専用: 既存の共有スロットを注入する版（reload/exit 経路の
+    /// 統合テストで `Shell` 側と同じ `Arc` を共有する必要がある場合に使う）。
+    #[cfg(test)]
+    fn with_shared_daemon_slot_for_test(
+        settings: Arc<RwLock<ExternalCompletionSettings>>,
+        zsh: PathBuf,
+        bridge_dir: PathBuf,
+        extra_envs: Vec<(String, String)>,
+        daemon: SharedDaemonSlot,
+    ) -> Self {
+        Self {
+            settings,
+            daemon,
             zsh_override: Some(zsh),
             bridge_dir_override: Some(bridge_dir),
             extra_envs,
@@ -465,14 +539,11 @@ impl ZshBridgeProvider {
     /// 残っていれば明示的に shutdown してスロットを空にする（`ZshDaemon`
     /// の `Drop` に任せず、設定変更の**その場**で確実に子プロセスを畳む —
     /// タスク指示: "turning it off shuts the daemon down"）。デーモンが
-    /// 元々無ければ no-op。
+    /// 元々無ければ no-op。[`shutdown_shared_daemon`] への薄い委譲
+    /// （`Shell::reload_config` / exit / restart 経路と同じ shutdown 経路を
+    /// 使うことで実装を1箇所に保つ — A1〜A4, #89）。
     fn shutdown_daemon_if_running(&self) {
-        let Ok(mut slot_guard) = self.daemon.lock() else {
-            return;
-        };
-        if let Some(mut slot) = slot_guard.take() {
-            slot.daemon.shutdown();
-        }
+        shutdown_shared_daemon(&self.daemon);
     }
 }
 
@@ -486,15 +557,22 @@ impl CompletionProvider for ZshBridgeProvider {
         // 短命な read ロック（`gate` 内部で取得・即座に drop する —
         // `carapace.rs` / `mod.rs` の aliases スナップショットと同じ方針）。
         // zsh が優先順リストに含まれていない（無効化されている、または
-        // carapace のみが指定されている等）場合は `gate` が `None` を返し、
-        // ここで早期 return する。`MIN_TIMEOUT_MS` フロアはワンショット経路
-        // /デーモンのコールド経路専用（compinit の重さ対策 — 定数のドキュ
-        // メント参照）なので `Some(...)` で渡す。
-        let (_gated_binary, cold_timeout) = gate(
+        // carapace のみが指定されている等）場合は `gate` が `None` を返す。
+        // その場合でも、直前まで zsh が有効だった名残で温存デーモンが
+        // 生きたまま残っている可能性があるため（例: `external` を配列で
+        // `["carapace"]` に変更して `source` した直後 — A4, #89 レビュー
+        // 指摘）、`None` で早期 return する前に必ず shutdown しておく
+        // （既に空なら no-op、冪等）。`MIN_TIMEOUT_MS` フロアはワンショット
+        // 経路/デーモンのコールド経路専用（compinit の重さ対策 — 定数の
+        // ドキュメント参照）なので `Some(...)` で渡す。
+        let Some((_gated_binary, cold_timeout)) = gate(
             &self.settings,
             ExternalKind::Zsh,
             Some(Duration::from_millis(MIN_TIMEOUT_MS)),
-        )?;
+        ) else {
+            self.shutdown_daemon_if_running();
+            return None;
+        };
 
         // ウォーム経路用の実効タイムアウト（設定値 + 小さな床）。
         // `gate` はコールド用フロアしか計算しないため、ここでは共有設定の
@@ -1186,7 +1264,7 @@ mod tests {
         // + 有効化設定でも、first-token では担当外として None を返すことを
         // 確認する（`resolve_zsh` のオーバーライドなし経路のカバレッジ）。
         let settings = zsh_enabled_external_completion();
-        let provider = ZshBridgeProvider::new(settings);
+        let provider = ZshBridgeProvider::new(settings, new_shared_daemon_slot());
         let ctx = super::super::context::extract_context("gi", 2);
         assert!(provider.provide(&ctx).is_none());
     }
@@ -1945,5 +2023,150 @@ mod tests {
         // 単体確認（zsh 不要、実機非依存）。
         let settings = zsh_enabled_external_completion();
         assert!(settings.read().unwrap().zsh_daemon_enabled);
+    }
+
+    // ── 共有デーモンスロット (Task A, #89): shutdown_shared_daemon /
+    //    new_shared_daemon_slot / provide() の gate()-None 早期 shutdown ──
+
+    /// pid が実際に ESRCH になる（プロセスが死んでいる）まで短時間・
+    /// 有界回数ポーリングする（`zsh_daemon.rs` / `external.rs` の既存
+    /// テストと同じ考え方）。
+    fn wait_for_pid_death(pid: u32) -> bool {
+        for _ in 0..40 {
+            let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+            if ret == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[test]
+    fn new_shared_daemon_slot_starts_empty() {
+        let slot = new_shared_daemon_slot();
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn shutdown_shared_daemon_on_empty_slot_is_a_no_op() {
+        // 既に空のスロットに対して shutdown_shared_daemon を呼んでも
+        // panic せず、スロットは空のままである（冪等性）。
+        let slot = new_shared_daemon_slot();
+        shutdown_shared_daemon(&slot);
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn shutdown_shared_daemon_kills_live_daemon_and_empties_slot() {
+        // Shell::exec_restart / main.rs の exit 経路が呼ぶのと同じ
+        // shutdown_shared_daemon() を直接呼び、実際に子プロセスが ESRCH に
+        // なる（本当に死ぬ）ことと、スロットが None に戻ることの両方を
+        // 実機で証明する（A1/A2 の unit テスト — exec() 自体はテストしない）。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, _fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+
+        let shared_slot = new_shared_daemon_slot();
+        let settings = zsh_enabled_external_completion();
+        let provider = ZshBridgeProvider::with_shared_daemon_slot_for_test(
+            settings,
+            zsh,
+            zdotdir,
+            home_envs,
+            Arc::clone(&shared_slot),
+        );
+
+        let line = "jarvishtestcmd ";
+        let ctx = super::super::context::extract_context(line, line.len());
+        assert!(provider.provide(&ctx).is_some(), "daemon should spawn");
+
+        let child_pid = {
+            let guard = shared_slot.lock().unwrap();
+            guard.as_ref().unwrap().daemon.child_pid_for_test()
+        };
+
+        shutdown_shared_daemon(&shared_slot);
+
+        assert!(
+            shared_slot.lock().unwrap().is_none(),
+            "slot must be empty after shutdown_shared_daemon"
+        );
+        assert!(
+            wait_for_pid_death(child_pid),
+            "child pid {child_pid} should be dead after shutdown_shared_daemon"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn provide_shuts_down_daemon_when_gate_returns_none() {
+        // A4: zsh が enabled-kinds リストから外れる（gate() が None を
+        // 返す）と、provide() は早期 return する前に生きているデーモンを
+        // shutdown しなければならない。まず zsh 有効設定でデーモンを
+        // spawn させ、その後 settings を carapace のみへ丸ごと差し替えて
+        // （zsh が binary_path から消える）再度 provide() を呼び、
+        // スロットが空になり子プロセスが実際に死ぬことを確認する。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, _fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+
+        let settings = zsh_enabled_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
+            Arc::clone(&settings),
+            zsh,
+            zdotdir,
+            home_envs,
+        );
+
+        let line = "jarvishtestcmd ";
+        let ctx = super::super::context::extract_context(line, line.len());
+        assert!(provider.provide(&ctx).is_some(), "daemon should spawn");
+
+        let child_pid = {
+            let guard = provider.daemon.lock().unwrap();
+            guard.as_ref().unwrap().daemon.child_pid_for_test()
+        };
+
+        // settings を丸ごと carapace のみ（zsh は enabled から消える）に
+        // 差し替える — `external_provider_chain` の並び替えではなく、
+        // 同じ Arc の中身だけを書き換える hot-reload シミュレーション
+        // （carapace.rs / zsh_bridge.rs の既存 hot-reload テストと同じ方針）。
+        {
+            let mut guard = settings.write().unwrap();
+            *guard = ExternalCompletionSettings::resolve(&CompletionConfig {
+                external: ExternalSetting::Single("carapace".to_string()),
+                ..CompletionConfig::default()
+            });
+        }
+        assert!(
+            settings
+                .read()
+                .unwrap()
+                .binary_path(ExternalKind::Zsh)
+                .is_none(),
+            "zsh must no longer be gated-in after the settings swap"
+        );
+
+        let result = provider.provide(&ctx);
+        assert!(
+            result.is_none(),
+            "provide() must return None once zsh is gated out"
+        );
+        assert!(
+            provider.daemon.lock().unwrap().is_none(),
+            "provide() must shut down the now-forbidden daemon before returning None (A4)"
+        );
+        assert!(
+            wait_for_pid_death(child_pid),
+            "child pid {child_pid} should be dead after gate()-None shutdown"
+        );
     }
 }

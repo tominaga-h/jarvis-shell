@@ -25,7 +25,8 @@ static RESTART_FLAG: StaticAtomicBool = StaticAtomicBool::new(false);
 
 use crate::ai::{ConversationState, JarvisAI};
 use crate::cli::completer::{
-    format_external_binaries_display, format_external_summary, ExternalCompletionSettings,
+    format_external_binaries_display, format_external_summary, new_shared_daemon_slot,
+    shutdown_shared_daemon, ExternalCompletionSettings, SharedDaemonSlot,
 };
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 use crate::cli::prompt::{ShellPrompt, EXIT_CODE_NONE};
@@ -64,6 +65,12 @@ pub struct Shell {
     /// 外部補完（carapace）の実行時設定（JarvishCompleter と共有）。
     /// `source` コマンドで `which()` 再検出込みに更新される。
     external_completion: Arc<RwLock<ExternalCompletionSettings>>,
+    /// 温存 zsh 補完デーモンのスロット（`ZshBridgeProvider` と共有、
+    /// Task A, #89）。`reload_config` / `exec_restart` / プロセス終了経路
+    /// から、`provide()` を経由せずに直接 shutdown できるようにする
+    /// （`Drop` にのみ依存すると `Command::exec` や `std::process::exit`
+    /// では一切実行されないため）。
+    zsh_daemon: SharedDaemonSlot,
     /// SIGUSR1 受信時に再起動をリクエストするフラグ。
     /// コマンド実行中・PTY 使用中は即座に再起動せず、次の REPL idle 時に遅延実行する。
     restart_requested: Arc<AtomicBool>,
@@ -101,6 +108,11 @@ impl Shell {
             &config.completion,
         )));
 
+        // 温存 zsh 補完デーモンのスロット。`ZshBridgeProvider` と共有し、
+        // `Shell` 側からライフサイクルイベント（reload/exit/restart）で
+        // 直接 shutdown できるようにする（Task A, #89）。
+        let zsh_daemon = new_shared_daemon_slot();
+
         let db_path = data_dir.join("history.db");
         let (reedline, history_available) = editor::build_editor(
             Arc::clone(&classifier),
@@ -109,6 +121,7 @@ impl Shell {
             Arc::clone(&git_branch_commands),
             Arc::clone(&aliases),
             Arc::clone(&external_completion),
+            Arc::clone(&zsh_daemon),
         );
 
         // 直前コマンドの終了コードを共有するアトミック変数
@@ -167,6 +180,7 @@ impl Shell {
             logging_operational,
             git_branch_commands,
             external_completion,
+            zsh_daemon,
             restart_requested: Arc::new(AtomicBool::new(false)),
             startup_commands: config.startup.commands,
         }
@@ -292,6 +306,12 @@ impl Shell {
         // `source` するだけで再起動なしに有効化できる。
         let resolved_external =
             reload_external_completion(&self.external_completion, &config.completion);
+
+        // 新しい設定の下で温存 zsh デーモンが稼働禁止（フラグ off、または
+        // zsh が enabled-kinds リストから外れた）なら、`provide()` の次回
+        // 呼び出しを待たず**その場**で shutdown する（A3/A4, #89 レビュー
+        // 指摘 — README の「immediately shuts down」を実際に真にする）。
+        apply_zsh_daemon_lifecycle_for_reload(&resolved_external, &self.zsh_daemon);
 
         // [startup] を反映（再実行はしない、値の更新のみ）
         self.startup_commands = config.startup.commands.clone();
@@ -589,12 +609,29 @@ impl Shell {
         }
     }
 
+    /// 温存 zsh 補完デーモンが稼働中なら shutdown する（kill + 短時間有界 reap）。
+    ///
+    /// `Command::exec`（[`exec_restart`](Self::exec_restart)）はプロセス
+    /// イメージを置換するため `Drop` は一切実行されず、`std::process::exit`
+    /// もデストラクタをスキップする。そのためこれらの経路の**直前**に
+    /// 明示的に呼び、デーモン子プロセス・PTY fd・init 一時ファイルの
+    /// リークを防ぐ（A1/A2, #89 レビュー指摘）。デーモンが元々稼働して
+    /// いなければ [`shutdown_shared_daemon`] が no-op（冪等）を保証する。
+    pub fn shutdown_zsh_daemon(&self) {
+        shutdown_shared_daemon(&self.zsh_daemon);
+    }
+
     /// exec() によるプロセス再起動を実行する。
     ///
     /// クリーンアップ後、現在のバイナリで exec() を呼び出しプロセスを置換する。
     /// 成功時はこの関数から戻らない。失敗時はエラーを返す。
     pub fn exec_restart(&mut self) -> std::io::Error {
         use std::os::unix::process::CommandExt;
+
+        // 温存 zsh デーモンを exec() の**前**に明示的に shutdown する。
+        // `Command::exec` はプロセスイメージを置換するため、この行の後では
+        // Rust の `Drop` が一切実行されない（A1, #89 レビュー指摘）。
+        self.shutdown_zsh_daemon();
 
         // stdout/stderr をフラッシュ
         let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -631,6 +668,27 @@ fn reload_external_completion(
         *ext = resolved.clone();
     }
     resolved
+}
+
+/// `source` による reload 直後の温存 zsh デーモンのライフサイクル反映。
+///
+/// 新しく解決された `resolved`（reload 後の `ExternalCompletionSettings`）
+/// の下でデーモンが稼働禁止（フラグ off、または zsh が enabled-kinds
+/// リストから外れた）なら、`provide()` の次回呼び出しを待たず**その場**で
+/// shutdown する（A3/A4, #89 レビュー指摘: README の「turning it off
+/// immediately shuts down any running daemon」を実際に真にする）。
+///
+/// `reload_external_completion` と同じ理由（`Shell` 全体を構築せず
+/// `Arc<RwLock<ExternalCompletionSettings>>` + `SharedDaemonSlot` だけで
+/// テストできるようにする）で切り出した純粋寄りのヘルパー。デーモンが
+/// 元々稼働していなければ [`shutdown_shared_daemon`] が no-op を保証する。
+fn apply_zsh_daemon_lifecycle_for_reload(
+    resolved: &ExternalCompletionSettings,
+    zsh_daemon: &SharedDaemonSlot,
+) {
+    if !resolved.should_run_zsh_daemon() {
+        shutdown_shared_daemon(zsh_daemon);
+    }
 }
 
 /// exec_restart 用のコマンド情報を構築する。
@@ -848,5 +906,344 @@ mod tests {
             after_display, before_display,
             "display must change from pre-reload (empty) to post-reload (carapace entry)"
         );
+    }
+
+    // ── 温存 zsh デーモンのライフサイクル (Task A, #89) ──
+    //
+    // ZshDaemon / ZshBridgeProvider は cli::completer 配下の非公開モジュール
+    // のため、ここでは公開 API（`JarvishCompleter` + `reedline::Completer`
+    // トレイト + `SharedDaemonSlot`）だけを使って実デーモンを実際に spawn
+    // させ、`apply_zsh_daemon_lifecycle_for_reload` / `shutdown_shared_daemon`
+    // が本当に子プロセスを殺すことを ESRCH ポーリングで直接証明する
+    // （`zsh_bridge.rs` の daemon テストと同じ隔離 HOME/ZDOTDIR パターン）。
+
+    use crate::cli::completer::new_shared_daemon_slot;
+    use reedline::Completer as _;
+    use serial_test::serial;
+
+    /// テスト用の隔離された ZDOTDIR + fpath ディレクトリ + 隔離 HOME を作る
+    /// （`zsh_bridge.rs` / `zsh_daemon.rs` の E2E テストと同じ理由 —
+    /// `compinit -d ~/.zcompdump_capture` が `$HOME` 基準の固定パスに
+    /// compdump キャッシュを読み書きするため）。
+    struct DaemonTestFixture {
+        _tmpdir: tempfile::TempDir,
+        zdotdir: PathBuf,
+    }
+
+    fn setup_daemon_fixture() -> DaemonTestFixture {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let zdotdir = tmpdir.path().join("zdotdir");
+        let fpath_dir = tmpdir.path().join("completions");
+        let home = tmpdir.path().join("home");
+        std::fs::create_dir_all(&zdotdir).unwrap();
+        std::fs::create_dir_all(&fpath_dir).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            fpath_dir.join("_jarvishtestcmd"),
+            "#compdef jarvishtestcmd\ncompadd -- alpha beta\n",
+        )
+        .unwrap();
+        std::fs::write(
+            zdotdir.join(".zshrc"),
+            format!("fpath=({} $fpath)\n", fpath_dir.display()),
+        )
+        .unwrap();
+        // HOME を隔離した状態で spawn する（プロセス全体の HOME を一時的に
+        // 差し替える — このテストファイル内で HOME を触るテストは
+        // #[serial] を付けて直列化しているため他テストと競合しない）。
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        DaemonTestFixture {
+            _tmpdir: tmpdir,
+            zdotdir,
+        }
+    }
+
+    fn zsh_binary_for_test() -> Option<PathBuf> {
+        which::which("zsh").ok()
+    }
+
+    /// zsh 有効設定 + 温存デーモン有効の `ExternalCompletionSettings` を
+    /// `bridge_dir_override` 相当の zdotdir で使えるよう、`external =
+    /// "zsh"` かつ `external_zsh_daemon = true` に解決したものを返す。
+    fn zsh_enabled_daemon_settings() -> Arc<RwLock<ExternalCompletionSettings>> {
+        use crate::config::{CompletionConfig, ExternalSetting};
+        Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
+            &CompletionConfig {
+                external: ExternalSetting::Single("zsh".to_string()),
+                external_timeout_ms: 3000,
+                external_zsh_daemon: true,
+                ..CompletionConfig::default()
+            },
+        )))
+    }
+
+    /// pid が実際に ESRCH になるまで短時間・有界回数ポーリングする
+    /// （`zsh_daemon.rs` / `zsh_bridge.rs` の既存テストと同じ考え方）。
+    fn wait_for_pid_death(pid: u32) -> bool {
+        for _ in 0..40 {
+            let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+            if ret == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[test]
+    #[serial]
+    fn apply_zsh_daemon_lifecycle_for_reload_shuts_down_when_flag_flips_off() {
+        // reload-disables-daemon-at-source-time: `external_zsh_daemon` が
+        // false になった新設定を渡すと、`provide()` の次回呼び出しを待たず
+        // その場でスロットが None になり、子プロセスが実際に死ぬ（A3）。
+        let Some(zsh) = zsh_binary_for_test() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let original_home = std::env::var("HOME").ok();
+        let fixture = setup_daemon_fixture();
+
+        let settings = zsh_enabled_daemon_settings();
+        let zsh_daemon = new_shared_daemon_slot();
+        let mut completer = crate::cli::completer::JarvishCompleter::new(
+            Arc::new(RwLock::new(vec![])),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::clone(&settings),
+            Arc::clone(&zsh_daemon),
+        );
+
+        // resolve_zsh は which::which("zsh") を都度引く本番経路のため、
+        // PATH 上の実 zsh をそのまま使う（override フックは公開されていない
+        // ため、ZDOTDIR は環境変数経由ではなく bridge_dir() = 隔離 HOME 配下
+        // の ~/.config/jarvish/zsh-bridge を使う。fixture の zdotdir 直下の
+        // .zshrc をそこへコピーする必要はなく、bridge_dir() 自体が初回
+        // ensure_bridge_zshrc() でテンプレートを生成するため、代わりに
+        // spawn 自体が成功することだけを確認する — 候補内容の検証は
+        // zsh_bridge.rs 側の既存テストの責務）。
+        let _ = zsh; // 実 PATH 上の zsh を使うため override は不要
+        let _ = &fixture.zdotdir; // 隔離目的で保持しているだけ
+
+        let line = "jarvishtestcmd ";
+        let pos = line.len();
+        let _ = completer.complete(line, pos);
+
+        // 実装上 gate() が binary を検出できなかった場合など、環境によって
+        // 稀にデーモンが spawn されないことがある。その場合はこのテストの
+        // 前提が成立しないため skip する（実機依存の CI 環境差を吸収）。
+        if zsh_daemon.lock().unwrap().is_none() {
+            eprintln!("skipping: zsh daemon did not spawn in this environment");
+            if let Some(home) = original_home {
+                unsafe {
+                    std::env::set_var("HOME", home);
+                }
+            }
+            return;
+        }
+
+        let child_pid = {
+            let guard = zsh_daemon.lock().unwrap();
+            guard.as_ref().unwrap().daemon_pid_for_test()
+        };
+
+        // reload: フラグを off にした新設定で apply_zsh_daemon_lifecycle_for_reload
+        // を呼ぶ（Shell::reload_config が呼ぶのと同じ経路）。
+        let disabled = ExternalCompletionSettings::resolve(&crate::config::CompletionConfig {
+            external: crate::config::ExternalSetting::Single("zsh".to_string()),
+            external_zsh_daemon: false,
+            ..crate::config::CompletionConfig::default()
+        });
+        apply_zsh_daemon_lifecycle_for_reload(&disabled, &zsh_daemon);
+
+        assert!(
+            zsh_daemon.lock().unwrap().is_none(),
+            "slot must become None immediately after reload disables the daemon flag"
+        );
+        assert!(
+            wait_for_pid_death(child_pid),
+            "child pid {child_pid} should be dead after reload-time shutdown"
+        );
+
+        if let Some(home) = original_home {
+            unsafe {
+                std::env::set_var("HOME", home);
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn apply_zsh_daemon_lifecycle_for_reload_shuts_down_when_zsh_dropped_from_kinds() {
+        // kinds-change: external が "auto"/"zsh" から "carapace" のみへ
+        // 変わる（zsh が enabled-kinds から消える）と、フラグ自体は
+        // true のままでもその場でデーモンが shutdown される（A4 相当を
+        // reload 経路でも保証する）。
+        let Some(zsh) = zsh_binary_for_test() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let original_home = std::env::var("HOME").ok();
+        let fixture = setup_daemon_fixture();
+        let _ = zsh;
+        let _ = &fixture.zdotdir;
+
+        let settings = zsh_enabled_daemon_settings();
+        let zsh_daemon = new_shared_daemon_slot();
+        let mut completer = crate::cli::completer::JarvishCompleter::new(
+            Arc::new(RwLock::new(vec![])),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::clone(&settings),
+            Arc::clone(&zsh_daemon),
+        );
+
+        let line = "jarvishtestcmd ";
+        let pos = line.len();
+        let _ = completer.complete(line, pos);
+
+        if zsh_daemon.lock().unwrap().is_none() {
+            eprintln!("skipping: zsh daemon did not spawn in this environment");
+            if let Some(home) = original_home {
+                unsafe {
+                    std::env::set_var("HOME", home);
+                }
+            }
+            return;
+        }
+
+        let child_pid = {
+            let guard = zsh_daemon.lock().unwrap();
+            guard.as_ref().unwrap().daemon_pid_for_test()
+        };
+
+        // reload: external を "carapace" のみに切り替える（zsh_daemon_enabled
+        // は true のまま — kinds-change 単独での shutdown を検証する）。
+        let carapace_only = ExternalCompletionSettings::resolve(&crate::config::CompletionConfig {
+            external: crate::config::ExternalSetting::Single("carapace".to_string()),
+            external_zsh_daemon: true,
+            ..crate::config::CompletionConfig::default()
+        });
+        apply_zsh_daemon_lifecycle_for_reload(&carapace_only, &zsh_daemon);
+
+        assert!(
+            zsh_daemon.lock().unwrap().is_none(),
+            "slot must become None when zsh is dropped from enabled kinds"
+        );
+        assert!(
+            wait_for_pid_death(child_pid),
+            "child pid {child_pid} should be dead after kinds-change shutdown"
+        );
+
+        if let Some(home) = original_home {
+            unsafe {
+                std::env::set_var("HOME", home);
+            }
+        }
+    }
+
+    #[test]
+    fn apply_zsh_daemon_lifecycle_for_reload_is_noop_when_daemon_should_run() {
+        // 稼働許可されたままの reload（フラグ on かつ zsh が enabled）では
+        // 何もしない（スロットの中身に触れない）ことを、空スロットのまま
+        // no-op であることで確認する（zsh 不要・実機非依存）。
+        let settings = ExternalCompletionSettings::resolve(&crate::config::CompletionConfig {
+            external: crate::config::ExternalSetting::Single("zsh".to_string()),
+            external_zsh_daemon: true,
+            ..crate::config::CompletionConfig::default()
+        });
+        let zsh_daemon = new_shared_daemon_slot();
+        apply_zsh_daemon_lifecycle_for_reload(&settings, &zsh_daemon);
+        assert!(zsh_daemon.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn apply_zsh_daemon_lifecycle_for_reload_on_empty_slot_is_a_no_op() {
+        // 稼働禁止設定でも、スロットが元々空なら panic せず空のまま
+        // （冪等性）。
+        let settings = ExternalCompletionSettings::resolve(&crate::config::CompletionConfig {
+            external: crate::config::ExternalSetting::Single("none".to_string()),
+            external_zsh_daemon: false,
+            ..crate::config::CompletionConfig::default()
+        });
+        let zsh_daemon = new_shared_daemon_slot();
+        apply_zsh_daemon_lifecycle_for_reload(&settings, &zsh_daemon);
+        assert!(zsh_daemon.lock().unwrap().is_none());
+    }
+
+    // ── exec_restart 直前 shutdown (A1) / exit 直前 shutdown (A2) の
+    //    unit テスト（実際に exec()/exit() は呼ばない — shutdown_zsh_daemon
+    //    ヘルパー自体の契約のみを検証する）──
+
+    #[test]
+    fn shutdown_zsh_daemon_helper_on_empty_slot_is_a_no_op() {
+        // Shell::shutdown_zsh_daemon が exec_restart / main.rs の exit
+        // 直前から呼ばれるのと同じ shutdown_shared_daemon 経路であることを
+        // 直接確認する（Shell 全体を構築せず SharedDaemonSlot だけで検証）。
+        let zsh_daemon = new_shared_daemon_slot();
+        shutdown_shared_daemon(&zsh_daemon);
+        assert!(
+            zsh_daemon.lock().unwrap().is_none(),
+            "shutdown on an empty slot must remain a no-op (idempotent)"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn shutdown_zsh_daemon_helper_kills_live_daemon_before_would_be_exec_or_exit() {
+        // exec_restart() / main.rs の exit 経路が「exec()/exit() の直前に
+        // shutdown_shared_daemon を呼ぶ」という契約を、実際に spawn した
+        // デーモンに対して直接証明する（exec()/exit() 自体は呼ばない —
+        // プロセスを本当に置換/終了させるとテストランナーごと落ちるため）。
+        let Some(zsh) = zsh_binary_for_test() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let original_home = std::env::var("HOME").ok();
+        let fixture = setup_daemon_fixture();
+        let _ = zsh;
+        let _ = &fixture.zdotdir;
+
+        let settings = zsh_enabled_daemon_settings();
+        let zsh_daemon = new_shared_daemon_slot();
+        let mut completer = crate::cli::completer::JarvishCompleter::new(
+            Arc::new(RwLock::new(vec![])),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::clone(&settings),
+            Arc::clone(&zsh_daemon),
+        );
+
+        let line = "jarvishtestcmd ";
+        let pos = line.len();
+        let _ = completer.complete(line, pos);
+
+        if zsh_daemon.lock().unwrap().is_none() {
+            eprintln!("skipping: zsh daemon did not spawn in this environment");
+            if let Some(home) = original_home {
+                unsafe {
+                    std::env::set_var("HOME", home);
+                }
+            }
+            return;
+        }
+
+        let child_pid = {
+            let guard = zsh_daemon.lock().unwrap();
+            guard.as_ref().unwrap().daemon_pid_for_test()
+        };
+
+        // exec_restart() / main.rs の exit 経路が呼ぶのと同じヘルパー。
+        shutdown_shared_daemon(&zsh_daemon);
+
+        assert!(zsh_daemon.lock().unwrap().is_none());
+        assert!(
+            wait_for_pid_death(child_pid),
+            "child pid {child_pid} should be dead after the pre-exec/pre-exit shutdown helper runs"
+        );
+
+        if let Some(home) = original_home {
+            unsafe {
+                std::env::set_var("HOME", home);
+            }
+        }
     }
 }

@@ -158,6 +158,29 @@ impl ExternalCompletionSettings {
             .find(|entry| entry.kind == kind)
             .and_then(|entry| entry.binary.as_ref())
     }
+
+    /// この設定の下で温存 zsh 補完デーモンが稼働してよいかどうか（Task A,
+    /// #89）。`false` を返す条件は2つ:
+    /// - `[completion] external_zsh_daemon = false`（デーモン機能自体が
+    ///   フラグで無効化されている）
+    /// - `zsh` が `enabled`（優先順リスト）に存在しない（`external =
+    ///   "carapace"` や `["carapace"]` のように zsh 自体が候補から外れて
+    ///   いる — バイナリが検出できているかどうかは問わない。zsh が優先順に
+    ///   すら載っていない時点で `ZshBridgeProvider::provide` は
+    ///   `gate()`（`binary_path` 経由）で早期 return し、デーモンを
+    ///   使う機会がないため）。
+    ///
+    /// `Shell::reload_config` が `source` 実行の**その場**でデーモンを
+    /// shutdown すべきかどうかを判定するために使う（A3/A4 レビュー指摘:
+    /// 「フラグ off」と「zsh が enabled-kinds から外れる」の両方を
+    /// reload 時点で確実に検知する）。
+    pub(crate) fn should_run_zsh_daemon(&self) -> bool {
+        self.zsh_daemon_enabled
+            && self
+                .enabled
+                .iter()
+                .any(|entry| entry.kind == ExternalKind::Zsh)
+    }
 }
 
 /// 各外部補完プロバイダの `provide()` 冒頭で共通する「read ロック → 有効化判定
@@ -1025,6 +1048,80 @@ mod tests {
             settings.binary_path(ExternalKind::Zsh),
             Some(&PathBuf::from("/bin/zsh"))
         );
+    }
+
+    // ── should_run_zsh_daemon（Task A, #89: reload 時点でのデーモン
+    //    shutdown 要否判定の核心ロジック）──
+
+    #[test]
+    fn should_run_zsh_daemon_true_when_flag_on_and_zsh_enabled() {
+        let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
+            timeout: Duration::from_millis(400),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Zsh,
+                binary: Some(PathBuf::from("/bin/zsh")),
+            }],
+        };
+        assert!(settings.should_run_zsh_daemon());
+    }
+
+    #[test]
+    fn should_run_zsh_daemon_false_when_flag_off_even_if_zsh_enabled() {
+        // A3: external_zsh_daemon = false のとき、zsh 自体は enabled-kinds
+        // リストに残っていても稼働禁止でなければならない。
+        let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: false,
+            timeout: Duration::from_millis(400),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Zsh,
+                binary: Some(PathBuf::from("/bin/zsh")),
+            }],
+        };
+        assert!(!settings.should_run_zsh_daemon());
+    }
+
+    #[test]
+    fn should_run_zsh_daemon_false_when_zsh_not_in_enabled_kinds() {
+        // A4: フラグは on のままでも、zsh が優先順リストから外れていれば
+        // （例: external = "carapace"）稼働禁止。
+        let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
+            timeout: Duration::from_millis(400),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Carapace,
+                binary: Some(PathBuf::from("/usr/local/bin/carapace")),
+            }],
+        };
+        assert!(!settings.should_run_zsh_daemon());
+    }
+
+    #[test]
+    fn should_run_zsh_daemon_false_when_enabled_list_is_empty() {
+        // external = "none" 相当。
+        let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
+            timeout: Duration::from_millis(400),
+            enabled: Vec::new(),
+        };
+        assert!(!settings.should_run_zsh_daemon());
+    }
+
+    #[test]
+    fn should_run_zsh_daemon_true_even_if_zsh_binary_not_detected() {
+        // zsh が enabled-kinds に存在する限り、バイナリ未検出でも
+        // should_run_zsh_daemon 自体は true を返す（バイナリ有無の判定は
+        // gate()/binary_path() の責務であり、should_run_zsh_daemon は
+        // 「zsh が優先順に候補として載っているか」だけを見る）。
+        let settings = ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
+            timeout: Duration::from_millis(400),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Zsh,
+                binary: None,
+            }],
+        };
+        assert!(settings.should_run_zsh_daemon());
     }
 
     // ── gate（carapace / zsh ブリッジ共通の read-lock/有効化/timeout ゲート）──

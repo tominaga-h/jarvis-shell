@@ -80,6 +80,7 @@ use zsh_bridge::ZshBridgeProvider;
 pub use carapace::{
     format_external_binaries_display, format_external_summary, ExternalCompletionSettings,
 };
+pub use zsh_bridge::{new_shared_daemon_slot, shutdown_shared_daemon, SharedDaemonSlot};
 
 /// ColumnarMenu は description を持つ候補が 1 件でもあると全幅 1 カラムに
 /// 描画が変わってしまうため、候補数がこの件数を超えたら description を
@@ -104,12 +105,13 @@ impl JarvishCompleter {
         git_branch_commands: Arc<RwLock<Vec<String>>>,
         aliases: Arc<RwLock<HashMap<String, String>>>,
         external_completion: Arc<RwLock<ExternalCompletionSettings>>,
+        zsh_daemon: SharedDaemonSlot,
     ) -> Self {
         let mut providers: Vec<Box<dyn CompletionProvider>> = vec![
             Box::new(CommandProvider::new(Arc::clone(&aliases))),
             Box::new(GitProvider::new(git_branch_commands)),
         ];
-        providers.extend(external_provider_chain(&external_completion));
+        providers.extend(external_provider_chain(&external_completion, &zsh_daemon));
         providers.push(Box::new(PathProvider));
         Self { providers, aliases }
     }
@@ -132,6 +134,7 @@ impl JarvishCompleter {
 /// この関数自体を変更する必要はない。
 fn external_provider_chain(
     external_completion: &Arc<RwLock<ExternalCompletionSettings>>,
+    zsh_daemon: &SharedDaemonSlot,
 ) -> Vec<Box<dyn CompletionProvider>> {
     let order: Vec<ExternalKind> = external_completion
         .read()
@@ -145,9 +148,10 @@ fn external_provider_chain(
                 ExternalKind::Carapace => {
                     Box::new(CarapaceProvider::new(Arc::clone(external_completion)))
                 }
-                ExternalKind::Zsh => {
-                    Box::new(ZshBridgeProvider::new(Arc::clone(external_completion)))
-                }
+                ExternalKind::Zsh => Box::new(ZshBridgeProvider::new(
+                    Arc::clone(external_completion),
+                    Arc::clone(zsh_daemon),
+                )),
             }
         })
         .collect()
@@ -281,6 +285,7 @@ mod tests {
             Arc::new(RwLock::new(commands)),
             Arc::new(RwLock::new(HashMap::new())),
             disabled_external_completion(),
+            new_shared_daemon_slot(),
         )
     }
 
@@ -295,6 +300,7 @@ mod tests {
             Arc::new(RwLock::new(commands)),
             Arc::clone(&aliases),
             disabled_external_completion(),
+            new_shared_daemon_slot(),
         );
         (completer, aliases)
     }
@@ -1110,7 +1116,7 @@ mod tests {
             carapace::ExternalKind::Carapace,
             carapace::ExternalKind::Zsh,
         ]);
-        let chain = external_provider_chain(&settings);
+        let chain = external_provider_chain(&settings, &new_shared_daemon_slot());
         assert_eq!(
             chain.len(),
             2,
@@ -1139,7 +1145,7 @@ mod tests {
         );
 
         let shared = Arc::new(RwLock::new(settings));
-        let chain = external_provider_chain(&shared);
+        let chain = external_provider_chain(&shared, &new_shared_daemon_slot());
         // 実機に carapace/zsh が無い環境でも enabled リストにエントリさえ
         // あればチェーンには要素が積まれる（バイナリ有無はプロバイダ内部の
         // 実行時ガード — provide() 呼び出し時 — の責務）。
@@ -1149,7 +1155,7 @@ mod tests {
     #[test]
     fn external_provider_chain_none_yields_empty_chain() {
         let settings = disabled_external_completion();
-        let chain = external_provider_chain(&settings);
+        let chain = external_provider_chain(&settings, &new_shared_daemon_slot());
         assert!(
             chain.is_empty(),
             "external = \"none\" should produce an empty external provider chain"
@@ -1159,7 +1165,7 @@ mod tests {
     #[test]
     fn external_provider_chain_single_carapace_yields_one_entry() {
         let settings = fake_binary_settings(vec![carapace::ExternalKind::Carapace]);
-        let chain = external_provider_chain(&settings);
+        let chain = external_provider_chain(&settings, &new_shared_daemon_slot());
         assert_eq!(chain.len(), 1);
     }
 
@@ -1179,6 +1185,7 @@ mod tests {
             Arc::new(RwLock::new(commands)),
             Arc::new(RwLock::new(HashMap::new())),
             settings,
+            new_shared_daemon_slot(),
         );
 
         let (_tmpdir, path) = create_test_tree();
@@ -1392,7 +1399,7 @@ mod tests {
             ]
         );
         let shared = Arc::new(RwLock::new(settings));
-        let chain = external_provider_chain(&shared);
+        let chain = external_provider_chain(&shared, &new_shared_daemon_slot());
         assert_eq!(
             chain.len(),
             2,

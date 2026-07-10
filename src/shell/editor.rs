@@ -13,7 +13,7 @@ use reedline::{
     MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu,
 };
 
-use crate::cli::completer::{ExternalCompletionSettings, JarvishCompleter};
+use crate::cli::completer::{ExternalCompletionSettings, JarvishCompleter, SharedDaemonSlot};
 use crate::cli::highlighter::JarvisHighlighter;
 use crate::engine::classifier::InputClassifier;
 use crate::storage::BlackBoxHistory;
@@ -22,6 +22,11 @@ use crate::storage::BlackBoxHistory;
 /// reedline エディタを構築する。
 ///
 /// `db_path` は BlackBox と共有する `history.db` へのパス。
+///
+/// `zsh_daemon` は温存 zsh 補完デーモンのスロットを `Shell` と共有する
+/// `Arc`（Task A, #89）。`Shell` はこれを経由して reload/exit/restart など
+/// `provide()` が次に呼ばれるとは限らないライフサイクルイベント上でも
+/// デーモンを確実に shutdown できる。
 ///
 /// # Returns
 /// `(Reedline, bool)` — `bool` はコマンド履歴の読み込みに成功したかどうか。
@@ -33,11 +38,13 @@ pub fn build_editor(
     git_branch_commands: Arc<RwLock<Vec<String>>>,
     aliases: Arc<RwLock<HashMap<String, String>>>,
     external_completion: Arc<RwLock<ExternalCompletionSettings>>,
+    zsh_daemon: SharedDaemonSlot,
 ) -> (Reedline, bool) {
     let completer = Box::new(JarvishCompleter::new(
         git_branch_commands,
         aliases,
         external_completion,
+        zsh_daemon,
     ));
     let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
 
