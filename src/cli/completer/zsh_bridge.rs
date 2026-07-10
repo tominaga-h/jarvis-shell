@@ -6,9 +6,15 @@
 //! <script> -- <spans...>` を [`run_external_capped`] 経由で起動する。
 //! スクリプト内部では `zpty` で "内側の" zsh をさらに1本起動し compinit
 //! した上で completion widget を叩くため（`zsh.go` の呼び出し形と実地検証済み
-//! プロトコル — このファイル冒頭のドキュメント参照）、ハング時は
-//! プロセスグループ全体を kill する `run_external_capped` の group-kill が
-//! 特に重要（内側の zpty 子が孤児化して残るのを防ぐ）。
+//! プロトコル — このファイル冒頭のドキュメント参照）、ハング時の kill が
+//! 特に重要。ただし `zpty` が起動する内側の zsh は PTY 経由で**独自の
+//! プロセスグループ**を持つため、外側 zsh のプロセスグループだけを kill
+//! する単純な group-kill では内側 zsh に届かない（外側 zsh が SIGKILL で
+//! 即死しても、内側 zsh は自身の pgid のまま生き残りうる）。
+//! [`run_external_capped`] はこれに対処するため、タイムアウト時に外側 pid
+//! の子孫プロセス全体を事前収集し、通常のグループ kill に加えて各子孫
+//! （別 pgid のものを含む）にも個別に SIGKILL を送る
+//! （`src/cli/completer/external.rs` のモジュールドキュメント参照）。
 //!
 //! # 呼び出し形（`zsh.go` = carapace-bridge のリファレンス実装と一致）
 //! ```text

@@ -23,6 +23,22 @@
 //! し（`command.process_group(0)`）、タイムアウト時は `kill(-pid, SIGKILL)`
 //! （負の pid = プロセスグループ全体への送信）でグループごと確実に
 //! 終了させる。
+//!
+//! ## それでも届かないケース（zsh ブリッジの zpty 子）と対処
+//! グループ kill は「子プロセスが `fork` + `exec` だけで増やした孫」には
+//! 有効だが、**孫プロセス自身が新しいセッション/プロセスグループを作る**
+//! ケースには届かない。zsh ブリッジ（[`super::zsh_bridge`]）が使う
+//! `zpty` はまさにこれで、`zpty` が起動する内側の zsh は PTY 経由の
+//! 新しいプロセスグループのリーダーになり、外側 zsh の pgid には属さない。
+//! そのため `kill(-outer_pgid, SIGKILL)` は内側の zsh には届かず、内側の
+//! zsh が HUP/TERM を trap/ignore する補完関数を経由している場合、
+//! 通常は PTY 破棄に伴う SIGHUP で死ぬところが、それすら効かず永久に
+//! 孤児として残ってしまう可能性がある。これに対処するため、タイムアウト
+//! 時は kill 前に `pid` の子孫プロセス全体（[`collect_descendants`]、
+//! `ps -axo pid=,ppid=` を辿る再帰的な pgrep 相当の探索）を収集しておき、
+//! 通常のグループ kill に加えて収集済みの各子孫についても
+//! `kill(-descendant_pgid, SIGKILL)` と `kill(descendant_pid, SIGKILL)`
+//! の両方を送る（`zpty` 内側 zsh のような別 pgid のプロセスも確実に殺す）。
 
 use std::io;
 use std::path::Path;
@@ -41,7 +57,10 @@ use std::os::unix::process::CommandExt;
 ///   専用のプロセスグループのリーダーとして spawn されており、タイムアウト
 ///   時はそのプロセスグループ全体に SIGKILL を送る。直接の子プロセスだけ
 ///   でなく、子プロセスがさらに spawn した孫プロセス — carapace が実行する
-///   git 等 — も道連れで終了するため、孤児化して残り続けることはない）
+///   git 等 — も道連れで終了する。加えて、kill 前に子孫プロセス全体を
+///   収集しておき、`zpty` 内側の zsh のように独自の pgid を持つ子孫にも
+///   個別に SIGKILL を送る（モジュール冒頭ドキュメントの「それでも届かない
+///   ケース」参照）ため、孤児化して残り続けることはない）
 /// - プロセスの spawn 自体に失敗した（バイナリが存在しない等）
 /// - プロセスが非ゼロで終了した
 ///
@@ -104,10 +123,40 @@ pub(crate) fn run_external_capped(
             None
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            kill_pid(pid);
+            kill_tree(pid);
             None
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => None,
+    }
+}
+
+/// `pid` のプロセスグループ、および `pid` の子孫プロセス全体（別 pgid の
+/// ものを含む）を kill する。
+///
+/// 通常のグループ kill（`kill(-pid, SIGKILL)`）は `fork` だけで増えた
+/// 孫プロセスには効くが、`zpty` のように孫プロセス自身が新しい
+/// プロセスグループ/セッションを作るケースには届かない（モジュール冒頭
+/// ドキュメント参照）。そのため **kill する前に** `pid` の子孫プロセス
+/// 全体を [`collect_descendants`] で収集しておき、通常のグループ kill に
+/// 加えて収集済みの各子孫についても `kill(-descendant_pgid, SIGKILL)` と
+/// `kill(descendant_pid, SIGKILL)` の両方を送る。
+///
+/// 収集を kill より前に行うのは、kill 後に子孫プロセスツリーを辿ろうと
+/// すると reap 済みで `ps` から消えてしまい後追いできなくなるため（先に
+/// 収集 → kill の順序が必須）。
+#[cfg(unix)]
+fn kill_tree(pid: u32) {
+    // 子孫は kill する前に収集する（kill 後は ps から消えて辿れなくなる）。
+    let descendants = collect_descendants(pid);
+
+    kill_pid(pid);
+
+    for descendant in descendants {
+        // 別 pgid を持つ子孫（`zpty` 内側の zsh 等）に届かせるため、
+        // プロセスグループ全体への送信と pid 単体への送信の両方を試みる。
+        // どちらも ESRCH（既に死んでいる）は正常なレースとして無視する。
+        let _ = unsafe { libc::kill(-(descendant as libc::pid_t), libc::SIGKILL) };
+        let _ = unsafe { libc::kill(descendant as libc::pid_t, libc::SIGKILL) };
     }
 }
 
@@ -128,8 +177,71 @@ fn kill_pid(pid: u32) {
     }
 }
 
+/// `root` の子孫プロセス pid を全て収集する（`root` 自身は含まない）。
+///
+/// `ps -axo pid=,ppid=` の全プロセス一覧を1回取得し、`ppid -> pid` の
+/// 隣接リストを組んでから `root` から幅優先探索で辿る（`pgrep -P` を
+/// プロセス数分だけ繰り返し呼ぶより1回の `ps` 呼び出しで済み、かつ
+/// 追加クレート不要）。macOS の `ps` は BSD 系オプション（`-axo`）を
+/// サポートするためこの実装で動く。`ps` 自体の実行に失敗した場合は
+/// 空リストを返す（グループ kill だけで縮退運転する = 既存の group-kill
+/// のみだった時点から機能が退行することはない）。
+#[cfg(unix)]
+fn collect_descendants(root: u32) -> Vec<u32> {
+    let output = match Command::new("ps").args(["-axo", "pid=,ppid="]).output() {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            tracing::debug!(
+                "run_external_capped: ps exited with {:?} while collecting descendants of {root}",
+                output.status.code()
+            );
+            return Vec::new();
+        }
+        Err(err) => {
+            tracing::debug!(
+                "run_external_capped: failed to run ps while collecting descendants of {root}: {err}"
+            );
+            return Vec::new();
+        }
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    // ppid -> 直接の子 pid 一覧。
+    let mut children_of: std::collections::HashMap<u32, Vec<u32>> =
+        std::collections::HashMap::new();
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(pid_str), Some(ppid_str)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let (Ok(pid), Ok(ppid)) = (pid_str.parse::<u32>(), ppid_str.parse::<u32>()) else {
+            continue;
+        };
+        children_of.entry(ppid).or_default().push(pid);
+    }
+
+    // root から幅優先探索。プロセスツリーに循環は存在しない前提だが、
+    // 万一の異常データでの無限ループを避けるため訪問済み集合で防御する。
+    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
+    queue.push_back(root);
+    let mut descendants = Vec::new();
+    while let Some(current) = queue.pop_front() {
+        let Some(children) = children_of.get(&current) else {
+            continue;
+        };
+        for &child in children {
+            if visited.insert(child) {
+                descendants.push(child);
+                queue.push_back(child);
+            }
+        }
+    }
+    descendants
+}
+
 #[cfg(not(unix))]
-fn kill_pid(_pid: u32) {
+fn kill_tree(_pid: u32) {
     // Windows 等では子プロセス kill の別実装が必要になるが、Phase 2a の
     // 外部補完プロバイダは carapace / zsh ブリッジいずれも unix 前提のため
     // 現状は未実装（no-op）。
@@ -343,5 +455,249 @@ mod tests {
             Duration::from_secs(1),
         );
         assert_eq!(out, Some("bar".to_string()));
+    }
+
+    /// `collect_descendants` の素朴な2階層ツリーでの単体テスト。
+    ///
+    /// `sh -c 'sleep 30 & echo $! >> <tempfile>; sleep 30 & echo $! >>
+    /// <tempfile>; wait'` を直接 spawn し（`process_group` は設定しない —
+    /// 収集ロジック自体は pgid に依存せず ppid だけを辿ることの確認も兼ねる）、
+    /// その pid を root として `collect_descendants` を呼ぶ。root の直接の
+    /// 子である 2 本の `sleep 30` の pid が両方とも含まれることを確認する。
+    #[cfg(unix)]
+    #[test]
+    fn collect_descendants_finds_two_level_tree() {
+        let tempfile = std::env::temp_dir().join(format!(
+            "jarvish-external-descendants-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let tempfile_path = tempfile.to_str().unwrap().to_string();
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c".to_string(),
+                format!(
+                    "sleep 30 & echo $! >> {tempfile_path}; \
+                     sleep 30 & echo $! >> {tempfile_path}; \
+                     wait"
+                ),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = command.spawn().expect("failed to spawn /bin/sh");
+        let root_pid = child.id();
+        std::thread::spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+        });
+
+        // 子2本が実際に spawn されて pid ファイルへ書き込まれ、`ps` にも
+        // 載るまでポーリングする。
+        let mut expected_pids: Vec<u32> = Vec::new();
+        for _ in 0..40 {
+            if let Ok(contents) = std::fs::read_to_string(&tempfile) {
+                let pids: Vec<u32> = contents
+                    .lines()
+                    .filter_map(|line| line.trim().parse::<u32>().ok())
+                    .collect();
+                if pids.len() == 2 {
+                    expected_pids = pids;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_file(&tempfile);
+        assert_eq!(
+            expected_pids.len(),
+            2,
+            "expected two child pids from the sh script to appear in the tempfile"
+        );
+
+        let descendants = collect_descendants(root_pid);
+
+        // 後始末: root プロセスグループ全体を kill しておく（テスト終了後に
+        // sleep 30 が残らないようにする。process_group を設定していないため
+        // ここでは kill_tree ではなく素朴に SIGKILL する）。
+        unsafe {
+            libc::kill(root_pid as libc::pid_t, libc::SIGKILL);
+            for pid in &expected_pids {
+                libc::kill(*pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+
+        for pid in &expected_pids {
+            assert!(
+                descendants.contains(pid),
+                "collect_descendants({root_pid}) = {descendants:?} should contain child pid {pid}"
+            );
+        }
+    }
+
+    /// zsh ブリッジの `zpty` 子が **別プロセスグループ** に属していても、
+    /// タイムアウト時の kill が実際にそこまで届いて殺し切ることの証明テスト。
+    ///
+    /// 再現: `zsh -c 'zmodload zsh/zpty; zpty w zsh <script>; while zpty -r w
+    /// line; do; done'`（`<script>` は HUP/TERM を trap して無視し 30秒
+    /// sleep するだけの一時スクリプトファイル — インライン `-c '...'` は
+    /// ネストした引用符で壊れやすいためファイル経由にしている）を
+    /// `run_external_capped` 経由で短いタイムアウトで実行する。`zpty` が
+    /// 起動する内側の zsh（HUP/TERM を trap で無視）は PTY 経由で外側 zsh
+    /// とは異なる pgid を持つ。まず内側 zsh 自身に自分の pid/pgid を
+    /// 一時ファイルへ書き出させて「outer の pgid とは実際に異なる」ことを
+    /// テスト内で確認したうえで、タイムアウト後にその pid が実際に ESRCH
+    /// になる（=死んでいる）ことをポーリングで確認する。outer 側だけを
+    /// グループ kill する旧実装ではこの内側 zsh は生き残ってしまう
+    /// （本 Fix の回帰検知テスト）。
+    #[cfg(unix)]
+    #[test]
+    fn killed_on_timeout_reaches_zpty_child_in_different_process_group() {
+        let Ok(zsh) = which::which("zsh") else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let tempfile =
+            std::env::temp_dir().join(format!("jarvish-external-zpty-child-test-{unique}"));
+        let tempfile_path = tempfile.to_str().unwrap().to_string();
+
+        // 内側 zsh に実行させるスクリプトは一時ファイルに書いて `zsh
+        // <scriptfile>` の形で呼ぶ（`zpty w zsh -c '<inline>'` に直接
+        // 埋め込むと、スクリプト内の `'` が外側の `zpty -w`/シェル引用と
+        // 衝突して壊れやすいため）。内側 zsh 自身の $$ (pid) と `ps -o
+        // pgid=` で調べた自分の pgid をマーカーファイルへ即座に書き出して
+        // から、HUP/TERM を trap して無視し、30秒 sleep する。
+        let inner_script_path =
+            std::env::temp_dir().join(format!("jarvish-external-zpty-child-inner-{unique}.zsh"));
+        std::fs::write(
+            &inner_script_path,
+            format!(
+                "print -r -- \"pid=$$ pgid=$(ps -o pgid= -p $$ | tr -d ' ')\" > {tempfile_path}\n\
+                 trap '' HUP TERM\n\
+                 sleep 30\n"
+            ),
+        )
+        .expect("failed to write inner zpty script");
+        let inner_script_path_str = inner_script_path.to_str().unwrap().to_string();
+
+        // outer zsh は zpty 経由で `zsh <inner_script_path>` を起動する。
+        let script = format!(
+            "zmodload zsh/zpty; zpty w zsh {inner_script_path_str}; while zpty -r w line; do :; done"
+        );
+
+        // outer zsh (= run_external_capped が spawn するプロセス) 自身の
+        // pgid は process_group(0) により pid と一致する。run_external_capped
+        // は pid を外部に返さない設計のため、ここでは同じ spawn ロジックを
+        // 直接再現して outer_pid（= outer_pgid）を取得する。
+        let mut command = Command::new(&zsh);
+        command
+            .args(["-c".to_string(), script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let child = command.spawn().expect("failed to spawn outer zsh");
+        let outer_pid = child.id();
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let output = child.wait_with_output();
+            let _ = tx.send(output);
+        });
+
+        let timed_out = matches!(
+            rx.recv_timeout(Duration::from_millis(400)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        assert!(
+            timed_out,
+            "the wrapping zsh should still be running at 400ms (zpty setup takes time)"
+        );
+
+        // 内側 zsh が pid/pgid ファイルを書き終えるまで軽くポーリングする
+        // （outer zsh の zpty 起動 + fork のタイミングは非同期）。
+        let mut inner_pid_pgid: Option<(i32, i32)> = None;
+        for _ in 0..40 {
+            if let Ok(contents) = std::fs::read_to_string(&tempfile) {
+                if let Some(parsed) = parse_pid_pgid_marker(&contents) {
+                    inner_pid_pgid = Some(parsed);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_file(&tempfile);
+        let _ = std::fs::remove_file(&inner_script_path);
+
+        let Some((inner_pid, inner_pgid)) = inner_pid_pgid else {
+            // 環境によっては zpty 自体が使えない（sandbox 制限等）ことが
+            // あるため、マーカーファイルが一切書かれなかった場合はテスト
+            // 環境の制約とみなして skip する（false negative を避けるため
+            // ログには残し、outer 側は掃除しておく）。
+            kill_tree(outer_pid);
+            eprintln!(
+                "skipping: inner zsh never wrote its pid/pgid marker (zpty unavailable in this env?)"
+            );
+            return;
+        };
+
+        // 前提の確認: 内側 zsh の pgid は outer zsh の pgid（= outer_pid、
+        // process_group(0) により pid と一致）とは異なる別プロセスグループで
+        // あること。これが同じなら旧実装の group-kill でも死ぬはずで、この
+        // テストが証明したいシナリオになっていない。
+        assert_ne!(
+            inner_pgid, outer_pid as i32,
+            "inner zpty child must be in a DIFFERENT process group than the outer zsh \
+             for this test to prove anything; outer_pid(=outer_pgid)={outer_pid}, inner_pgid={inner_pgid}"
+        );
+
+        // ここで本番の kill_tree ロジックを、収集した outer_pid に対して
+        // 直接呼び出す（run_external_capped 内部のタイムアウト分岐と同じ
+        // コードパス）。
+        kill_tree(outer_pid);
+
+        // kill 後、内側 zsh (HUP/TERM を trap で無視) が実際に死んでいるかを
+        // ポーリングで確認する。生きていれば kill(pid, 0) は 0 を返し続け、
+        // 死んでいれば ESRCH で -1 を返す。
+        let mut alive = true;
+        for _ in 0..40 {
+            let ret = unsafe { libc::kill(inner_pid as libc::pid_t, 0) };
+            if ret == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                alive = false;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(
+            !alive,
+            "zpty inner zsh (pid {inner_pid}, pgid {inner_pgid}, trapping HUP/TERM, \
+             different pgid than outer {outer_pid}) should be dead after kill_tree, \
+             but kill(pid, 0) still succeeds"
+        );
+    }
+
+    /// `pid=<pid> pgid=<pgid>` 形式のマーカー行から (pid, pgid) を取り出す。
+    #[cfg(unix)]
+    fn parse_pid_pgid_marker(contents: &str) -> Option<(i32, i32)> {
+        let line = contents.lines().next()?;
+        let mut fields = line.split_whitespace();
+        let pid = fields.next()?.strip_prefix("pid=")?.parse::<i32>().ok()?;
+        let pgid = fields.next()?.strip_prefix("pgid=")?.parse::<i32>().ok()?;
+        Some((pid, pgid))
     }
 }
