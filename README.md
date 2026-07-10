@@ -222,6 +222,19 @@ Jarvish's Tab completion can bridge to [carapace](https://github.com/carapace-sh
 - **Hot-reload**: `external` and `external_timeout_ms` are re-read by the `source` builtin, and the carapace binary is re-detected (via `which`) on every reload. This means you can `brew install carapace` mid-session and run `source ~/.config/jarvish/config.toml` to enable it immediately, without restarting Jarvish.
 - **Widening coverage**: carapace also supports bridging to real shell completion functions (e.g. zsh's `compsys`). Export `CARAPACE_BRIDGES` (e.g. `CARAPACE_BRIDGES = "zsh"`) in the `[export]` section of `config.toml` to pull in completions that carapace doesn't natively ship.
 
+### zsh Completion Bridge
+
+If [carapace](#external-completion-carapace) doesn't have candidates for a command, Jarvish falls back to a built-in zsh bridge: it spawns a real zsh in the background and asks its native completion system (`compsys`, the `_*` functions) for suggestions. This means any completion function that works in zsh — including ones from third-party packages — can work in Jarvish too, without carapace support.
+
+- **Bridge zshrc**: The bridge zsh sources `~/.config/jarvish/zsh-bridge/.zshrc` instead of your real `~/.zshrc`, so it stays isolated from your interactive shell setup. Jarvish auto-generates this file (with commented examples) the first time the bridge runs, if it doesn't already exist — it is never overwritten afterward, so your edits are safe.
+- **Adding completions**: Write ordinary zsh syntax in the bridge zshrc. For example, to pull in the [`zsh-completions`](https://github.com/zsh-users/zsh-completions) project installed via Homebrew:
+  ```sh
+  # ~/.config/jarvish/zsh-bridge/.zshrc
+  fpath=(/opt/homebrew/share/zsh-completions $fpath)
+  ```
+  You can also add `compdef` lines to bind a completion function to a specific command, just as you would in a normal `~/.zshrc`.
+- **Timeout + fallback**: Like carapace, every bridge invocation is capped by a timeout (shared with `external_timeout_ms`, with a higher floor to accommodate zsh's `compinit` startup cost). If the bridge hangs, errors, or returns nothing, Jarvish falls back to built-in path completion — Tab never blocks the UI.
+
 ## 🏗️ Architecture
 
 Jarvish is composed of four highly modular core components:

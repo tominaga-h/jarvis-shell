@@ -222,6 +222,19 @@ Jarvish の Tab 補完は [carapace](https://github.com/carapace-sh/carapace-bin
 - **ホットリロード**: `external` と `external_timeout_ms` は `source` ビルトインで再読み込みされ、そのたびに carapace バイナリの再検出（`which`）も行われます。つまりセッション中に `brew install carapace` した後、`source ~/.config/jarvish/config.toml` を実行するだけで、再起動なしに即座に有効化できます。
 - **カバレッジの拡大**: carapace は実際のシェル補完関数（zsh の `compsys` など）へのブリッジもサポートしています。`config.toml` の `[export]` セクションで `CARAPACE_BRIDGES`（例: `CARAPACE_BRIDGES = "zsh"`）を設定すると、carapace が標準搭載していない補完も取り込めます。
 
+### zsh 補完ブリッジ
+
+[carapace](#外部補完連携-carapace) が対象コマンドの候補を持っていない場合、Jarvish はビルトインの zsh ブリッジにフォールバックします。バックグラウンドで実際の zsh を起動し、その本物の補完システム（`compsys`、`_*` 補完関数群）に候補を尋ねます。つまり、zsh 上で動く補完関数であれば（サードパーティ製のものも含めて）、carapace の対応有無に関わらず Jarvish でも使えます。
+
+- **ブリッジ用 zshrc**: ブリッジ zsh は、あなたの実 `~/.zshrc` ではなく `~/.config/jarvish/zsh-bridge/.zshrc` を読み込みます。そのため対話シェルの設定から隔離されています。このファイルが存在しない場合、ブリッジ初回実行時にコメント付きテンプレートとして Jarvish が自動生成します — 以後は一切上書きされないため、自分で加えた変更は安全です。
+- **補完の追加方法**: ブリッジ用 zshrc には普通の zsh 構文がそのまま書けます。例えば Homebrew でインストールした [`zsh-completions`](https://github.com/zsh-users/zsh-completions) を取り込むには:
+  ```sh
+  # ~/.config/jarvish/zsh-bridge/.zshrc
+  fpath=(/opt/homebrew/share/zsh-completions $fpath)
+  ```
+  通常の `~/.zshrc` と同じように `compdef` 行を追加して、特定コマンドに補完関数を紐付けることもできます。
+- **タイムアウト + フォールバック**: carapace と同様、各ブリッジ呼び出しはタイムアウトで保護されています（`external_timeout_ms` と共有しつつ、zsh の `compinit` 起動コストを見込んだ下限値を設けています）。ブリッジがハング・エラー・候補なしを返した場合は、ビルトインのパス補完へフォールバックします — Tab キーが UI をブロックすることはありません。
+
 ## 🏗️ アーキテクチャ
 
 Jarvish は、高度にモジュール化された4つのコアコンポーネントで構成されています。

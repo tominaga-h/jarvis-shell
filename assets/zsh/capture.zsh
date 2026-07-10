@@ -7,8 +7,10 @@
 
 zmodload zsh/zpty || { echo 'error: missing module zsh/zpty' >&2; exit 1 }
 
-# spawn shell
-zpty z zsh -f -i
+# jarvish: drop -f (NO_RCS) so the inner zsh sources startup files, allowing
+# ZDOTDIR (set by the outer jarvish process; see zsh_bridge.rs) to route it
+# to jarvish's own bridge .zshrc instead of the user's real ~/.zshrc.
+zpty z zsh -i
 
 # line buffer for pty output
 local line

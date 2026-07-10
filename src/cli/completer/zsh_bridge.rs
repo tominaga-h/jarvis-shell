@@ -28,8 +28,33 @@
 //! 2. `zsh.go` のバックスラッシュ unquote テーブルを適用
 //! 3. 最初の `" -- "` で `value` / `description` に分割（区切りなしなら
 //!    description は `None`）
+//!
+//! # ユーザー拡張点（zsh-bridge ブリッジディレクトリ、Task 2b.2）
+//! `capture.zsh` は `zpty z zsh -f -i` で内側の zsh を起動していたが
+//! （vendor 元のまま）、`-f`（`NO_RCS`）は zshrc を一切読ませないフラグ
+//! のため、これではユーザーが `fpath` に `zsh-completions` を追加したり
+//! `compdef` を書いたりする余地がない。そこで jarvish 側で2点を組み合わせる:
+//!
+//! 1. `assets/zsh/capture.zsh` の当該行を `-f` を落として `zpty z zsh -i`
+//!    に変更（`# jarvish:` コメント付き、vendor ファイルの他の部分は無改変）。
+//! 2. **外側**の `zsh --no-rcs -c <script> -- ...` プロセスの環境変数に
+//!    `ZDOTDIR=<bridge dir>` を設定する（[`run_external_capped`] の
+//!    `envs` 引数経由）。`ZDOTDIR` は子プロセスに継承されるため、`zpty`
+//!    が spawn する内側の対話 zsh もこれを引き継ぎ、`$ZDOTDIR/.zshrc`
+//!    （= [`bridge_zshrc_path`]）を source する。
+//!
+//! 結果として内側 zsh はユーザーの実 `~/.zshrc` ではなく jarvish 専用の
+//! ブリッジ zshrc を読む（carapace の `~/.config/carapace/bridge/zsh` と
+//! 同じ設計思想）。**[`ensure_bridge_zshrc`] は毎回の `provide()` 呼び出し
+//! で必ずブリッジディレクトリと `.zshrc` の存在を保証してから spawn する**
+//! ため、`ZDOTDIR` が万一未設定になっても実 `~/.zshrc` へ漏れることはない
+//! （zsh は `ZDOTDIR` 未設定時 `$HOME` を使うが、`ZDOTDIR` は常に明示設定
+//! される — この関数を経由しない spawn 経路が生まれない限り安全）。
+//! `-f` を落としたことで `/etc/zshrc` は読まれるようになる（carapace-bridge
+//! も同じ挙動）。
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use super::carapace::{ExternalCompletionSettings, ExternalMode};
@@ -38,10 +63,80 @@ use super::external::run_external_capped;
 use super::provider::{Candidate, CompletionProvider};
 
 /// zsh ブリッジ本体（`assets/zsh/capture.zsh` を vendor したもの）。
-///
-/// Task 2b.2 で spawn 行にブリッジ用 zshrc の source 呼び出しを追加する
-/// 予定のため、このファイルでは一切改変しない。
 const CAPTURE_SCRIPT: &str = include_str!("../../../assets/zsh/capture.zsh");
+
+/// ブリッジ用 `.zshrc` の初回生成テンプレート。
+///
+/// fpath 追加や `compdef` の書き方をコメントで示す最小限のサンプル。
+/// ユーザーが自由に書き換えてよい（jarvish は既存ファイルを上書きしない —
+/// [`ensure_bridge_zshrc`] 参照）。
+const BRIDGE_ZSHRC_TEMPLATE: &str = r#"# jarvish zsh completion bridge — ~/.config/jarvish/zsh-bridge/.zshrc
+#
+# このファイルは jarvish の Tab 補完が内部で起動する "ブリッジ用" zsh
+# だけが読み込みます。あなたの通常の ~/.zshrc には一切影響しません。
+# This file is sourced only by the internal zsh jarvish spawns for Tab
+# completion. It has no effect on your normal ~/.zshrc.
+#
+# ここに書いた fpath 追加や compdef は、本物の zsh 構文でそのまま使えます。
+# Anything you write here (fpath additions, compdef, zstyle, ...) uses real
+# zsh syntax — no jarvish-specific DSL to learn.
+
+# 例1: Homebrew でインストールした zsh-completions を fpath に追加する
+# Example: add Homebrew's zsh-completions to fpath
+#   brew install zsh-completions
+# fpath=(/opt/homebrew/share/zsh-completions $fpath)
+
+# 例2: 自作/追加の補完関数を任意のディレクトリから読み込む
+# Example: load custom completion functions from your own directory
+# fpath=(~/.zsh/completions $fpath)
+
+# 例3: 特定コマンドに補完関数を明示的に紐付ける (compdef)
+# Example: bind a completion function to a command explicitly
+# compdef _git my-git-wrapper
+"#;
+
+/// ブリッジディレクトリ名（`~/.config/jarvish/` 配下）。
+const BRIDGE_DIR_NAME: &str = "zsh-bridge";
+
+/// ブリッジディレクトリの `.zshrc` ファイル名。
+const BRIDGE_ZSHRC_NAME: &str = ".zshrc";
+
+/// ブリッジディレクトリのパスを返す（`~/.config/jarvish/zsh-bridge/`）。
+///
+/// `HOME` 未設定環境（テスト等）では `.` 起点にフォールバックする —
+/// `config::config_path` と同じ方針。
+pub(super) fn bridge_dir() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".config/jarvish")
+        .join(BRIDGE_DIR_NAME)
+}
+
+/// ブリッジディレクトリ直下の `.zshrc` パス。
+fn bridge_zshrc_path(dir: &Path) -> PathBuf {
+    dir.join(BRIDGE_ZSHRC_NAME)
+}
+
+/// ブリッジディレクトリと `.zshrc` の存在を保証する。
+///
+/// ディレクトリが無ければ作成し、`.zshrc` が無ければテンプレートを書き込む。
+/// **既存の `.zshrc` は絶対に上書きしない**（ユーザーが書いた fpath/compdef
+/// を保護するため）。`provide()` はこれを spawn 直前に毎回呼ぶ — `ZDOTDIR`
+/// を設定してもディレクトリ自体が無ければ zsh は `$HOME` にフォールバック
+/// しうる（zsh の `ZDOTDIR` 挙動）ため、常に先に存在を保証することで
+/// 「ユーザーの実 `~/.zshrc` が意図せず読まれる」事故を防ぐ。
+///
+/// I/O 失敗（権限等）は `Err` を返し、呼び出し側は補完をあきらめて
+/// フォールバックする（既存の graceful degradation 方針と同じ）。
+fn ensure_bridge_zshrc(dir: &Path) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    let zshrc = bridge_zshrc_path(dir);
+    if !zshrc.exists() {
+        fs::write(&zshrc, BRIDGE_ZSHRC_TEMPLATE)?;
+    }
+    Ok(zshrc)
+}
 
 /// zsh ブリッジの有効化フラグ。
 ///
@@ -73,6 +168,11 @@ pub(super) struct ZshBridgeProvider {
     /// テスト用に zsh の場所を差し替えられるようにするフック。
     /// 本番は `None` で `which::which("zsh")` を都度引く。
     zsh_override: Option<PathBuf>,
+    /// テスト用にブリッジディレクトリ（`ZDOTDIR` に渡す先）を差し替える
+    /// フック。本番は `None` で [`bridge_dir`]（`~/.config/jarvish/zsh-bridge/`）
+    /// を使う。E2E テストではユーザーの実 `~/.config` を汚さないよう
+    /// tempdir を注入する。
+    bridge_dir_override: Option<PathBuf>,
 }
 
 impl ZshBridgeProvider {
@@ -80,6 +180,7 @@ impl ZshBridgeProvider {
         Self {
             settings,
             zsh_override: None,
+            bridge_dir_override: None,
         }
     }
 
@@ -88,6 +189,20 @@ impl ZshBridgeProvider {
         Self {
             settings,
             zsh_override: Some(zsh),
+            bridge_dir_override: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_zsh_binary_and_bridge_dir(
+        settings: Arc<RwLock<ExternalCompletionSettings>>,
+        zsh: PathBuf,
+        bridge_dir: PathBuf,
+    ) -> Self {
+        Self {
+            settings,
+            zsh_override: Some(zsh),
+            bridge_dir_override: Some(bridge_dir),
         }
     }
 
@@ -96,6 +211,10 @@ impl ZshBridgeProvider {
             return Some(path.clone());
         }
         which::which("zsh").ok()
+    }
+
+    fn resolve_bridge_dir(&self) -> PathBuf {
+        self.bridge_dir_override.clone().unwrap_or_else(bridge_dir)
     }
 }
 
@@ -138,7 +257,22 @@ impl CompletionProvider for ZshBridgeProvider {
         ];
         args.extend(spans);
 
-        let stdout = run_external_capped(&zsh, &args, &[], timeout)?;
+        // ブリッジディレクトリ + テンプレート .zshrc の存在を保証してから
+        // ZDOTDIR で渡す。存在保証を spawn の直前に必ず行うことで、
+        // ZDOTDIR が指すディレクトリが空だったために zsh が $HOME に
+        // フォールバックし、ユーザーの実 ~/.zshrc を読んでしまう事故を防ぐ
+        // （モジュール冒頭ドキュメント参照）。
+        let bridge_dir = self.resolve_bridge_dir();
+        if ensure_bridge_zshrc(&bridge_dir).is_err() {
+            tracing::debug!("zsh bridge: failed to prepare bridge dir at {bridge_dir:?}, skipping");
+            return None;
+        }
+        let envs = [(
+            "ZDOTDIR".to_string(),
+            bridge_dir.to_string_lossy().into_owned(),
+        )];
+
+        let stdout = run_external_capped(&zsh, &args, &envs, timeout)?;
 
         let candidates = parse_capture_output(&stdout);
         if candidates.is_empty() {
@@ -525,5 +659,119 @@ mod tests {
         let read = settings.read().unwrap();
         let effective = read.timeout.max(Duration::from_millis(MIN_TIMEOUT_MS));
         assert!(effective >= Duration::from_millis(MIN_TIMEOUT_MS));
+    }
+
+    // ── ブリッジディレクトリ / .zshrc テンプレート ──
+
+    #[test]
+    fn bridge_dir_is_under_config_jarvish() {
+        let dir = bridge_dir();
+        // "~/.config/jarvish/zsh-bridge" で終わる（HOME 有無どちらでも）。
+        assert!(dir.ends_with(".config/jarvish/zsh-bridge"));
+    }
+
+    #[test]
+    fn ensure_bridge_zshrc_creates_dir_and_template_when_absent() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let bridge = tmpdir.path().join("zsh-bridge");
+        assert!(!bridge.exists());
+
+        let zshrc = ensure_bridge_zshrc(&bridge).unwrap();
+
+        assert!(bridge.is_dir());
+        assert!(zshrc.is_file());
+        let contents = fs::read_to_string(&zshrc).unwrap();
+        assert!(contents.contains("fpath"));
+        assert!(contents.contains("compdef"));
+    }
+
+    #[test]
+    fn ensure_bridge_zshrc_does_not_overwrite_existing_file() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let bridge = tmpdir.path().join("zsh-bridge");
+        fs::create_dir_all(&bridge).unwrap();
+        let zshrc = bridge_zshrc_path(&bridge);
+        fs::write(&zshrc, "# user customized content\n").unwrap();
+
+        ensure_bridge_zshrc(&bridge).unwrap();
+
+        let contents = fs::read_to_string(&zshrc).unwrap();
+        assert_eq!(contents, "# user customized content\n");
+    }
+
+    #[test]
+    fn ensure_bridge_zshrc_is_idempotent_across_calls() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let bridge = tmpdir.path().join("zsh-bridge");
+
+        ensure_bridge_zshrc(&bridge).unwrap();
+        let first = fs::read_to_string(bridge_zshrc_path(&bridge)).unwrap();
+        ensure_bridge_zshrc(&bridge).unwrap();
+        let second = fs::read_to_string(bridge_zshrc_path(&bridge)).unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    // ── E2E: ユーザー定義 zsh 補完がブリッジ経由で反映されるか ──
+    //
+    // 実際に capture.zsh の -f 除去 + ZDOTDIR の配線が機能していることを
+    // 実地で証明する。temp ZDOTDIR に .zshrc を置き、そこから temp fpath
+    // ディレクトリ上のカスタム補完関数 `_jarvishtestcmd`（固定ワードリストを
+    // compadd するだけ）を読み込ませ、`jarvishtestcmd <Tab>` でその固定
+    // ワードが候補に出ることを確認する。これが失敗する = ZDOTDIR 配線か
+    // -f 除去のどちらかが壊れている、という決定的な回帰検知になる。
+    #[test]
+    #[serial]
+    fn e2e_user_zshrc_fpath_completion_is_used_via_zdotdir() {
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let zdotdir = tmpdir.path().join("zdotdir");
+        let fpath_dir = tmpdir.path().join("completions");
+        fs::create_dir_all(&zdotdir).unwrap();
+        fs::create_dir_all(&fpath_dir).unwrap();
+
+        // ユーザー定義の補完関数: 固定ワードリストを compadd する。
+        fs::write(
+            fpath_dir.join("_jarvishtestcmd"),
+            "#compdef jarvishtestcmd\ncompadd -- alpha beta gamma\n",
+        )
+        .unwrap();
+
+        // ブリッジ .zshrc: fpath に上のディレクトリを追加するだけの
+        // ユーザー拡張例（README の fpath 例と同じ形）。
+        fs::write(
+            zdotdir.join(".zshrc"),
+            format!("fpath=({} $fpath)\n", fpath_dir.display()),
+        )
+        .unwrap();
+
+        let settings = Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
+            &CompletionConfig {
+                external: "auto".to_string(),
+                external_timeout_ms: 3000,
+                ..CompletionConfig::default()
+            },
+        )));
+        let provider =
+            ZshBridgeProvider::with_zsh_binary_and_bridge_dir(settings, zsh, zdotdir.clone());
+
+        let line = "jarvishtestcmd ";
+        let ctx = super::super::context::extract_context(line, line.len());
+        let result = provider.provide(&ctx);
+
+        let candidates = result.expect("zsh bridge should return candidates from user fpath");
+        let values: Vec<&str> = candidates.iter().map(|c| c.value.as_str()).collect();
+        assert!(values.contains(&"alpha"), "got {values:?}");
+        assert!(values.contains(&"beta"), "got {values:?}");
+        assert!(values.contains(&"gamma"), "got {values:?}");
+
+        // ensure_bridge_zshrc がユーザーの .zshrc を上書きしていないこと
+        // （E2E 経路でも既存ファイル保護が効くことの確認）。
+        let contents = fs::read_to_string(zdotdir.join(".zshrc")).unwrap();
+        assert!(contents.contains("fpath=("));
     }
 }
