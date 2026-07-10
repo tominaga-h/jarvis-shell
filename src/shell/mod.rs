@@ -24,7 +24,9 @@ use std::sync::atomic::AtomicBool as StaticAtomicBool;
 static RESTART_FLAG: StaticAtomicBool = StaticAtomicBool::new(false);
 
 use crate::ai::{ConversationState, JarvisAI};
-use crate::cli::completer::{format_external_summary, ExternalCompletionSettings};
+use crate::cli::completer::{
+    format_external_binaries_display, format_external_summary, ExternalCompletionSettings,
+};
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 use crate::cli::prompt::{ShellPrompt, EXIT_CODE_NONE};
 use crate::config::JarvishConfig;
@@ -288,10 +290,8 @@ impl Shell {
         // 外部補完（carapace / zsh ブリッジ）は which() の再検出込みで反映する。
         // これによりセッション中に carapace/zsh をインストールしてから
         // `source` するだけで再起動なしに有効化できる。
-        let resolved_external = ExternalCompletionSettings::resolve(&config.completion);
-        if let Ok(mut ext) = self.external_completion.write() {
-            *ext = resolved_external.clone();
-        }
+        let resolved_external =
+            reload_external_completion(&self.external_completion, &config.completion);
 
         // [startup] を反映（再実行はしない、値の更新のみ）
         self.startup_commands = config.startup.commands.clone();
@@ -307,22 +307,7 @@ impl Shell {
         // 解決済みの優先順に沿って、各プロバイダのバイナリパス（未検出なら
         // "not found"）を1行ずつ列挙する。`enabled` が空（external = "none"
         // または全プロバイダ無効化）の場合は空行なし。
-        let external_binaries_display = if resolved_external.enabled.is_empty() {
-            String::new()
-        } else {
-            resolved_external
-                .enabled
-                .iter()
-                .map(|entry| {
-                    let binary_display = entry
-                        .binary
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "not found".to_string());
-                    format!("\x20\x20\x20 {}: {binary_display}\n", entry.kind)
-                })
-                .collect::<String>()
-        };
+        let external_binaries_display = format_external_binaries_display(&resolved_external);
         let summary = format!(
             "Loaded {}\n\
              \x20 [ai]\n\
@@ -625,6 +610,27 @@ impl Shell {
     }
 }
 
+/// `[completion]` の外部補完設定を再解決し、共有 `Arc<RwLock<_>>` へ
+/// 書き込む。`Shell::reload_config`（`source` ビルトイン）が呼び出す
+/// 「resolve + 共有 Arc への書き込み」ステップを切り出したもの（D1, #89
+/// レビュー指摘）。
+///
+/// `Shell` 全体を構築せずに `Arc<RwLock<ExternalCompletionSettings>>` と
+/// `CompletionConfig` だけでテストできるようにする狙い。書き込み後の
+/// 解決結果（reload 後の状態）をそのまま返すため、呼び出し側
+/// （`reload_config`）はサマリー表示にこれを使い、`Arc` の中身と表示が
+/// 常に同じ「reload 後」の値を参照していることを保証する。
+fn reload_external_completion(
+    external_completion: &Arc<RwLock<ExternalCompletionSettings>>,
+    completion_config: &crate::config::CompletionConfig,
+) -> ExternalCompletionSettings {
+    let resolved = ExternalCompletionSettings::resolve(completion_config);
+    if let Ok(mut ext) = external_completion.write() {
+        *ext = resolved.clone();
+    }
+    resolved
+}
+
 /// exec_restart 用のコマンド情報を構築する。
 ///
 /// 現在のバイナリパスと引数を取得する。テスト可能な純粋関数として分離。
@@ -751,5 +757,94 @@ mod tests {
         assert!(msg.unwrap().contains("v2.0.0"));
         // 読み取り後は削除されている
         assert!(update::check_update_flag().is_none());
+    }
+
+    // ── reload_external_completion（`reload_config` の resolve + Arc 書き込みステップ）──
+    //
+    // D1 (#89): `Shell` 全体は構築せず、`Shell::new` / `reload_config` と
+    // 同じ「resolve() → 共有 Arc への書き込み」経路のみを直接シミュレートする
+    // （`carapace.rs` の hot-reload テストと同じ方針）。あわせて、書き込み後の
+    // Arc の中身が、`format_external_binaries_display` の表示にも
+    // post-reload の値として反映されることを検証する（pre-reload の値が
+    // 混入していないことの証明）。
+
+    use crate::cli::completer::format_external_binaries_display;
+    use crate::config::{CompletionConfig, ExternalSetting};
+
+    #[test]
+    fn reload_external_completion_updates_shared_arc_from_none_to_disabled_stays_empty() {
+        let initial = ExternalCompletionSettings::resolve(&CompletionConfig {
+            external: ExternalSetting::Single("none".to_string()),
+            ..CompletionConfig::default()
+        });
+        let shared = Arc::new(RwLock::new(initial));
+
+        let new_config = CompletionConfig {
+            external: ExternalSetting::Single("none".to_string()),
+            external_timeout_ms: 777,
+            ..CompletionConfig::default()
+        };
+        let returned = reload_external_completion(&shared, &new_config);
+
+        // 戻り値と Arc の中身が一致し、どちらも新しい timeout を反映している。
+        assert_eq!(returned.timeout, std::time::Duration::from_millis(777));
+        let after = shared.read().unwrap();
+        assert_eq!(after.timeout, std::time::Duration::from_millis(777));
+        assert!(after.enabled.is_empty());
+    }
+
+    #[test]
+    fn reload_external_completion_display_reflects_post_reload_state_not_pre_reload() {
+        // reload 前は `external = "none"`（enabled 空、display も空）。
+        // reload 後は `external = "carapace"` に切り替える —
+        // `resolve_single_kind` は明示指定の場合、バイナリが未検出でも
+        // エントリ自体は `binary = None`（"not found" 表示）で残すため、
+        // 実機に carapace が無い CI 環境でも enabled は非空になり、
+        // display が確定的に "not found" を含む行を返す
+        // （carapace.rs の `resolve_carapace_string_missing_binary_disables_without_panic`
+        // と同じ「明示指定は残る」契約に依拠）。
+        let initial = ExternalCompletionSettings::resolve(&CompletionConfig {
+            external: ExternalSetting::Single("none".to_string()),
+            ..CompletionConfig::default()
+        });
+        let shared = Arc::new(RwLock::new(initial));
+
+        // reload 前のスナップショットの表示は空（enabled が空のため）。
+        let before_display = {
+            let guard = shared.read().unwrap();
+            format_external_binaries_display(&guard)
+        };
+        assert_eq!(
+            before_display, "",
+            "pre-reload display should be empty (no providers enabled)"
+        );
+
+        // reload: external = "carapace" に明示切り替える。
+        let new_config = CompletionConfig {
+            external: ExternalSetting::Single("carapace".to_string()),
+            ..CompletionConfig::default()
+        };
+        let returned = reload_external_completion(&shared, &new_config);
+
+        // 戻り値・Arc の中身の両方が post-reload の内容（carapace エントリ1件）
+        // を持つ。
+        assert_eq!(returned.enabled.len(), 1);
+        let after_display = {
+            let guard = shared.read().unwrap();
+            format_external_binaries_display(&guard)
+        };
+        assert_eq!(
+            after_display,
+            format_external_binaries_display(&returned),
+            "Arc content and returned value must produce the same display"
+        );
+        assert!(
+            after_display.starts_with("    carapace: "),
+            "post-reload display should show the carapace entry, not the pre-reload empty state: {after_display:?}"
+        );
+        assert_ne!(
+            after_display, before_display,
+            "display must change from pre-reload (empty) to post-reload (carapace entry)"
+        );
     }
 }

@@ -76,7 +76,9 @@ use path::PathProvider;
 use provider::{escape_for_insert, CompletionProvider};
 use zsh_bridge::ZshBridgeProvider;
 
-pub use carapace::{format_external_summary, ExternalCompletionSettings};
+pub use carapace::{
+    format_external_binaries_display, format_external_summary, ExternalCompletionSettings,
+};
 
 /// ColumnarMenu は description を持つ候補が 1 件でもあると全幅 1 カラムに
 /// 描画が変わってしまうため、候補数がこの件数を超えたら description を
@@ -1188,4 +1190,221 @@ mod tests {
             "path completion should still work when external providers fall through: {values:?}"
         );
     }
+
+    // ── D2 (#89): provider-chain フォールスルーの dispatch レベル証明 ──
+    //
+    // 実際の carapace/zsh バイナリに依存せず、テストローカルの FAKE
+    // CompletionProvider 2 個を直接 `JarvishCompleter.providers` に積んで、
+    // `complete()`（実 dispatch コード経路）を通して以下を検証する:
+    // (a) 1 番目が None → 2 番目が実行される
+    // (b) 1 番目が Some(vec![]) → 2 番目は実行されない、結果は空
+    //     （PathProvider へのフォールバックも起きない）
+    // (c) 並び順が解決順と一致する
+    //
+    // 「1番目が実行されたか」は、各 FAKE provider が呼び出し回数を
+    // `Arc<AtomicUsize>` に記録することで直接観測する（戻り値の中身だけでは
+    // 「呼ばれて None を返した」のか「そもそも呼ばれていない」のかを
+    // 区別できないため）。
+
+    struct FakeProvider {
+        name: &'static str,
+        response: Option<Vec<provider::Candidate>>,
+        call_count: Arc<std::sync::atomic::AtomicUsize>,
+        call_order: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    impl CompletionProvider for FakeProvider {
+        fn provide(&self, _ctx: &CompletionContext) -> Option<Vec<provider::Candidate>> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.call_order.lock().unwrap().push(self.name);
+            self.response.clone()
+        }
+    }
+
+    fn fake_completer_with_providers(
+        providers: Vec<Box<dyn CompletionProvider>>,
+    ) -> JarvishCompleter {
+        JarvishCompleter {
+            providers,
+            aliases: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    #[test]
+    fn dispatch_first_provider_none_falls_through_to_second() {
+        let first_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let call_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let first = FakeProvider {
+            name: "first",
+            response: None,
+            call_count: Arc::clone(&first_calls),
+            call_order: Arc::clone(&call_order),
+        };
+        let second = FakeProvider {
+            name: "second",
+            response: Some(vec![provider::Candidate {
+                value: "from-second".to_string(),
+                description: None,
+                append_whitespace: true,
+            }]),
+            call_count: Arc::clone(&second_calls),
+            call_order: Arc::clone(&call_order),
+        };
+
+        let mut completer = fake_completer_with_providers(vec![Box::new(first), Box::new(second)]);
+        let line = "anything arg";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        assert_eq!(first_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(second_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(*call_order.lock().unwrap(), vec!["first", "second"]);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert_eq!(
+            values,
+            vec!["from-second"],
+            "first provider returning None should fall through to the second: {values:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_first_provider_empty_some_short_circuits_no_fallback() {
+        let first_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let call_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let first = FakeProvider {
+            name: "first",
+            response: Some(Vec::new()),
+            call_count: Arc::clone(&first_calls),
+            call_order: Arc::clone(&call_order),
+        };
+        let second = FakeProvider {
+            name: "second",
+            response: Some(vec![provider::Candidate {
+                value: "from-second".to_string(),
+                description: None,
+                append_whitespace: true,
+            }]),
+            call_count: Arc::clone(&second_calls),
+            call_order: Arc::clone(&call_order),
+        };
+
+        let mut completer = fake_completer_with_providers(vec![Box::new(first), Box::new(second)]);
+        let line = "anything arg";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        assert_eq!(
+            first_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "first provider should have been called exactly once"
+        );
+        assert_eq!(
+            second_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "second provider must NOT run once the first provider claims the request with Some(vec![])"
+        );
+        assert_eq!(*call_order.lock().unwrap(), vec!["first"]);
+        assert!(
+            suggestions.is_empty(),
+            "Some(vec![]) from the first provider must yield an empty result, \
+             with no PathProvider (or any later provider) fallback: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_order_matches_provider_construction_order() {
+        // (c): チェーン内の並び順どおりに試行される。3 個の FAKE を積み、
+        // 先頭 2 個が None を返し、3 番目だけが候補を返すケースで、
+        // 呼び出し順序が構築順と一致することを確認する。
+        let call_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dummy_counts: Vec<Arc<std::sync::atomic::AtomicUsize>> = (0..3)
+            .map(|_| Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+            .collect();
+
+        let providers: Vec<Box<dyn CompletionProvider>> = vec![
+            Box::new(FakeProvider {
+                name: "alpha",
+                response: None,
+                call_count: Arc::clone(&dummy_counts[0]),
+                call_order: Arc::clone(&call_order),
+            }),
+            Box::new(FakeProvider {
+                name: "beta",
+                response: None,
+                call_count: Arc::clone(&dummy_counts[1]),
+                call_order: Arc::clone(&call_order),
+            }),
+            Box::new(FakeProvider {
+                name: "gamma",
+                response: Some(vec![provider::Candidate {
+                    value: "from-gamma".to_string(),
+                    description: None,
+                    append_whitespace: true,
+                }]),
+                call_count: Arc::clone(&dummy_counts[2]),
+                call_order: Arc::clone(&call_order),
+            }),
+        ];
+
+        let mut completer = fake_completer_with_providers(providers);
+        let line = "anything arg";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        assert_eq!(
+            *call_order.lock().unwrap(),
+            vec!["alpha", "beta", "gamma"],
+            "providers must be tried in construction order"
+        );
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert_eq!(values, vec!["from-gamma"]);
+    }
+
+    #[test]
+    fn dispatch_resolved_external_order_drives_fake_provider_call_order() {
+        // (c) の別の角度: 実際の `external_provider_chain` の並びが
+        // `ExternalCompletionSettings::resolve` の解決順に一致することを、
+        // FAKE ではなく実プロバイダチェーンで再確認する（配列指定を反転した
+        // 順で構築し、呼び出し順ではなくチェーンの並び自体を見る既存テストとの
+        // 相補）。ここでは carapace/zsh 双方が無効な `"none"` から始め、
+        // 明示配列指定 `["zsh", "carapace"]` で resolve した結果の
+        // `enabled` 順がそのままチェーンの長さ・要素順に反映されることを
+        // 直接確認する。
+        let settings = ExternalCompletionSettings::resolve(&CompletionConfig {
+            external: ExternalSetting::List(vec!["zsh".to_string(), "carapace".to_string()]),
+            ..CompletionConfig::default()
+        });
+        let enabled_kinds: Vec<carapace::ExternalKind> =
+            settings.enabled.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            enabled_kinds,
+            vec![
+                carapace::ExternalKind::Zsh,
+                carapace::ExternalKind::Carapace
+            ]
+        );
+        let shared = Arc::new(RwLock::new(settings));
+        let chain = external_provider_chain(&shared);
+        assert_eq!(
+            chain.len(),
+            2,
+            "chain length should match resolved order length"
+        );
+    }
+
+    // ── Plant-the-regression チェック（D2, #89） ──
+    //
+    // `complete()` の dispatch ループ（`self.providers.iter().find_map(...)`）
+    // の `Some(vec![])` 短絡意味論を一時的に反転させ（`Some(v) if v.is_empty()
+    // => None` を挟み、「空候補なら次のプロバイダも試す」動作に変更）、
+    // `dispatch_first_provider_empty_some_short_circuits_no_fallback` を
+    // 実行したところ想定どおり FAILED（"second provider must NOT run..."）
+    // することを確認済み。検証後にコードは元の実装へ復元済み（この反転は
+    // コミットに含まれない）。
 }

@@ -299,6 +299,37 @@ pub fn format_external_summary(raw: &str, settings: &ExternalCompletionSettings)
     }
 }
 
+/// `source` ビルトインのサマリーに載せる、各外部補完プロバイダのバイナリパス
+/// 一覧行を組み立てる純粋関数。
+///
+/// [`ExternalCompletionSettings::resolve`] が解決した優先順（`settings.enabled`）
+/// に沿って、プロバイダごとに `"   {kind}: {path}\n"` の行を 1 つずつ列挙する。
+/// バイナリが未検出（`entry.binary == None`）の場合は `"not found"` を表示する。
+/// `enabled` が空（`external = "none"` または全プロバイダ無効化）の場合は
+/// 空文字列を返す（サマリーに空行を出さないため）。
+///
+/// `Shell::reload_config` の中でインラインに組み立てられていたロジックを
+/// 切り出したもの（D1, #89 レビュー指摘）。`Shell` を構築せずに
+/// `ExternalCompletionSettings` だけでユニットテストできるようにする狙いは
+/// [`format_external_summary`] と同じ。
+pub fn format_external_binaries_display(settings: &ExternalCompletionSettings) -> String {
+    if settings.enabled.is_empty() {
+        return String::new();
+    }
+    settings
+        .enabled
+        .iter()
+        .map(|entry| {
+            let binary_display = entry
+                .binary
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "not found".to_string());
+            format!("\x20\x20\x20 {}: {binary_display}\n", entry.kind)
+        })
+        .collect::<String>()
+}
+
 /// `settings.enabled` の優先順を `"carapace, zsh"` のようなカンマ区切り文字列
 /// にする。空なら `"none"`。
 fn resolved_order_display(settings: &ExternalCompletionSettings) -> String {
@@ -1189,6 +1220,69 @@ mod tests {
         let out = format_external_summary(&config.external.to_string(), &settings);
         assert!(out.contains("typo-value"));
         assert!(out.contains("未対応"));
+    }
+
+    // ── format_external_binaries_display（`source` サマリーのバイナリパス一覧行）──
+    //
+    // D1 (#89): `Shell::reload_config` にインラインで組み立てられていた
+    // ロジックを切り出した純粋関数。`Shell` を構築せずに
+    // `ExternalCompletionSettings` だけで検証する。
+
+    #[test]
+    fn format_external_binaries_display_empty_when_no_providers_enabled() {
+        let settings = ExternalCompletionSettings {
+            timeout: Duration::from_millis(400),
+            enabled: Vec::new(),
+        };
+        assert_eq!(format_external_binaries_display(&settings), "");
+    }
+
+    #[test]
+    fn format_external_binaries_display_shows_binary_path_for_detected_entry() {
+        let settings = ExternalCompletionSettings {
+            timeout: Duration::from_millis(400),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Carapace,
+                binary: Some(PathBuf::from("/usr/local/bin/carapace")),
+            }],
+        };
+        let out = format_external_binaries_display(&settings);
+        assert_eq!(out, "    carapace: /usr/local/bin/carapace\n");
+    }
+
+    #[test]
+    fn format_external_binaries_display_shows_not_found_for_missing_binary() {
+        let settings = ExternalCompletionSettings {
+            timeout: Duration::from_millis(400),
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Zsh,
+                binary: None,
+            }],
+        };
+        let out = format_external_binaries_display(&settings);
+        assert_eq!(out, "    zsh: not found\n");
+    }
+
+    #[test]
+    fn format_external_binaries_display_lists_multiple_entries_in_order() {
+        let settings = ExternalCompletionSettings {
+            timeout: Duration::from_millis(400),
+            enabled: vec![
+                ResolvedExternal {
+                    kind: ExternalKind::Carapace,
+                    binary: Some(PathBuf::from("/usr/local/bin/carapace")),
+                },
+                ResolvedExternal {
+                    kind: ExternalKind::Zsh,
+                    binary: None,
+                },
+            ],
+        };
+        let out = format_external_binaries_display(&settings);
+        assert_eq!(
+            out,
+            "    carapace: /usr/local/bin/carapace\n    zsh: not found\n"
+        );
     }
 
     #[test]
