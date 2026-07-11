@@ -339,18 +339,43 @@ pub type SharedDaemonSlot = Arc<Mutex<Option<DaemonSlot>>>;
 /// スロットが既に空なら no-op（冪等）。`Mutex` の poison（他スレッドの
 /// panic 経由）はロック取得失敗として扱い、安全側に倒して何もしない
 /// （poison 状態から shutdown を試みても panic を伝播させるだけで
-/// 状況が改善しないため — 呼び出し元はいずれも「ベストエフォートで
-/// 畳めれば畳む」性質の経路: reload / exit / restart 直前）。
+/// 状況が改善しないため）。
 ///
-/// `Shell::reload_config`（設定変更の**その場**での shutdown, A3/A4）、
-/// `Shell::exec_restart`（exec 直前, A1）、`main.rs` の正常終了経路
-/// （`std::process::exit` 直前, A2）から共通で呼ばれる。
+/// # ノンブロッキング（B1/B2, #89）
+/// kill/reap は [`ZshDaemon::shutdown`] がバックグラウンドスレッドへ
+/// 委譲するため、この関数は「スロットの所有権を取り出して手放す」以上の
+/// 待ちを一切行わずすぐ戻る。reedline の completer 呼び出し元（UI スレッド）
+/// から呼ばれうる経路 — `Shell::reload_config`（設定変更の**その場**での
+/// shutdown, A3/A4）、`ZshBridgeProvider::provide()` の `gate()`-None 早期
+/// パス（A4）、mtime トリガによるデーモン再起動（`request_via_daemon`）—
+/// はすべてこちらを使う。プロセスが直後に exec/exit で消える経路
+/// （`Shell::exec_restart` 手前、`main.rs` の正常終了経路手前）は、
+/// バックグラウンドスレッドに reap を委ねても実行される保証がないため
+/// 代わりに [`shutdown_shared_daemon_blocking`] を使う。
 pub fn shutdown_shared_daemon(slot: &SharedDaemonSlot) {
     let Ok(mut guard) = slot.lock() else {
         return;
     };
     if let Some(mut slot) = guard.take() {
         slot.daemon.shutdown();
+    }
+}
+
+/// [`shutdown_shared_daemon`] の有界同期版（B1/B2, #89）。
+///
+/// `deadline` の範囲内で kill/reap の完了を**呼び出し元スレッド上で**
+/// 待つ。`Command::exec` 直前・`std::process::exit` 直前など、この行の
+/// 後にプロセスが置換/終了されるためバックグラウンドスレッドに reap を
+/// 委ねても実行される保証がない経路（Fix A, ce53dfd が landed させた
+/// exit/exec shutdown 経路）専用 — reedline の completer 呼び出し元
+/// （UI スレッド）から通常のリクエスト処理中に呼んではならない
+/// （その場合は必ず [`shutdown_shared_daemon`] を使うこと）。
+pub fn shutdown_shared_daemon_blocking(slot: &SharedDaemonSlot, deadline: Duration) {
+    let Ok(mut guard) = slot.lock() else {
+        return;
+    };
+    if let Some(mut slot) = guard.take() {
+        slot.daemon.shutdown_blocking(deadline);
     }
 }
 

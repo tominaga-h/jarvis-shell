@@ -26,7 +26,8 @@ static RESTART_FLAG: StaticAtomicBool = StaticAtomicBool::new(false);
 use crate::ai::{ConversationState, JarvisAI};
 use crate::cli::completer::{
     format_external_binaries_display, format_external_summary, new_shared_daemon_slot,
-    shutdown_shared_daemon, ExternalCompletionSettings, SharedDaemonSlot,
+    shutdown_shared_daemon, shutdown_shared_daemon_blocking, ExternalCompletionSettings,
+    SharedDaemonSlot,
 };
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 use crate::cli::prompt::{ShellPrompt, EXIT_CODE_NONE};
@@ -609,16 +610,35 @@ impl Shell {
         }
     }
 
-    /// 温存 zsh 補完デーモンが稼働中なら shutdown する（kill + 短時間有界 reap）。
+    /// exec/exit 直前の有界同期 shutdown 予算（B1/B2, #89）。
+    ///
+    /// プロセスがこの直後に exec() で置換される、または exit() で終了する
+    /// ため、バックグラウンドスレッドへ kill/reap を委譲しても実行される
+    /// 保証がない（[`shutdown_shared_daemon_blocking`] のドキュメント参照）。
+    /// `ZshDaemon` 単体の reap 予算（既定 1 秒、`zsh_daemon.rs` 参照）に
+    /// 軽い余裕を足した値。
+    const ZSH_DAEMON_EXIT_SHUTDOWN_DEADLINE: std::time::Duration =
+        std::time::Duration::from_millis(1200);
+
+    /// 温存 zsh 補完デーモンが稼働中なら shutdown する（kill + 有界同期 reap）。
     ///
     /// `Command::exec`（[`exec_restart`](Self::exec_restart)）はプロセス
     /// イメージを置換するため `Drop` は一切実行されず、`std::process::exit`
     /// もデストラクタをスキップする。そのためこれらの経路の**直前**に
     /// 明示的に呼び、デーモン子プロセス・PTY fd・init 一時ファイルの
-    /// リークを防ぐ（A1/A2, #89 レビュー指摘）。デーモンが元々稼働して
-    /// いなければ [`shutdown_shared_daemon`] が no-op（冪等）を保証する。
+    /// リークを防ぐ（A1/A2, #89 レビュー指摘）。
+    ///
+    /// # ノンブロッキング shutdown ではなく有界同期版を使う理由（B1/B2, #89）
+    /// 通常の reload/gate 経路（`apply_zsh_daemon_lifecycle_for_reload`
+    /// 等）はバックグラウンドスレッドへ kill/reap を委譲するノンブロッキング
+    /// 版（[`shutdown_shared_daemon`]）を使うが、ここ（exec 直前・exit
+    /// 直前）ではプロセスがこの直後に置換/終了されるため、バックグラウンド
+    /// スレッドに委ねても実行が保証されない。そのため
+    /// [`shutdown_shared_daemon_blocking`] で `deadline` 以内の完了を
+    /// 呼び出し元スレッド上で待つ。デーモンが元々稼働していなければ
+    /// no-op（冪等）。
     pub fn shutdown_zsh_daemon(&self) {
-        shutdown_shared_daemon(&self.zsh_daemon);
+        shutdown_shared_daemon_blocking(&self.zsh_daemon, Self::ZSH_DAEMON_EXIT_SHUTDOWN_DEADLINE);
     }
 
     /// exec() によるプロセス再起動を実行する。
@@ -1238,6 +1258,85 @@ mod tests {
         assert!(
             wait_for_pid_death(child_pid),
             "child pid {child_pid} should be dead after the pre-exec/pre-exit shutdown helper runs"
+        );
+
+        if let Some(home) = original_home {
+            unsafe {
+                std::env::set_var("HOME", home);
+            }
+        }
+    }
+
+    // ── B1/B2: Shell::shutdown_zsh_daemon は有界同期版を使う ──
+
+    #[test]
+    #[serial]
+    fn shutdown_zsh_daemon_blocking_helper_reaps_deterministically_without_polling() {
+        // `Shell::shutdown_zsh_daemon`（exec_restart / main.rs の exit
+        // 直前から呼ばれる）は、reload/gate 経路が使うノンブロッキング版
+        // （`shutdown_shared_daemon`）ではなく有界同期版
+        // （`shutdown_shared_daemon_blocking`）を使う（B1/B2, #89 — プロセスが
+        // この直後に exec()/exit() で消えるため、バックグラウンドスレッドに
+        // reap を委譲しても実行される保証がない）。`Shell` 構造体そのものを
+        // 構築せず、`Shell::shutdown_zsh_daemon` が実際に呼ぶのと同じ
+        // `shutdown_shared_daemon_blocking` を直接呼び、**戻ってきた時点で
+        // 既に reap 済み**（呼び出し元がポーリングする必要がない）ことを
+        // 直接証明する — `shutdown_shared_daemon`（ノンブロッキング版）との
+        // 違いはまさにこの「戻り値の時点での決定性」にある。
+        let Some(zsh) = zsh_binary_for_test() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let original_home = std::env::var("HOME").ok();
+        let fixture = setup_daemon_fixture();
+        let _ = zsh;
+        let _ = &fixture.zdotdir;
+
+        let settings = zsh_enabled_daemon_settings();
+        let zsh_daemon = new_shared_daemon_slot();
+        let mut completer = crate::cli::completer::JarvishCompleter::new(
+            Arc::new(RwLock::new(vec![])),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::clone(&settings),
+            Arc::clone(&zsh_daemon),
+        );
+
+        let line = "jarvishtestcmd ";
+        let pos = line.len();
+        let _ = completer.complete(line, pos);
+
+        if zsh_daemon.lock().unwrap().is_none() {
+            eprintln!("skipping: zsh daemon did not spawn in this environment");
+            if let Some(home) = original_home {
+                unsafe {
+                    std::env::set_var("HOME", home);
+                }
+            }
+            return;
+        }
+
+        let child_pid = {
+            let guard = zsh_daemon.lock().unwrap();
+            guard.as_ref().unwrap().daemon_pid_for_test()
+        };
+
+        // `Shell::shutdown_zsh_daemon` の内部実装と同じ呼び出し（同じ
+        // deadline 定数を直接使うと private const に依存してしまうため、
+        // ここでは十分な独自の deadline を渡す — 主張したいのは「関数が
+        // 戻った時点で既に reap されている」という決定性であり、具体的な
+        // deadline 値の一致ではない）。
+        shutdown_shared_daemon_blocking(&zsh_daemon, std::time::Duration::from_secs(2));
+
+        assert!(zsh_daemon.lock().unwrap().is_none());
+        // ポーリングなしで即座に ESRCH を確認できることが非同期版との
+        // 違いの直接証拠（`wait_for_pid_death` のような有界ポーリングを
+        // 使わない）。
+        let ret = unsafe { libc::kill(child_pid as libc::pid_t, 0) };
+        let is_dead =
+            ret == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        assert!(
+            is_dead,
+            "child pid {child_pid} should already be reaped when shutdown_shared_daemon_blocking returns"
         );
 
         if let Some(home) = original_home {

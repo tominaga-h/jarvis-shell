@@ -80,7 +80,10 @@ use zsh_bridge::ZshBridgeProvider;
 pub use carapace::{
     format_external_binaries_display, format_external_summary, ExternalCompletionSettings,
 };
-pub use zsh_bridge::{new_shared_daemon_slot, shutdown_shared_daemon, SharedDaemonSlot};
+pub use zsh_bridge::{
+    new_shared_daemon_slot, shutdown_shared_daemon, shutdown_shared_daemon_blocking,
+    SharedDaemonSlot,
+};
 
 /// ColumnarMenu は description を持つ候補が 1 件でもあると全幅 1 カラムに
 /// 描画が変わってしまうため、候補数がこの件数を超えたら description を
