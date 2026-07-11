@@ -270,30 +270,60 @@ fn compute_warm_timeout(raw_timeout: Duration) -> Duration {
 /// このプロバイダを優先順リストに含めるかどうか・zsh バイナリを検出するか
 /// どうかを決める（Task 2b.4）。timeout も同じ共有設定から取得する。
 ///
-/// # 温存デーモン配線（Task 2b.3, #89）
+/// # 温存デーモン配線（Task 2b.3, #89、Fix D で更新）
 /// `[completion] external_zsh_daemon`（`settings.zsh_daemon_enabled`）が
-/// `true` の間、`provide()` は [`ZshDaemon`] を遅延 spawn して使い回す。
-/// completer は reedline の UI スレッド上で同期的に呼ばれる（並行呼び出し
-/// なし）ため、`daemon` フィールドの `Mutex` は `&self` からの内部可変性
-/// 確保のみが目的であり、実際の競合排他は発生しない。
+/// `true` の間、[`ZshDaemon`] を使い回す。**主経路は起動時の事前ウォーム
+/// アップ**（[`prewarm_zsh_daemon`]、Fix D4）——`Shell::new` がバックグラウンド
+/// スレッドから spawn 済みにしておくため、通常は最初の `provide()` 呼び
+/// 出し時点で `daemon` スロットが既に埋まっている。プリウォームが間に
+/// 合わなかった場合（または zsh 未検出等でスキップされた場合）は、
+/// `provide()` 自身が遅延 spawn するフォールバック経路が働く。completer は
+/// reedline の UI スレッド上で同期的に呼ばれる（並行呼び出しなし）ため、
+/// `daemon` フィールドの `Mutex` は `&self` からの内部可変性確保のみが
+/// 目的であり、実際の競合排他は発生しない（prewarm 用バックグラウンド
+/// スレッドとのレースのみ Mutex の二重チェックで防止する——
+/// [`prewarm_zsh_daemon`] のドキュメント参照）。
 /// - **コールド**（デーモン未 spawn、または直前のリクエストで dead 化した
-///   直後の再 spawn）: `MIN_TIMEOUT_MS` フロア（spawn + init + 初回
-///   リクエストの合計を賄う）。
-/// - **ウォーム**（既に生きているデーモンへの2回目以降のリクエスト）:
-///   設定された `external_timeout_ms` に [`WARM_MIN_TIMEOUT_MS`] の
-///   小さな床だけを適用する。
-/// - **失敗時**（タイムアウト/desync）: [`ZshDaemon::request`] が内部で
-///   子プロセスを kill 済み・`is_alive() == false` になる。`provide()` は
-///   この Tab では `None` を返す（同一キー押下内でのワンショット
-///   フォールバックは行わない — 仕様どおり）。次回 Tab で `daemon` スロットが
-///   `None`（dead インスタンスは捨てる）になっているため、遅延 respawn が
-///   自然に起きる。
+///   直後の再 spawn）: `MIN_TIMEOUT_MS`（2000ms）フロアを spawn + init の
+///   レディマーカー待ちのみに適用する（Fix D3）。spawn 直後に送る最初の
+///   実補完リクエスト自体はこの予算に含めず、常にウォーム側の
+///   `warm_timeout` を使う——spawn+init 自体は速くても補完関数の初回呼び
+///   出しが重い（`tmuxinator` 等）ケースで、初回 Tab だけコールド予算を
+///   使い切って `None` になっていた不具合の修正。
+/// - **ウォーム**（既に生きているデーモンへの2回目以降のリクエスト、および
+///   spawn 直後の初回リクエスト、Fix D3）: 設定された `external_timeout_ms`
+///   と [`WARM_MIN_TIMEOUT_MS`]（2000ms、Fix D1 で 100ms から引き上げ）の
+///   大きい方を使う。
+/// - **失敗時（グレースドレイン + サーキットブレーカー、Fix D2）**:
+///   1回のクリーンなタイムアウト（遅いが正常な補完関数、例:
+///   インタプリタ起動を伴う `tmuxinator` 補完）では、もはやデーモンを
+///   即座に kill しない——[`ZshDaemon`] は残留フレームを次回リクエストで
+///   排水するだけに留め、生存を続ける。**連続2回**のタイムアウト
+///   （ドレイン失敗 + 通常失敗、または通常失敗が2回連続）で初めてハングと
+///   判定し、[`ZshDaemon::request`] が内部で子プロセスをバックグラウンド
+///   kill 済み・`is_alive() == false` になる。いずれの場合も `provide()`
+///   はこの Tab では `None` を返す（同一キー押下内でのワンショット
+///   フォールバックは行わない — 仕様どおり）。デーモンが実際に kill
+///   された場合のみ、次回 Tab で `daemon` スロットが `None`（dead
+///   インスタンスは捨てる）になっているため、遅延 respawn が自然に起きる。
+///   応答バッファ上限超過（プロトコル desync 相当）はグレースの対象外で
+///   即座に kill する。
 /// - **再起動トリガ**: 毎リクエスト前にブリッジ `.zshrc` の mtime を
-///   spawn 時点のものと比較する（`stat` のみで安価）。変化していれば
-///   ユーザーが `fpath`/`compdef` を編集したとみなし、既存デーモンを
-///   shutdown してから同一リクエスト内で新しいデーモンを遅延 spawn する。
-///   `settings.zsh_daemon_enabled` が `false` に変わった場合も同様に
-///   既存デーモンを shutdown する（以後はワンショット経路を使う）。
+///   spawn 時点のものと比較する（`stat` のみで安価）。両方 `Some` かつ
+///   不一致の場合のみ変化ありと判定し、ユーザーが `fpath`/`compdef` を
+///   編集したとみなして既存デーモンを shutdown してから同一リクエスト内で
+///   新しいデーモンを遅延 spawn する（どちらか一方でも `None`——`stat`
+///   不能——の場合は「変化なし」として扱い、誤検知で毎回再起動しない
+///   安全側フォールバック）。`settings.zsh_daemon_enabled` が `false` に
+///   変わった場合も同様に既存デーモンを shutdown する（以後はワンショット
+///   経路を使う）。
+/// - **プロセス終了・設定変更での明示的 shutdown**: `provide()` からの
+///   自然な respawn/kill サイクルとは別に、`Shell` はライフサイクル
+///   イベント（`source` による設定変更のその場、`exec`/`exit` 直前、
+///   `restart` ビルトイン）でも稼働中のデーモンを明示的に shutdown する
+///   （[`shutdown_shared_daemon`] / [`shutdown_shared_daemon_blocking`]
+///   のドキュメント参照）——稼働中のデーモンが Jarvish のセッションより
+///   長生きすることはない。
 pub(super) struct ZshBridgeProvider {
     settings: Arc<RwLock<ExternalCompletionSettings>>,
     /// 温存デーモン本体（`Shell` と共有する `Arc<Mutex<_>>`、Task A, #89）。
@@ -2183,6 +2213,191 @@ mod tests {
         assert_ne!(
             pid_before, pid_after,
             "daemon must be restarted (new child pid) after bridge .zshrc mtime changes"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_survives_zshrc_deletion_after_spawn_mtime_none_is_treated_as_unchanged() {
+        // C2: 「両側 None => 変化なしとして扱い、スプリアスな再起動をしない」
+        // の片側 — spawn 時点では mtime が取れていた（Some）が、その後
+        // ブリッジ .zshrc 自体が削除されて current_mtime が None になる
+        // ケース。`(Some(a), Some(b)) if a != b` という一致条件は片方が
+        // None の時点で成立しないため、mtime_changed は false のまま
+        // ——同じデーモン（同じ pid）が使い回されることを直接証明する。
+        //
+        // `provide()` 経由だと `ensure_bridge_zshrc` が「削除済みの .zshrc」
+        // を検知してデフォルトテンプレートで再作成してしまい（fpath 設定が
+        // 失われ `_jarvishtestcmd` が引けなくなる）、mtime 比較ロジック
+        // 自体とは無関係な理由でテストが崩れる。そのため
+        // `request_via_daemon` を直接呼び、mtime 比較ロジックだけを隔離して
+        // 検証する（`ensure_bridge_zshrc` 自体の再作成挙動は別テストの
+        // 責務）。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, _fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+
+        let settings = zsh_enabled_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
+            settings,
+            zsh,
+            zdotdir.clone(),
+            home_envs,
+        );
+
+        let escaped = vec!["jarvishtestcmd".to_string(), String::new()];
+        let cold = Duration::from_millis(MIN_TIMEOUT_MS);
+        let warm = Duration::from_secs(3);
+
+        let first = provider
+            .request_via_daemon(
+                &provider.resolve_zsh().unwrap(),
+                &zdotdir,
+                &escaped,
+                cold,
+                warm,
+            )
+            .expect("first request should work");
+        assert!(parse_capture_output(&first)
+            .iter()
+            .any(|c| c.value == "alpha"));
+
+        let pid_before = {
+            let guard = provider.daemon.lock().unwrap();
+            let slot = guard.as_ref().unwrap();
+            // spawn 時点で記録された mtime が Some だったことを確認して
+            // おく（そうでないとこのテストが片側 None のケースを検証して
+            // いないことになる）。
+            assert!(
+                slot.zshrc_mtime_at_spawn.is_some(),
+                "precondition: spawn-time mtime must be Some for this test to be meaningful"
+            );
+            slot.daemon.child_pid_for_test()
+        };
+
+        // ブリッジ .zshrc を削除する — 以後 fs::metadata(...).modified() は
+        // NotFound エラーとなり current_mtime は None になる。
+        // request_via_daemon 自体は ensure_bridge_zshrc を呼ばないため、
+        // ここでは削除された状態のまま mtime 比較に入る。
+        fs::remove_file(bridge_zshrc_path(&zdotdir)).unwrap();
+
+        let second = provider
+            .request_via_daemon(
+                &provider.resolve_zsh().unwrap(),
+                &zdotdir,
+                &escaped,
+                cold,
+                warm,
+            )
+            .expect(
+                "request after .zshrc deletion should still work (daemon reused, not respawned)",
+            );
+        assert!(
+            parse_capture_output(&second)
+                .iter()
+                .any(|c| c.value == "alpha"),
+            "the SAME (already-running) daemon must still serve the fpath completion it \
+             loaded at spawn time — proof that it was not respawned/re-sourced"
+        );
+
+        let pid_after = {
+            let guard = provider.daemon.lock().unwrap();
+            guard.as_ref().unwrap().daemon.child_pid_for_test()
+        };
+        assert_eq!(
+            pid_before, pid_after,
+            "deleting the bridge .zshrc (spawn-time Some -> current None) must NOT trigger a \
+             restart — either side being None is treated as 'unchanged' (safe-side fallback)"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_reused_when_spawn_time_mtime_was_none_and_file_now_present() {
+        // C2: 「両側 None => 変化なし」のもう片側 — spawn 時点では mtime が
+        // 取れなかった（意図的に spawn 前に .zshrc を削除しておくケース）が、
+        // 次のリクエスト時には .zshrc が（再）存在し current_mtime が Some
+        // になっているケース。`(Some(a), Some(b))` のパターンは spawn 側が
+        // None の時点でマッチしないため、mtime_changed は false のまま
+        // ——同じデーモンが使い回されることを直接証明する。
+        //
+        // 前のテストと同じ理由で `request_via_daemon` を直接呼び、
+        // `ensure_bridge_zshrc` のテンプレート再作成による干渉を避ける。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, _fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+        let zshrc_path = bridge_zshrc_path(&zdotdir);
+
+        let settings = zsh_enabled_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
+            settings,
+            zsh,
+            zdotdir.clone(),
+            home_envs,
+        );
+
+        // spawn 直前に .zshrc を退避しておき、request_via_daemon が spawn
+        // 時点で current_mtime = None を記録するよう仕向ける。ZDOTDIR には
+        // 依然として fpath 設定済みの .zshrc が存在しないため、内側 zsh の
+        // 起動時点では compdef が登録されないが、リクエスト前に復元する
+        // ことで内側 zsh 自体には実害が出ない
+        // （spawn() 完了後に .zshrc を読み直すことはない — 初期化は spawn
+        // 時の一度きりのため）。このテストの関心は mtime 比較ロジック
+        // のみであり、実際の補完動作は前段の `_jarvishtestcmd` フィクスチャ
+        // ではなく、単に「同じデーモンが使い回されたか」を pid 比較で見る。
+        let saved = fs::read(&zshrc_path).unwrap();
+        fs::remove_file(&zshrc_path).unwrap();
+
+        let escaped = vec!["jarvishtestcmd".to_string(), String::new()];
+        let cold = Duration::from_millis(MIN_TIMEOUT_MS);
+        let warm = Duration::from_secs(3);
+
+        // spawn 時点で .zshrc が存在しないため fpath は素の状態(ZDOTDIR の
+        // デフォルト検索パスのみ)になるが、request_via_daemon 自体は spawn
+        // に成功する（zsh -i 自体は .zshrc が無くても起動できる）。
+        let _first = provider.request_via_daemon(
+            &provider.resolve_zsh().unwrap(),
+            &zdotdir,
+            &escaped,
+            cold,
+            warm,
+        );
+
+        let pid_before = {
+            let guard = provider.daemon.lock().unwrap();
+            let slot = guard.as_ref().unwrap();
+            assert!(
+                slot.zshrc_mtime_at_spawn.is_none(),
+                "precondition: spawn-time mtime must be None for this test to be meaningful"
+            );
+            slot.daemon.child_pid_for_test()
+        };
+
+        // .zshrc を復元する — 以後 current_mtime は Some になる。
+        fs::write(&zshrc_path, &saved).unwrap();
+
+        let _second = provider.request_via_daemon(
+            &provider.resolve_zsh().unwrap(),
+            &zdotdir,
+            &escaped,
+            cold,
+            warm,
+        );
+
+        let pid_after = {
+            let guard = provider.daemon.lock().unwrap();
+            guard.as_ref().unwrap().daemon.child_pid_for_test()
+        };
+        assert_eq!(
+            pid_before, pid_after,
+            "spawn-time None -> current Some must NOT trigger a restart — either side being \
+             None is treated as 'unchanged' (safe-side fallback)"
         );
     }
 

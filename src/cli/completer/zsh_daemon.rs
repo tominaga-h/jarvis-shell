@@ -50,17 +50,23 @@
 //! 再武装するラッパー ZLE widget**（`jarvish-complete-word`）を `^I` に
 //! 束縛することで解決している（詳細は同ファイルのコメント参照）。
 //!
-//! # `JarvishCompleter` への配線（Task 2b.3 の Task 2）
+//! # `JarvishCompleter` への配線（Task 2b.3 の Task 2、Fix D4 で更新）
 //! [`super::zsh_bridge::ZshBridgeProvider`] が `Mutex<Option<ZshDaemon>>` を
-//! 保持し、`[completion] external_zsh_daemon` が有効な間は初回リクエストで
-//! 遅延 spawn、以後は同じインスタンスを使い回す。タイムアウト/desync で
-//! `is_alive()` が `false` になった場合や、ブリッジ `.zshrc` の mtime が
-//! spawn 時から変わっていた場合は shutdown して次回リクエストで再 spawn
-//! する（`zsh_bridge.rs` のモジュールドキュメント参照）。
+//! 保持し、`[completion] external_zsh_daemon` が有効な間は**シェル起動直後に
+//! バックグラウンドスレッドから事前ウォームアップ**される
+//! （[`super::zsh_bridge::prewarm_zsh_daemon`]、Fix D4）ため、通常は最初の
+//! 補完リクエストの時点で既にこのスロットが埋まっている。プリウォームが
+//! 間に合わなかった場合（または zsh 未検出等でスキップされた場合）は、
+//! 最初にデーモンを必要とするリクエストで遅延 spawn する経路がフォール
+//! バックとして機能する。以後は同じインスタンスを使い回す。連続タイム
+//! アウトで `is_alive()` が `false` になった場合や、ブリッジ `.zshrc` の
+//! mtime が spawn 時から変わっていた場合は shutdown して次回リクエストで
+//! 再 spawn する（`zsh_bridge.rs` のモジュールドキュメント参照）。
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -713,12 +719,43 @@ fn disable_echo(slave_fd: &OwnedFd) {
 
 /// [`DAEMON_INIT_SCRIPT`] を `bridge_dir` 配下の専用一時ファイルへ書き出す。
 ///
-/// プロセス pid を混ぜたファイル名にすることで、同一ホストで複数の
-/// jarvish セッションが同時にデーモンを spawn しても衝突しない。
+/// プロセス pid + ランダムな 64bit 値を混ぜたファイル名にすることで、
+/// 同一ホストで複数の jarvish セッションが同時にデーモンを spawn しても
+/// 衝突しない（pid だけでは "確実に予測できるファイル名" になってしまい
+/// C1 の症状そのものになるため、ランダム成分が本質的に必要）。
+///
+/// # シンボリックリンク防御（C1, #89）
+/// 以前の実装は `fs::write` を使っており、パスが予測可能（`bridge_dir` は
+/// 固定パス `~/.config/jarvish/zsh-bridge/`、ファイル名は pid のみで決まる）
+/// なうえ `fs::write` はシンボリックリンクをそのままたどって書き込む
+/// （`O_CREAT` のみで `O_EXCL` を指定しない標準の `open` 相当）。攻撃者が
+/// 対象 pid を予測（または広く先回りして複数 pid 分）してこのパスへの
+/// シンボリックリンクを事前に仕込んでおくと、jarvish が生成する init
+/// スクリプト（zsh 実行内容）がリンク先の任意ファイルへ書き込まれてしまう
+/// （`ensure_bridge_zshrc` に対する既存の symlink 攻撃対策と同種の脅威）。
+///
+/// これを防ぐため、`OpenOptions::create_new(true)`（`O_CREAT | O_EXCL`
+/// 相当 — 既存のファイル/シンボリックリンクが対象パスに**何であれ**存在
+/// する場合は常にエラーになり、シンボリックリンクを一切たどらない）で
+/// 開き、パーミッションも `0o600`（所有者のみ読み書き可）に絞る。
+/// ランダム成分によりファイル名衝突自体がほぼ起こらないため、
+/// `create_new` が失敗するのは実質的に「攻撃者が事前に何かを仕込んでいた」
+/// ケースのみであり、その場合は即座に `Err` を返して呼び出し元
+/// （[`ZshDaemon::spawn`]）に degrade（このタブでは補完デーモン利用不可）
+/// させる。
 fn write_init_script(bridge_dir: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(bridge_dir)?;
-    let path = bridge_dir.join(format!(".daemon_init.{}.zsh", std::process::id()));
-    fs::write(&path, DAEMON_INIT_SCRIPT)?;
+    let path = bridge_dir.join(format!(
+        ".daemon_init.{}.{:016x}.zsh",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    file.write_all(DAEMON_INIT_SCRIPT.as_bytes())?;
     Ok(path)
 }
 
@@ -1727,5 +1764,145 @@ mod tests {
             is_dead,
             "child pid {child_pid} should already be reaped when shutdown_blocking returns"
         );
+    }
+
+    // ── write_init_script: シンボリックリンク防御 (C1, #89) ──
+    //
+    // 実 zsh を一切必要としない純粋なファイルシステムテスト。ランダムな
+    // ファイル名成分のおかげでテスト同士が衝突しないため #[serial] も不要。
+
+    #[test]
+    fn write_init_script_refuses_preexisting_symlink_at_target_pattern() {
+        // 攻撃者が「pid + 総当たりのランダム値」のパターンへ事前にシンボ
+        // リックリンクを仕込んでおいたケースを直接は再現できない
+        // （ランダム値は予測不能なため）が、`create_new` が「対象パスに
+        // 何であれ既に存在する（シンボリックリンクを含む）場合は常に拒否
+        // する」という契約そのものを検証する: 実際に write_init_script が
+        // 生成するのと同じ命名規則のパスへ事前にシンボリックリンクを
+        // 置いておき、その特定のパスへの書き込みを試みても symlink を
+        // たどらず失敗することを、write_init_script が内部で使う
+        // OpenOptions::create_new のセマンティクスとして直接確認する。
+        let tmpdir = tempfile::tempdir().unwrap();
+        let bridge_dir = tmpdir.path().join("zsh-bridge");
+        fs::create_dir_all(&bridge_dir).unwrap();
+
+        // write_init_script と同じ命名パターンで、攻撃者が用意しうる
+        // シンボリックリンクを再現する。
+        let evil_target = tmpdir.path().join("evil-target.zsh");
+        let victim_path = bridge_dir.join(format!(
+            ".daemon_init.{}.{:016x}.zsh",
+            std::process::id(),
+            0u64
+        ));
+        std::os::unix::fs::symlink(&evil_target, &victim_path).unwrap();
+
+        // create_new(true) は「対象パスに既に何か（シンボリックリンクを
+        // 含む）が存在する」場合は常にエラーになる契約を直接検証する。
+        let result = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&victim_path);
+        assert!(
+            result.is_err(),
+            "create_new must refuse to open a path that is already a symlink"
+        );
+        assert!(
+            !evil_target.exists(),
+            "the symlink target must never be written through"
+        );
+
+        // write_init_script 自体は毎回ランダムなファイル名を生成するため、
+        // 事前に置かれたこのシンボリックリンクとは衝突せず正常に成功する
+        // （= 予測できないファイル名であること自体が防御の一部）。
+        let path = write_init_script(&bridge_dir).expect("write_init_script should succeed");
+        assert_ne!(
+            path, victim_path,
+            "write_init_script must not reuse the attacker-planted path"
+        );
+        assert!(!fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_init_script_refuses_preexisting_regular_file_then_succeeds_with_new_random_name() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let bridge_dir = tmpdir.path().join("zsh-bridge");
+        fs::create_dir_all(&bridge_dir).unwrap();
+
+        // 事前に通常ファイルを、write_init_script が今後生成しうる
+        // ファイル名パターンへ置いておく。create_new(true) はシンボリック
+        // リンクだけでなく既存の通常ファイルも同様に拒否する
+        // （O_CREAT | O_EXCL のセマンティクス）ことを直接確認する。
+        let preexisting = bridge_dir.join(format!(
+            ".daemon_init.{}.{:016x}.zsh",
+            std::process::id(),
+            0u64
+        ));
+        fs::write(&preexisting, "pre-existing content").unwrap();
+
+        let result = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&preexisting);
+        assert!(
+            result.is_err(),
+            "create_new must refuse an already-existing regular file"
+        );
+        assert_eq!(
+            fs::read_to_string(&preexisting).unwrap(),
+            "pre-existing content",
+            "the pre-existing file's content must not be overwritten"
+        );
+
+        // write_init_script 自体は、ランダム成分のおかげで上記の
+        // 事前配置ファイルとは別名になり正常に成功する。
+        let path = write_init_script(&bridge_dir).expect("write_init_script should succeed");
+        assert_ne!(path, preexisting);
+        assert_eq!(fs::read_to_string(&path).unwrap(), DAEMON_INIT_SCRIPT);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_init_script_creates_file_with_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let bridge_dir = tmpdir.path().join("zsh-bridge");
+
+        let path = write_init_script(&bridge_dir).expect("write_init_script should succeed");
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        // 下位 9 ビット（パーミッションビットのみ）を比較する。
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "init script must be owner-read/write only (0600), got {:o}",
+            mode & 0o777
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_init_script_two_calls_yield_distinct_paths_and_both_contain_the_script() {
+        // 同一 pid 内で複数回呼んでも（ランダム成分により）パスが衝突
+        // しないことを確認する（デーモン再 spawn のたびに呼ばれるため
+        // 重要な性質）。
+        let tmpdir = tempfile::tempdir().unwrap();
+        let bridge_dir = tmpdir.path().join("zsh-bridge");
+
+        let path1 = write_init_script(&bridge_dir).expect("first call should succeed");
+        let path2 = write_init_script(&bridge_dir).expect("second call should succeed");
+        assert_ne!(
+            path1, path2,
+            "two calls must not collide on the same filename"
+        );
+        assert_eq!(fs::read_to_string(&path1).unwrap(), DAEMON_INIT_SCRIPT);
+        assert_eq!(fs::read_to_string(&path2).unwrap(), DAEMON_INIT_SCRIPT);
+        let _ = fs::remove_file(&path1);
+        let _ = fs::remove_file(&path2);
     }
 }

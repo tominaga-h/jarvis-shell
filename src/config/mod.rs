@@ -133,16 +133,29 @@ pub struct CompletionConfig {
     pub external_timeout_ms: u64,
     /// zsh 補完ブリッジを常駐デーモン化するかどうか（Task 2b.3, #89）。
     ///
-    /// `true`（デフォルト）: 初回の zsh 補完リクエスト時に `zsh -i` を
-    /// jarvish の子プロセスとして 1 本 spawn し、以後のセッション中は
-    /// 使い回す（Tab ごとの `zsh --no-rcs` 再起動コストを避ける）。
+    /// `true`（デフォルト）: `zsh -i` を jarvish の子プロセスとして 1 本
+    /// spawn し、以後のセッション中は使い回す（Tab ごとの `zsh --no-rcs`
+    /// 再起動コストを避ける）。`Shell::new` がシェル起動直後にバックグラウンド
+    /// スレッドから事前ウォームアップする（[`prewarm_zsh_daemon`]
+    /// (crate::cli::completer::zsh_bridge::prewarm_zsh_daemon)）ため、通常は
+    /// 最初の Tab 押下時点で既にウォーム状態になっている。プリウォームが
+    /// 間に合わなかった場合（または zsh 未検出等でスキップされた場合）は、
+    /// 最初にデーモンを必要とする Tab 押下で遅延 spawn する経路が
+    /// フォールバックとして機能する。ウォームリクエストのタイムアウトは
+    /// 2000ms を下限とし（`tmuxinator` 等インタプリタ起動を伴う遅い補完関数
+    /// を許容するため）、1回のタイムアウトでは kill しない（次の Tab で
+    /// 残留応答を排水するグレースドレイン）。連続2回のタイムアウトで
+    /// 初めてハングと判定し、デーモンをバックグラウンドで kill して次の
+    /// Tab で遅延 respawn する（Fix D2 サーキットブレーカー）。
     /// `false`: 常に [`ExternalKind::Zsh`](crate::cli::completer::ExternalKind)
     /// のワンショット経路（`zsh --no-rcs -c capture.zsh`）を使う（従来動作）。
     ///
     /// `source` ビルトインでホットリロードされる — `false` に切り替えると
-    /// 稼働中のデーモンは即座に shutdown され（次回 Tab はワンショットに
-    /// フォールバック）、`true` に戻すと次回 zsh 補完リクエストで
-    /// 遅延 spawn される。
+    /// 稼働中のデーモンは**その `source` 実行時点で**即座に shutdown され
+    /// （次回 Tab はワンショットにフォールバック）、`true` に戻すと次回
+    /// zsh 補完リクエストで遅延 spawn される。稼働中のデーモンは Jarvish の
+    /// 終了時・再起動時（`restart` ビルトイン経由を含む）にも必ず明示的に
+    /// shutdown される。
     pub external_zsh_daemon: bool,
 }
 
