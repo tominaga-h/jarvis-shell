@@ -28,6 +28,9 @@
 //!
 //! [completion]
 //! git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
+//! external = "auto"             # "auto" | "carapace" | "zsh" | "none" | ["carapace", "zsh"]（配列で優先順を明示指定）
+//! external_timeout_ms = 400     # 外部補完プロセスのタイムアウト（ミリ秒）
+//! external_zsh_daemon = true    # zsh ブリッジを常駐デーモン化するか（Tab ごとの起動コストを削減）
 //!
 //! [startup]
 //! commands = ["echo 'Welcome to jarvish!'", "export JAVA_HOME=/usr/lib/jvm/default"]
@@ -118,6 +121,42 @@ impl Default for PromptConfig {
 pub struct CompletionConfig {
     /// ブランチ名補完を提供する git サブコマンド
     pub git_branch_commands: Vec<String>,
+    /// 外部補完（carapace / zsh ブリッジ）の使用方針。
+    ///
+    /// TOML 上では文字列（`"auto"` / `"carapace"` / `"zsh"` / `"none"`）と
+    /// 配列（例: `["zsh", "carapace"]`、優先順を明示指定）のどちらでも書ける
+    /// （[`ExternalSetting`] の untagged パース）。実際の有効化判定・
+    /// バイナリ検出は `cli::completer::carapace::ExternalCompletionSettings::resolve`
+    /// が行う。
+    pub external: ExternalSetting,
+    /// 外部補完プロセスのタイムアウト（ミリ秒）
+    pub external_timeout_ms: u64,
+    /// zsh 補完ブリッジを常駐デーモン化するかどうか（Task 2b.3, #89）。
+    ///
+    /// `true`（デフォルト）: `zsh -i` を jarvish の子プロセスとして 1 本
+    /// spawn し、以後のセッション中は使い回す（Tab ごとの `zsh --no-rcs`
+    /// 再起動コストを避ける）。`Shell::new` がシェル起動直後にバックグラウンド
+    /// スレッドから事前ウォームアップする（[`prewarm_zsh_daemon`]
+    /// (crate::cli::completer::zsh_bridge::prewarm_zsh_daemon)）ため、通常は
+    /// 最初の Tab 押下時点で既にウォーム状態になっている。プリウォームが
+    /// 間に合わなかった場合（または zsh 未検出等でスキップされた場合）は、
+    /// 最初にデーモンを必要とする Tab 押下で遅延 spawn する経路が
+    /// フォールバックとして機能する。ウォームリクエストのタイムアウトは
+    /// 2000ms を下限とし（`tmuxinator` 等インタプリタ起動を伴う遅い補完関数
+    /// を許容するため）、1回のタイムアウトでは kill しない（次の Tab で
+    /// 残留応答を排水するグレースドレイン）。連続2回のタイムアウトで
+    /// 初めてハングと判定し、デーモンをバックグラウンドで kill して次の
+    /// Tab で遅延 respawn する（Fix D2 サーキットブレーカー）。
+    /// `false`: 常に [`ExternalKind::Zsh`](crate::cli::completer::ExternalKind)
+    /// のワンショット経路（`zsh --no-rcs -c capture.zsh`）を使う（従来動作）。
+    ///
+    /// `source` ビルトインでホットリロードされる — `false` に切り替えると
+    /// 稼働中のデーモンは**その `source` 実行時点で**即座に shutdown され
+    /// （次回 Tab はワンショットにフォールバック）、`true` に戻すと次回
+    /// zsh 補完リクエストで遅延 spawn される。稼働中のデーモンは Jarvish の
+    /// 終了時・再起動時（`restart` ビルトイン経由を含む）にも必ず明示的に
+    /// shutdown される。
+    pub external_zsh_daemon: bool,
 }
 
 impl Default for CompletionConfig {
@@ -139,7 +178,74 @@ impl Default for CompletionConfig {
             .into_iter()
             .map(String::from)
             .collect(),
+            external: ExternalSetting::default(),
+            external_timeout_ms: 400,
+            external_zsh_daemon: true,
         }
+    }
+}
+
+/// `[completion] external` の生設定値（TOML パース直後の未解決形）。
+///
+/// 文字列 1 個（`"auto"` / `"carapace"` / `"zsh"` / `"none"`）と、配列
+/// （例: `["zsh", "carapace"]` — プロバイダの優先順を明示指定）の両方の
+/// TOML 表現を受け付ける untagged enum。バイナリ検出やフォールバック判定は
+/// 行わない（それは `ExternalCompletionSettings::resolve` の責務）。
+///
+/// `#[serde(default)]` の `CompletionConfig` から参照されるため、この型自体も
+/// `Default` を実装する（値は `Single("auto")` — 後方互換の起点）。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ExternalSetting {
+    /// `external = "auto"` のような単一文字列形式（既存の後方互換形式）。
+    Single(String),
+    /// `external = ["zsh", "carapace"]` のような配列形式（明示的な優先順）。
+    List(Vec<String>),
+}
+
+impl Default for ExternalSetting {
+    fn default() -> Self {
+        ExternalSetting::Single("auto".to_string())
+    }
+}
+
+impl ExternalSetting {
+    /// 解決前の生の値を文字列のリストとして返す（`Single` は 1 要素）。
+    ///
+    /// `resolve()` 側で「既知の値かどうか」の判定や警告メッセージ組み立てに使う。
+    pub(crate) fn raw_entries(&self) -> Vec<&str> {
+        match self {
+            ExternalSetting::Single(s) => vec![s.as_str()],
+            ExternalSetting::List(list) => list.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+impl std::fmt::Display for ExternalSetting {
+    /// ログ出力・`source` サマリーの raw 値表示に使う。
+    /// `Single` はそのまま、`List` は TOML の配列表記に近い `["a", "b"]` 形式。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExternalSetting::Single(s) => write!(f, "{s}"),
+            ExternalSetting::List(list) => {
+                write!(f, "[")?;
+                for (i, entry) in list.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{entry:?}")?;
+                }
+                write!(f, "]")
+            }
+        }
+    }
+}
+
+impl PartialEq<&str> for ExternalSetting {
+    /// テスト・呼び出し側の可読性のための比較補助
+    /// （`Single("auto") == "auto"`）。配列形式とは常に不一致。
+    fn eq(&self, other: &&str) -> bool {
+        matches!(self, ExternalSetting::Single(s) if s == other)
     }
 }
 
@@ -179,6 +285,9 @@ impl JarvishConfig {
                         nerd_font = config.prompt.nerd_font,
                         starship = config.prompt.starship,
                         git_branch_commands = config.completion.git_branch_commands.len(),
+                        completion_external = %config.completion.external,
+                        completion_external_timeout_ms = config.completion.external_timeout_ms,
+                        completion_external_zsh_daemon = config.completion.external_zsh_daemon,
                         startup_commands = config.startup.commands.len(),
                         "Config loaded successfully"
                     );
@@ -251,6 +360,9 @@ mod tests {
             .git_branch_commands
             .contains(&"fetch".to_string()));
         assert_eq!(config.completion.git_branch_commands.len(), 11);
+        assert_eq!(config.completion.external, "auto");
+        assert_eq!(config.completion.external_timeout_ms, 400);
+        assert!(config.completion.external_zsh_daemon);
     }
 
     #[test]
@@ -392,6 +504,9 @@ EDITOR = "vim"
         assert!(content.contains("[alias]"));
         assert!(content.contains("[export]"));
         assert!(content.contains("[completion]"));
+        assert!(content.contains("external = \"auto\""));
+        assert!(content.contains("external_timeout_ms = 400"));
+        assert!(content.contains("external_zsh_daemon = true"));
 
         let config: JarvishConfig = toml::from_str(&content).unwrap();
         assert_eq!(config.ai.model, "gpt-4o");
@@ -429,6 +544,191 @@ git_branch_commands = []
             .completion
             .git_branch_commands
             .contains(&"fetch".to_string()));
+        assert_eq!(config.completion.external, "auto");
+        assert_eq!(config.completion.external_timeout_ms, 400);
+    }
+
+    #[test]
+    fn parse_completion_config_external_carapace() {
+        let toml = r#"
+[completion]
+external = "carapace"
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(config.completion.external, "carapace");
+    }
+
+    #[test]
+    fn parse_completion_config_external_none() {
+        let toml = r#"
+[completion]
+external = "none"
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(config.completion.external, "none");
+    }
+
+    #[test]
+    fn parse_completion_config_external_unknown_value_kept_as_is() {
+        // TOML パース自体は文字列をそのまま受け入れる。
+        // "auto" への読み替えと警告は ExternalCompletionSettings 構築時（実行時）の責務。
+        let toml = r#"
+[completion]
+external = "bogus"
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(config.completion.external, "bogus");
+    }
+
+    // ── ExternalSetting: 文字列 / 配列両対応 (Task 2b.4) ──
+
+    #[test]
+    fn parse_completion_config_external_zsh_string() {
+        let toml = r#"
+[completion]
+external = "zsh"
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(config.completion.external, "zsh");
+    }
+
+    #[test]
+    fn parse_completion_config_external_array_form_explicit_order() {
+        let toml = r#"
+[completion]
+external = ["zsh", "carapace"]
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(
+            config.completion.external,
+            ExternalSetting::List(vec!["zsh".to_string(), "carapace".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_completion_config_external_array_form_single_entry() {
+        let toml = r#"
+[completion]
+external = ["carapace"]
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(
+            config.completion.external,
+            ExternalSetting::List(vec!["carapace".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_completion_config_external_array_form_with_invalid_entry() {
+        // 不正な要素を含む配列でも TOML パース自体は成功する（要素単位の
+        // 妥当性検査・警告は resolve() の責務、raw_entries() 経由）。
+        let toml = r#"
+[completion]
+external = ["zsh", "bogus", "carapace"]
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(
+            config.completion.external,
+            ExternalSetting::List(vec![
+                "zsh".to_string(),
+                "bogus".to_string(),
+                "carapace".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn external_setting_default_is_single_auto_string_form() {
+        // 既存の文字列形式との後方互換の起点: デフォルトは Single("auto")。
+        assert_eq!(
+            ExternalSetting::default(),
+            ExternalSetting::Single("auto".to_string())
+        );
+        assert_eq!(ExternalSetting::default(), "auto");
+    }
+
+    #[test]
+    fn external_setting_raw_entries_single_returns_one_element() {
+        let setting = ExternalSetting::Single("carapace".to_string());
+        assert_eq!(setting.raw_entries(), vec!["carapace"]);
+    }
+
+    #[test]
+    fn external_setting_raw_entries_list_returns_all_elements_in_order() {
+        let setting = ExternalSetting::List(vec!["zsh".to_string(), "carapace".to_string()]);
+        assert_eq!(setting.raw_entries(), vec!["zsh", "carapace"]);
+    }
+
+    #[test]
+    fn external_setting_display_single_matches_raw_string() {
+        assert_eq!(
+            ExternalSetting::Single("auto".to_string()).to_string(),
+            "auto"
+        );
+    }
+
+    #[test]
+    fn external_setting_display_list_shows_bracketed_order() {
+        let setting = ExternalSetting::List(vec!["zsh".to_string(), "carapace".to_string()]);
+        assert_eq!(setting.to_string(), r#"["zsh", "carapace"]"#);
+    }
+
+    #[test]
+    fn parse_completion_config_custom_external_timeout_ms() {
+        let toml = r#"
+[completion]
+external_timeout_ms = 1500
+"#;
+        let config = load_from_str(toml);
+        assert_eq!(config.completion.external_timeout_ms, 1500);
+    }
+
+    // ── external_zsh_daemon (Task 2b.3, #89) ──
+
+    #[test]
+    fn external_zsh_daemon_defaults_to_true() {
+        assert!(CompletionConfig::default().external_zsh_daemon);
+    }
+
+    #[test]
+    fn parse_completion_config_external_zsh_daemon_explicit_false() {
+        let toml = r#"
+[completion]
+external_zsh_daemon = false
+"#;
+        let config = load_from_str(toml);
+        assert!(!config.completion.external_zsh_daemon);
+    }
+
+    #[test]
+    fn parse_completion_config_external_zsh_daemon_explicit_true() {
+        let toml = r#"
+[completion]
+external_zsh_daemon = true
+"#;
+        let config = load_from_str(toml);
+        assert!(config.completion.external_zsh_daemon);
+    }
+
+    #[test]
+    fn parse_completion_config_without_external_zsh_daemon_key_defaults_true() {
+        // 後方互換: 既存の config.toml（キー未記載）でもパースが失敗せず、
+        // デフォルト値 true が使われる。
+        let toml = r#"
+[completion]
+external_timeout_ms = 1500
+"#;
+        let config = load_from_str(toml);
+        assert!(config.completion.external_zsh_daemon);
+        assert_eq!(config.completion.external_timeout_ms, 1500);
+    }
+
+    #[test]
+    fn parse_config_without_completion_section_at_all_defaults_zsh_daemon_true() {
+        // completion セクション自体が存在しない設定ファイル（旧バージョン）
+        // でもパースが失敗しないことの確認。
+        let config = load_from_str("");
+        assert!(config.completion.external_zsh_daemon);
     }
 
     // ── startup ──

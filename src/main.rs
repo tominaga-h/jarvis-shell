@@ -74,12 +74,21 @@ async fn main() {
     if action == engine::LoopAction::Restart {
         // _guard を明示的にドロップしてログをフラッシュ
         drop(_guard);
+        // exec_restart() 内部で exec() 直前に温存 zsh デーモンを shutdown
+        // する（A1, #89）。exec() が失敗して以下に到達した場合も、
+        // デーモンは既に shutdown 済みなのでここでの追加対応は不要。
         let err = shell.exec_restart();
         // exec() が失敗した場合のみここに到達
         warn!(error = %err, "exec_restart failed");
         eprintln!("jarvish: restart failed: {err}");
         std::process::exit(1);
     }
+
+    // std::process::exit はデストラクタを一切実行しないため、温存 zsh
+    // デーモンが稼働中ならここで明示的に shutdown する（A2, #89 レビュー
+    // 指摘 — README の「daemon is killed automatically when Jarvish exits」
+    // を実際に真にする）。デーモンが元々稼働していなければ no-op。
+    shell.shutdown_zsh_daemon();
 
     std::process::exit(exit_code);
 }

@@ -39,6 +39,19 @@ impl super::JarvishConfig {
 
 [completion]
 # git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
+# external = "auto"           # 外部補完（carapace / zsh ブリッジ）の使用方針。
+#                              # 文字列で書く場合: "auto"（既定・各バイナリ検出時のみ使用、carapace→zsh の順）
+#                              #                   | "carapace"（carapace のみ強制有効）
+#                              #                   | "zsh"（zsh ブリッジのみ強制有効）
+#                              #                   | "none"（外部補完を無効化）
+#                              # 配列で書く場合: ["zsh", "carapace"] のように優先順を明示指定できる
+# external_timeout_ms = 400   # 外部補完プロセス（carapace / zsh ブリッジ）のタイムアウト（ミリ秒）
+# external_zsh_daemon = true  # zsh ブリッジを常駐デーモン化するか（既定 true）。
+#                              # true: `zsh -i` を jarvish の子プロセスとして1本 spawn し、
+#                              #       以後の Tab はそれを使い回す（起動コスト削減）。
+#                              #       シェル起動直後にバックグラウンドで事前ウォームアップされる
+#                              #       ため、通常は最初の Tab の時点で既にウォーム状態になっている。
+#                              # false: 毎回 `zsh --no-rcs` を起動するワンショット方式に固定する。
 
 [startup]
 # シェル起動時に順次実行するコマンド（-c オプション実行時はスキップ）

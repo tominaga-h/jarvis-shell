@@ -285,20 +285,31 @@ fn scan_backtick_span(chars: &[char], start: usize) -> Result<usize, SplitError>
 }
 
 /// `chars[i..]` の先頭が演算子なら長さを返す。なければ 0。
+///
+/// 演算子表そのものは [`operator_prefix_len`] に委譲する（表は 1 箇所のみ）。
 fn operator_at(chars: &[char], i: usize) -> usize {
     if i >= chars.len() {
         return 0;
     }
-    // 2 文字演算子
-    if i + 1 < chars.len() {
-        let two: String = chars[i..i + 2].iter().collect();
-        if matches!(two.as_str(), "&&" | "||" | ">>") {
-            return 2;
-        }
+    // 演算子は最大 2 文字（ASCII）なので先頭 2 文字だけ切り出せば十分。
+    let end = (i + 2).min(chars.len());
+    let head: String = chars[i..end].iter().collect();
+    operator_prefix_len(&head)
+}
+
+/// `s` の先頭が演算子トークンなら、そのバイト長を返す（なければ 0）。
+///
+/// 対応演算子: `&&` `||` `>>`（2 バイト）、`|` `<` `>` `;`（1 バイト）。
+/// 補完系の寛容スキャナ（`cli/completer/context.rs`）と実行系の
+/// [`split_quoted`] が同一の演算子表を参照するための共有関数。
+pub(crate) fn operator_prefix_len(s: &str) -> usize {
+    // 2 文字演算子（ASCII のみなのでバイト長 == 文字数）
+    if s.starts_with("&&") || s.starts_with("||") || s.starts_with(">>") {
+        return 2;
     }
     // 1 文字演算子
-    match chars[i] {
-        '|' | '<' | '>' | ';' => 1,
+    match s.chars().next() {
+        Some('|') | Some('<') | Some('>') | Some(';') => 1,
         _ => 0,
     }
 }
@@ -534,5 +545,57 @@ mod tests {
         // `$VAR` は置換構文ではないので通常トークン（has_subst=false）。
         let toks = split_quoted("echo $VAR").unwrap();
         assert_eq!(toks, vec![t("echo", false), t("$VAR", false)]);
+    }
+
+    // ── operator_prefix_len / operator_at 整合性 (#Phase1 Task1.1) ──
+
+    #[test]
+    fn operator_prefix_len_matches_table() {
+        // 演算子表が operator_prefix_len に一本化されたことのピン留め。
+        assert_eq!(operator_prefix_len("&&"), 2);
+        assert_eq!(operator_prefix_len("||"), 2);
+        assert_eq!(operator_prefix_len(">>"), 2);
+        assert_eq!(operator_prefix_len("|"), 1);
+        assert_eq!(operator_prefix_len("<"), 1);
+        assert_eq!(operator_prefix_len(">"), 1);
+        assert_eq!(operator_prefix_len(";"), 1);
+        assert_eq!(operator_prefix_len(""), 0);
+        assert_eq!(operator_prefix_len("echo"), 0);
+        assert_eq!(operator_prefix_len("&"), 0);
+        assert_eq!(operator_prefix_len("|foo"), 1);
+        assert_eq!(operator_prefix_len(">>foo"), 2);
+    }
+
+    #[test]
+    fn operator_prefix_len_pinned_against_operator_at() {
+        // operator_at が operator_prefix_len へ委譲していることをプローブコーパスで確認。
+        let probes = [
+            "ls *.txt | head",
+            "echo a >> file",
+            "a && b || c ; d",
+            "echo hello world",
+            "echo $(a | b)",
+            "cmd1 < in > out",
+            "a|b",
+            "a||b",
+            "a&b",
+            "a&&&b",
+            ">>>",
+            "",
+            "   ",
+            "echo 'a && b'",
+        ];
+        for probe in probes {
+            let chars: Vec<char> = probe.chars().collect();
+            for i in 0..=chars.len() {
+                let via_at = operator_at(&chars, i);
+                let tail: String = chars[i..].iter().collect();
+                let via_prefix = operator_prefix_len(&tail);
+                assert_eq!(
+                    via_at, via_prefix,
+                    "mismatch at probe={probe:?} i={i}: operator_at={via_at} operator_prefix_len={via_prefix}"
+                );
+            }
+        }
     }
 }
