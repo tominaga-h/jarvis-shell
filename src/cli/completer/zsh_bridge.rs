@@ -224,17 +224,41 @@ fn is_symlink(path: &Path) -> io::Result<bool> {
 const MIN_TIMEOUT_MS: u64 = 2000;
 
 /// 温存デーモン（[`ZshDaemon`]）を使ったウォームリクエストの実効タイムアウトに
-/// 適用する下限値（Task 2b.3, #89）。
+/// 適用する下限値（Task 2b.3 / Fix D, #89）。
 ///
-/// [`MIN_TIMEOUT_MS`]（2000ms）は zsh の `compinit` 起動コストを含む
-/// **コールド**経路（ワンショット呼び出し全体、またはデーモンの初回
-/// spawn+初期化+初回リクエスト）専用のフロアであり、デーモンが温まった
-/// 後の2回目以降のリクエストには過大（実測は概ね数十ms、`zsh_daemon.rs`
-/// のモジュールドキュメント参照）。ウォームリクエストは設定された
-/// `external_timeout_ms`（デフォルト 400ms）をほぼそのまま使いたいが、
-/// 極端に短い値（数ms等）を設定された場合でもハング検知が機能するよう、
-/// 小さな床（100ms）だけは維持する。
-const WARM_MIN_TIMEOUT_MS: u64 = 100;
+/// **Fix D 以前は 100ms だった。** これは死のループを引き起こしていた:
+/// 実機計測で、ありふれた補完関数（例: `_tmuxinator` は `tmuxinator
+/// commands zsh` を毎回 exec する）が内部で Ruby 等のインタプリタ起動を
+/// 伴う場合、460〜910ms かかることが確認されている。ウォームフロアが
+/// この現実的なコストを下回っていると、そうした補完関数を持つコマンドは
+/// **デフォルト設定（`external_timeout_ms = 400`）のもとで毎回タイムアウト
+/// する** → 旧実装（Fix B 以前）ではタイムアウト = ハング扱いでデーモンを
+/// 即 kill → 次の Tab はコールド再 spawn となり、コールド予算
+/// （[`MIN_TIMEOUT_MS`] = spawn + init + 初回リクエストの合計、Fix D3 以前）
+/// もこの重い初回リクエストを賄いきれず `None` → `PathProvider` フォール
+/// バック（「最初の Tab がパス補完になる」症状）。以後の Tab もこの
+/// キル/再spawnループを繰り返す。
+///
+/// そのため、[`MIN_TIMEOUT_MS`] と同じ計測値（460〜910ms）に余裕を
+/// 持たせた 2000ms をウォームフロアにも適用する。Fix D2（グレースドレイン）
+/// と組み合わせることで、遅いが正常な補完関数はタイムアウトしても
+/// デーモンを即座に殺さなくなるため、このフロア自体は「あからさまに
+/// ハングした補完を検知するまでの猶予」としての役割になる。
+///
+/// **この下限値は温存 zsh デーモン専用**であり、carapace や zsh の
+/// ワンショット経路には適用しない（それぞれ [`gate`] 呼び出し時の
+/// `min_timeout` 引数を参照）。
+const WARM_MIN_TIMEOUT_MS: u64 = 2000;
+
+/// ウォームリクエストの実効タイムアウトを計算する（Fix D1 のロジックを
+/// 独立した純粋関数として切り出したもの — ユニットテストで
+/// `raw_timeout_ms` → 実効タイムアウトの対応を直接検証するため）。
+///
+/// 設定された `external_timeout_ms` と [`WARM_MIN_TIMEOUT_MS`] の大きい方を
+/// 返す。
+fn compute_warm_timeout(raw_timeout: Duration) -> Duration {
+    raw_timeout.max(Duration::from_millis(WARM_MIN_TIMEOUT_MS))
+}
 
 /// zsh 補完ブリッジ Provider。
 ///
@@ -385,6 +409,119 @@ pub fn new_shared_daemon_slot() -> SharedDaemonSlot {
     Arc::new(Mutex::new(None))
 }
 
+/// Shell 起動時のバックグラウンド事前ウォームアップ（Fix D4, #89）。
+///
+/// `Shell::new` がこの関数を**デタッチしたバックグラウンドスレッド**から
+/// 呼ぶことで、ユーザーの最初の Tab 押下時に温存デーモンが既に spawn 済み
+/// （= コールドスタートではなくウォームリクエスト）であることを狙う。
+/// ここでの spawn 失敗（zsh 未検出、init タイムアウト等）は単に「事前
+/// ウォームアップできなかった」だけであり、`provide()` 側の通常の遅延
+/// spawn 経路がフォールバックとして機能するため、戻り値は返さずログのみ
+/// に留める。
+///
+/// # 呼び出し前提（`settings` は呼び出し時点のスナップショット）
+/// `Shell::new` は設定解決直後（`ExternalCompletionSettings::resolve` 完了
+/// 後）にこの関数を**別スレッドへ**ディスパッチする。呼び出し元は
+/// `Arc<RwLock<ExternalCompletionSettings>>` を渡すため、prewarm 実行時点
+/// までに `reload_config`（`source` 実行）でホットリロードされていたとして
+/// も、この関数は呼び出し直前の最新状態を読み直す（`should_run_zsh_daemon`
+/// の読み取り自体がその場で行われるため）。
+///
+/// # `provide()` とのレース回避（プロセス二重 spawn 防止）
+/// ユーザーが起動直後に即座に Tab を押すと、`provide()`（reedline の
+/// UI スレッド）とこの prewarm スレッドが同時にデーモン未 spawn 状態を
+/// 見て、両方が spawn しようとする可能性がある。これを避けるため:
+/// 1. `zsh` バイナリの検出・`ZshDaemon::spawn`（重い処理: init スクリプト
+///    書き出し + PTY + プロセス spawn + レディマーカー待ち）は**共有
+///    `Mutex` の外**で行う（`provide()` 側の UI スレッドをこの重い処理で
+///    ブロックしないため——`Mutex` を握ったまま spawn すると、
+///    `provide()` 側が `daemon.lock()` で prewarm の完了をブロッキング
+///    待ちすることになり、事前ウォームアップの意味がなくなる）。
+/// 2. spawn 完了後、共有スロットの `Mutex` を取ってから**もう一度**
+///    「スロットが空であること」を確認し、空の場合のみ書き込む。
+///    既に埋まっていれば（`provide()` 側が先に spawn していた場合）、
+///    このスレッドが今 spawn したデーモンは不要なので即座に shutdown
+///    する（二重デーモン防止——Fix A の exit-time shutdown semantics は
+///    どちらの経路で spawn されたデーモンにも同様に適用される。このスレッド
+///    が捨てるデーモンも通常の `ZshDaemon::shutdown`/`Drop` 経路で確実に
+///    kill/reap される）。
+pub fn prewarm_zsh_daemon(
+    settings: &Arc<RwLock<ExternalCompletionSettings>>,
+    daemon: &SharedDaemonSlot,
+) {
+    let Some(zsh) = which::which("zsh").ok() else {
+        tracing::debug!("zsh daemon prewarm: zsh binary not found, skipping");
+        return;
+    };
+    prewarm_zsh_daemon_with(settings, daemon, &zsh, &bridge_dir(), &[]);
+}
+
+/// [`prewarm_zsh_daemon`] の本体（テスト専用に `zsh` / `bridge_dir` /
+/// `extra_envs` を差し替え可能にした版）。本番経路は
+/// [`prewarm_zsh_daemon`] がこの関数に実値を渡すだけの薄いラッパー。
+fn prewarm_zsh_daemon_with(
+    settings: &Arc<RwLock<ExternalCompletionSettings>>,
+    daemon: &SharedDaemonSlot,
+    zsh: &Path,
+    bridge_dir: &Path,
+    extra_envs: &[(String, String)],
+) {
+    let should_run = match settings.read() {
+        Ok(guard) => guard.should_run_zsh_daemon(),
+        Err(_) => false,
+    };
+    if !should_run {
+        return;
+    }
+
+    let zshrc_path = match ensure_bridge_zshrc(bridge_dir) {
+        Ok(path) => path,
+        Err(err) => {
+            tracing::debug!("zsh daemon prewarm: failed to prepare bridge dir: {err}");
+            return;
+        }
+    };
+    let current_mtime = fs::metadata(&zshrc_path).and_then(|m| m.modified()).ok();
+
+    // 重い spawn 処理は Mutex の外で行う（provide() 側の UI スレッドを
+    // ブロックしないため——ドキュメント冒頭参照）。
+    let spawned = ZshDaemon::spawn(
+        zsh,
+        bridge_dir,
+        extra_envs,
+        Duration::from_millis(MIN_TIMEOUT_MS),
+    );
+
+    let mut new_daemon = match spawned {
+        Ok(daemon) => daemon,
+        Err(err) => {
+            tracing::debug!("zsh daemon prewarm: failed to spawn: {err}");
+            return;
+        }
+    };
+
+    let Ok(mut slot_guard) = daemon.lock() else {
+        // Mutex poison: 安全側に倒し、このスレッドが spawn したデーモンを
+        // 破棄する（呼び出し元スレッドに何かが起きた可能性があり、この
+        // スレッドから状態を無理に書き込まない）。
+        new_daemon.shutdown();
+        return;
+    };
+
+    if slot_guard.is_some() {
+        // レース: provide() 側が既に spawn 済み。このスレッドが今 spawn
+        // したデーモンは不要なので破棄する（二重デーモン防止）。
+        drop(slot_guard);
+        new_daemon.shutdown();
+        return;
+    }
+
+    *slot_guard = Some(DaemonSlot {
+        daemon: new_daemon,
+        zshrc_mtime_at_spawn: current_mtime,
+    });
+}
+
 impl ZshBridgeProvider {
     pub(super) fn new(
         settings: Arc<RwLock<ExternalCompletionSettings>>,
@@ -522,13 +659,18 @@ impl ZshBridgeProvider {
             }
         }
 
-        let effective_timeout = if slot_guard.is_some() {
-            warm_timeout
-        } else {
-            cold_timeout
-        };
-
         if slot_guard.is_none() {
+            // Fix D3: `cold_timeout`（[`MIN_TIMEOUT_MS`]）は spawn + init
+            // レディマーカー待ちのみを賄う予算であり、その直後に送る最初の
+            // 実補完リクエストはこの中に含めない（`ZshDaemon::spawn` 内部の
+            // `initialize()` が既に「レディマーカーを待つだけ」の実装に
+            // なっているため、ここでの変更は「初回リクエストのタイムアウト
+            // として cold_timeout ではなく warm_timeout を使う」ことだけで
+            // 完成する）。以前は初回リクエストも `cold_timeout` を使い回して
+            // いたため、spawn+init 自体は速くても実測 460〜910ms かかる
+            // 重い補完関数（tmuxinator 等）の初回リクエストが cold budget を
+            // 使い切ってしまい、初回 Tab だけ `None`（PathProvider
+            // フォールバック）になっていた（Fix D, #89 実機報告）。
             let extra_envs = self.extra_envs();
             match ZshDaemon::spawn(zsh, bridge_dir, &extra_envs, cold_timeout) {
                 Ok(daemon) => {
@@ -546,7 +688,9 @@ impl ZshBridgeProvider {
 
         let line = escaped_spans.join(" ");
         let slot = slot_guard.as_mut()?;
-        let result = slot.daemon.request(&line, effective_timeout);
+        // Fix D3: spawn 直後の初回リクエストも含め、常に warm_timeout を
+        // 使う（cold_timeout は spawn()/initialize() 内部の準備段階専用）。
+        let result = slot.daemon.request(&line, warm_timeout);
 
         if !slot.daemon.is_alive() {
             // request() 内部で timeout/desync により kill 済み。次回リクエスト
@@ -607,7 +751,7 @@ impl CompletionProvider for ZshBridgeProvider {
             Ok(guard) => (guard.zsh_daemon_enabled, guard.timeout),
             Err(_) => (false, cold_timeout),
         };
-        let warm_timeout = raw_timeout.max(Duration::from_millis(WARM_MIN_TIMEOUT_MS));
+        let warm_timeout = compute_warm_timeout(raw_timeout);
 
         let zsh = self.resolve_zsh()?;
 
@@ -875,7 +1019,7 @@ mod tests {
     use serial_test::serial;
     use std::env;
     use std::process::Command;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // ── パーサ単体テスト（固定文字列フィクスチャ） ──
 
@@ -1320,6 +1464,31 @@ mod tests {
         )
         .expect("zsh should be gated-in when external = \"zsh\"");
         assert!(effective >= Duration::from_millis(MIN_TIMEOUT_MS));
+    }
+
+    // ── Fix D1: ウォームタイムアウトの床（compute_warm_timeout）──
+
+    #[test]
+    fn compute_warm_timeout_floors_low_configured_value_to_2000ms() {
+        // 実機計測: tmuxinator 等の重い補完関数は Ruby インタプリタ起動で
+        // 460〜910ms かかる。デフォルト設定（external_timeout_ms = 400）が
+        // そのまま使われると必ずタイムアウトする——Fix D の核心の回帰防止。
+        let effective = compute_warm_timeout(Duration::from_millis(400));
+        assert_eq!(effective, Duration::from_millis(2000));
+    }
+
+    #[test]
+    fn compute_warm_timeout_preserves_configured_value_above_floor() {
+        // 床を上回る設定値はそのまま使う（フロアは下限であって固定値では
+        // ない）。
+        let effective = compute_warm_timeout(Duration::from_millis(3000));
+        assert_eq!(effective, Duration::from_millis(3000));
+    }
+
+    #[test]
+    fn compute_warm_timeout_floors_extremely_low_value() {
+        let effective = compute_warm_timeout(Duration::from_millis(1));
+        assert_eq!(effective, Duration::from_millis(WARM_MIN_TIMEOUT_MS));
     }
 
     // ── ブリッジディレクトリ / .zshrc テンプレート ──
@@ -1792,6 +1961,113 @@ mod tests {
 
     #[test]
     #[serial]
+    fn cold_spawn_budget_does_not_starve_a_slow_first_request() {
+        // Fix D3: cold_timeout（MIN_TIMEOUT_MS = 2000ms）は spawn + init の
+        // レディマーカー待ちのみを賄う予算であり、初回の実補完リクエストは
+        // 別枠（warm_timeout）で走る。ここでは spawn+init 自体は速いが、
+        // 最初の補完関数呼び出し自体が「旧実装なら cold budget の残りを
+        // 使い切っていたはずの長さ」だけ遅い（900ms）フィクスチャを使い、
+        // それでも最初の Tab が候補を返すことを証明する（実機報告の
+        // tmuxinator シナリオの直接再現）。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+        fs::write(
+            fpath_dir.join("_jarvishtestslowfirst"),
+            "#compdef jarvishtestslowfirst\nsleep 0.9\ncompadd -- slowcandidate\n",
+        )
+        .unwrap();
+
+        // デフォルト相当の設定（external_timeout_ms=400 → warm floor 2000ms、
+        // Fix D1）。
+        let settings = zsh_enabled_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
+            settings, zsh, zdotdir, home_envs,
+        );
+
+        let line = "jarvishtestslowfirst ";
+        let ctx = super::super::context::extract_context(line, line.len());
+        let result = provider.provide(&ctx);
+
+        let candidates =
+            result.expect("first Tab must serve real candidates, not fall through to None");
+        let values: Vec<&str> = candidates.iter().map(|c| c.value.as_str()).collect();
+        assert!(
+            values.contains(&"slowcandidate"),
+            "expected the slow first request's own candidate among {values:?}"
+        );
+        assert!(
+            provider.daemon.lock().unwrap().is_some(),
+            "daemon must have survived spawning + the slow first request"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn realistic_interpreter_startup_proxy_survives_three_tabs_same_pid() {
+        // Fix D 全体の実測ベース受け入れテスト: `_tmuxinator` の実測値
+        // （Ruby インタプリタ起動込みで 460〜910ms）を模した、サブプロセス
+        // を exec して ~600ms かかる補完関数フィクスチャを、デフォルト
+        // 相当の設定（external_timeout_ms 未指定 = 400ms → warm floor
+        // 2000ms、Fix D1）で3回連続 Tab 押下し、いずれも None でも
+        // PathProvider フォールバック相当でもなく実際の候補を返し、かつ
+        // 同じデーモン pid のまま生き続けることを検証する。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+        // `sh -c 'sleep 0.6'` でサブプロセス exec + 待ち合わせを模す
+        // （tmuxinator が `ruby` を exec するのと同じ「補完関数がサブ
+        // プロセスを起動して待つ」構造）。
+        fs::write(
+            fpath_dir.join("_jarvishtestinterp"),
+            "#compdef jarvishtestinterp\n\
+             sh -c 'sleep 0.6'\n\
+             compadd -- interpcandidate\n",
+        )
+        .unwrap();
+
+        let settings = zsh_enabled_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
+            settings, zsh, zdotdir, home_envs,
+        );
+
+        let line = "jarvishtestinterp ";
+        let ctx = super::super::context::extract_context(line, line.len());
+
+        let mut pid_seen: Option<u32> = None;
+        for tab in 1..=3 {
+            let result = provider.provide(&ctx);
+            let candidates = result.unwrap_or_else(|| {
+                panic!("Tab #{tab} must return real candidates, not None/path-fallback")
+            });
+            let values: Vec<&str> = candidates.iter().map(|c| c.value.as_str()).collect();
+            assert!(
+                values.contains(&"interpcandidate"),
+                "Tab #{tab}: expected interpcandidate among {values:?}"
+            );
+
+            let pid_now = {
+                let guard = provider.daemon.lock().unwrap();
+                guard.as_ref().unwrap().daemon.child_pid_for_test()
+            };
+            if let Some(prev) = pid_seen {
+                assert_eq!(
+                    pid_now, prev,
+                    "Tab #{tab}: daemon must survive with the same pid across all 3 tabs"
+                );
+            }
+            pid_seen = Some(pid_now);
+        }
+    }
+
+    #[test]
+    #[serial]
     fn daemon_path_reuses_same_daemon_across_requests() {
         // 2回連続でリクエストしても同じ ZshDaemon インスタンス（同じ子
         // プロセス pid）が使い回されることを、実際の pid を比較して直接
@@ -1912,10 +2188,13 @@ mod tests {
 
     #[test]
     #[serial]
-    fn daemon_failure_returns_none_this_tab_and_respawns_lazily_next_tab() {
-        // ハングする補完関数でタイムアウトさせ、その Tab は None を返す
-        // （ワンショットへのフォールバックはしない）。次の Tab では
-        // 遅延 respawn されて通常どおり候補を返すことを確認する。
+    fn daemon_failure_after_two_consecutive_timeouts_respawns_lazily_next_tab() {
+        // Fix D2 サーキットブレーカーの provide() 経由 E2E: 完全ハングする
+        // 補完関数に対して1回目の Tab は None（グレース、デーモンはまだ
+        // 生存）、2回目の Tab（=1回目の残留フレームのドレイン失敗 + 2回目
+        // 自体もハング）でサーキットブレーカーが作動しデーモンが kill
+        // される。3回目の Tab では遅延 respawn されて通常どおり候補を
+        // 返すことを確認する。
         //
         // 実装ノート: 隔離 `HOME`（`zsh_daemon_test_home_envs`）を必ず渡す
         // こと。`compinit -d ~/.zcompdump_capture` は `$HOME` 基準の固定
@@ -1967,27 +2246,57 @@ mod tests {
             provider.daemon.lock().unwrap().is_some(),
             "daemon should have been spawned by the first request"
         );
+        let pid_before_hangs = {
+            let guard = provider.daemon.lock().unwrap();
+            guard.as_ref().unwrap().daemon.child_pid_for_test()
+        };
 
         let hang_line = "jarvishtesthang ";
         let hang_ctx = super::super::context::extract_context(hang_line, hang_line.len());
-        let start = std::time::Instant::now();
-        let hung_result = provider.provide(&hang_ctx);
-        let elapsed = start.elapsed();
 
+        // 1回目のハング Tab: グレースにより None だが、デーモンは同じ pid
+        // のまま生存し続ける。
+        let start1 = std::time::Instant::now();
+        let hung_result1 = provider.provide(&hang_ctx);
+        let elapsed1 = start1.elapsed();
         assert_eq!(
-            hung_result, None,
+            hung_result1, None,
             "hung completion must yield None for this Tab (no one-shot fallback)"
         );
         assert!(
-            elapsed < Duration::from_secs(5),
-            "provide() should return promptly after the configured timeout, took {elapsed:?}"
+            elapsed1 < Duration::from_secs(5),
+            "provide() should return promptly after the configured timeout, took {elapsed1:?}"
+        );
+        assert!(
+            provider.daemon.lock().unwrap().is_some(),
+            "daemon must survive a single timeout (Fix D2 grace)"
+        );
+        assert_eq!(
+            {
+                let guard = provider.daemon.lock().unwrap();
+                guard.as_ref().unwrap().daemon.child_pid_for_test()
+            },
+            pid_before_hangs,
+            "grace must not respawn the daemon"
+        );
+
+        // 2回目のハング Tab: 1回目の残留フレームのドレインが失敗し、これで
+        // 連続2回目としてサーキットブレーカーが作動、デーモンが kill される。
+        let start2 = std::time::Instant::now();
+        let hung_result2 = provider.provide(&hang_ctx);
+        let elapsed2 = start2.elapsed();
+        assert_eq!(hung_result2, None);
+        assert!(
+            elapsed2 < Duration::from_secs(5),
+            "provide() should return promptly, took {elapsed2:?}"
         );
         assert!(
             provider.daemon.lock().unwrap().is_none(),
-            "daemon slot must be cleared after a timeout so the next Tab respawns lazily"
+            "daemon slot must be cleared after 2 consecutive timeouts (circuit breaker) \
+             so the next Tab respawns lazily"
         );
 
-        // 次の Tab: 遅延 respawn されて再び通常の補完が使えることを確認する。
+        // 3回目の Tab: 遅延 respawn されて再び通常の補完が使えることを確認する。
         let retry = provider.provide(&warm_ctx);
         let candidates = retry.expect("next Tab should lazily respawn and succeed");
         assert!(candidates.iter().any(|c| c.value == "alpha"));
@@ -2192,6 +2501,236 @@ mod tests {
         assert!(
             wait_for_pid_death(child_pid),
             "child pid {child_pid} should be dead after gate()-None shutdown"
+        );
+    }
+
+    // ── Fix D4: 起動時のバックグラウンド事前ウォームアップ ──
+
+    /// [`prewarm_zsh_daemon_with`] 用の poll ヘルパー: 生成された総合的な
+    /// 猶予時間内でスロットが埋まるのを待つ（バックグラウンドスレッド経由
+    /// の spawn は非同期なので、テスト側は寛容にポーリングする）。
+    fn wait_for_slot_populated(slot: &SharedDaemonSlot, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if slot.lock().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        slot.lock().unwrap().is_some()
+    }
+
+    #[test]
+    #[serial]
+    fn prewarm_populates_slot_when_daemon_enabled_without_provide_call() {
+        // Fix D4 の核心保証: settings がデーモン有効を示している状態で
+        // prewarm を呼ぶと、`provide()` を一度も呼ばなくてもスロットが
+        // 埋まる。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, _fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+
+        let settings = zsh_enabled_external_completion();
+        let slot = new_shared_daemon_slot();
+
+        prewarm_zsh_daemon_with(&settings, &slot, &zsh, &zdotdir, &home_envs);
+
+        assert!(
+            slot.lock().unwrap().is_some(),
+            "prewarm should populate the slot synchronously in this direct call \
+             (no provide() call was made)"
+        );
+    }
+
+    #[test]
+    fn prewarm_is_a_no_op_when_daemon_disabled() {
+        // フラグ off、または zsh が enabled-kinds に含まれない設定では
+        // prewarm は一切 spawn せずスロットは空のまま。zsh バイナリの
+        // 実機有無に関わらずテストできる（should_run_zsh_daemon の判定が
+        // spawn より先に効くため、無効な zsh パスを渡しても安全）。
+        let settings = zsh_enabled_daemon_off_external_completion();
+        let slot = new_shared_daemon_slot();
+
+        prewarm_zsh_daemon_with(
+            &settings,
+            &slot,
+            Path::new("/no/such/zsh/binary/zzjarvish"),
+            Path::new("/tmp/zzjarvish-unused-bridge-dir"),
+            &[],
+        );
+
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "prewarm must be a no-op (slot stays None) when the daemon is disabled"
+        );
+    }
+
+    #[test]
+    fn prewarm_is_a_no_op_when_zsh_not_in_enabled_kinds() {
+        // フラグは on だが zsh が優先順リストに無い（例: external =
+        // "carapace"）ケースも同様に no-op であるべき
+        // （`should_run_zsh_daemon` のもう一方の条件）。
+        let settings = carapace_only_external_completion();
+        let slot = new_shared_daemon_slot();
+
+        prewarm_zsh_daemon_with(
+            &settings,
+            &slot,
+            Path::new("/no/such/zsh/binary/zzjarvish"),
+            Path::new("/tmp/zzjarvish-unused-bridge-dir"),
+            &[],
+        );
+
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn provide_reuses_the_prewarmed_daemon_same_pid() {
+        // prewarm で spawn したデーモンを、その後の provide() 呼び出しが
+        // 再利用する（同じ pid で新規 spawn しない）ことを直接証明する。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, _fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+
+        let settings = zsh_enabled_external_completion();
+        let slot = new_shared_daemon_slot();
+        prewarm_zsh_daemon_with(&settings, &slot, &zsh, &zdotdir, &home_envs);
+        assert!(
+            slot.lock().unwrap().is_some(),
+            "prewarm should have spawned"
+        );
+        let pid_from_prewarm = {
+            let guard = slot.lock().unwrap();
+            guard.as_ref().unwrap().daemon.child_pid_for_test()
+        };
+
+        let provider = ZshBridgeProvider::with_shared_daemon_slot_for_test(
+            settings,
+            zsh,
+            zdotdir,
+            home_envs,
+            Arc::clone(&slot),
+        );
+
+        let line = "jarvishtestcmd ";
+        let ctx = super::super::context::extract_context(line, line.len());
+        let result = provider.provide(&ctx);
+        let candidates =
+            result.expect("provide() should serve candidates via the prewarmed daemon");
+        assert!(candidates.iter().any(|c| c.value == "alpha"));
+
+        let pid_after_provide = {
+            let guard = slot.lock().unwrap();
+            guard.as_ref().unwrap().daemon.child_pid_for_test()
+        };
+        assert_eq!(
+            pid_from_prewarm, pid_after_provide,
+            "provide() must reuse the daemon spawned by prewarm rather than spawning a new one"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn prewarm_and_provide_race_yields_exactly_one_daemon_process() {
+        // Fix D4 のレース回避保証: prewarm をトリガーした直後（そのスレッドが
+        // 実際に Mutex を取るより前）に provide() を呼び、両方が spawn を
+        // 試みうる状況を作る。最終的にプロセスは1つだけ生き残ることを、
+        // スロットの pid と実際のプロセス生存確認の両方で検証する。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, _fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+
+        let settings = zsh_enabled_external_completion();
+        let slot = new_shared_daemon_slot();
+
+        let prewarm_settings = Arc::clone(&settings);
+        let prewarm_slot = Arc::clone(&slot);
+        let prewarm_zsh = zsh.clone();
+        let prewarm_zdotdir = zdotdir.clone();
+        let prewarm_envs = home_envs.clone();
+        let handle = std::thread::spawn(move || {
+            prewarm_zsh_daemon_with(
+                &prewarm_settings,
+                &prewarm_slot,
+                &prewarm_zsh,
+                &prewarm_zdotdir,
+                &prewarm_envs,
+            );
+        });
+
+        // provide() をほぼ同時に呼ぶ（トリガー直後、prewarm スレッドが
+        // Mutex を取るより先に到達しうるタイミングを狙う——スケジューリング
+        // 依存のため決定的なタイミング保証はないが、両方が spawn を試みる
+        // ケースをできるだけ再現する）。
+        let provider = ZshBridgeProvider::with_shared_daemon_slot_for_test(
+            Arc::clone(&settings),
+            zsh,
+            zdotdir,
+            home_envs,
+            Arc::clone(&slot),
+        );
+        let line = "jarvishtestcmd ";
+        let ctx = super::super::context::extract_context(line, line.len());
+        let provide_result = provider.provide(&ctx);
+
+        handle.join().expect("prewarm thread should not panic");
+
+        // 少なくとも一方は成功しているはず（prewarm か provide() か、
+        // タイミング次第でどちらが先でも構わない）。
+        assert!(
+            wait_for_slot_populated(&slot, Duration::from_secs(10)),
+            "slot should be populated by either prewarm or provide()"
+        );
+        if provide_result.is_none() {
+            // provide() 側がスロット未確定のタイミングで走り None を返した
+            // 場合でも、最終的にスロットは埋まっていること自体は上で確認
+            // 済み。再度 provide() すれば必ず候補が返る（レースの後始末が
+            // 正しく完了していることの追加確認）。
+            let retry = provider.provide(&ctx);
+            assert!(retry.is_some(), "retry after the race should succeed");
+        }
+
+        let final_pid = {
+            let guard = slot.lock().unwrap();
+            guard.as_ref().unwrap().daemon.child_pid_for_test()
+        };
+
+        // pgrep で「バックグラウンド事前ウォームアップの子として spawn
+        // されうる zsh -i プロセス」の総数を数える代わりに、より決定的な
+        // 方法として: スロットに残った pid が生きていることと、レースで
+        // 捨てられた側（もしあれば）が実際に kill/reap されて ESRCH に
+        // なっていることを確認する。捨てられた pid を直接知る手段はテスト
+        // からは無い（`prewarm_zsh_daemon_with` 内部でのみ判明する）ため、
+        // 「スロットに残っている pid が実際に生きているプロセスである」
+        // ことと「そのプロセスに対して同じ pid で複数回 provide しても
+        // 常に同じ pid が返る（=2個目のデーモンが紛れ込んでいない）」
+        // ことを検証することで、実質的に「1個だけ生き残った」ことの
+        // 十分な証拠とする。
+        let ret = unsafe { libc::kill(final_pid as libc::pid_t, 0) };
+        assert_eq!(
+            ret, 0,
+            "the surviving daemon pid {final_pid} must be a live process"
+        );
+
+        let second_provide = provider.provide(&ctx);
+        let pid_again = {
+            let guard = slot.lock().unwrap();
+            guard.as_ref().unwrap().daemon.child_pid_for_test()
+        };
+        assert!(second_provide.is_some());
+        assert_eq!(
+            final_pid, pid_again,
+            "no second daemon should have been spawned after the race settled"
         );
     }
 }

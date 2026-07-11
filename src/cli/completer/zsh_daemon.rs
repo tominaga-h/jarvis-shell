@@ -115,6 +115,87 @@ pub(crate) struct ZshDaemon {
     /// 所有権譲渡と同時にこのパスも移譲する（`None` になったら既に
     /// バックグラウンドスレッド or 呼び出し元が削除責任を持つ）。
     init_script_path: Option<PathBuf>,
+    /// Fix D2（グレースドレイン）: 直前のリクエストがタイムアウトし、
+    /// まだ完了していない応答フレームが PTY 側に残っている可能性がある
+    /// （zsh 側は補完関数の実行を継続しており、いずれセンチネルに挟まれた
+    /// 出力を送ってくる）ことを示すフラグ。`true` の間、次の `request()`
+    /// 呼び出しは新しい行を送る**前**にこの残留フレームを読み飛ばす
+    /// （[`drain_pending_frame`](Self::drain_pending_frame)）。
+    pending_frame: bool,
+    /// [`read_framed_response`](Self::read_framed_response) の呼び出しを
+    /// またいで持ち越す部分読み取り状態（Fix D2）。
+    ///
+    /// 1つの論理フレームの**開始センチネル**は `_main_complete` が
+    /// `compprefuncs` を呼んだ直後（補完関数本体が実行される**前**）に
+    /// 出力される（`null-line` を先に呼ぶ `compprefuncs` の仕組み——
+    /// `daemon_init.zsh` 参照）。そのため、遅い補完関数の場合「開始
+    /// センチネルは元のリクエストのタイムアウト以内に届くが、終了
+    /// センチネルは補完関数が完了する後続のドレイン呼び出しでようやく届く」
+    /// という状況が普通に起こる。`read_framed_response` を呼び出しごとに
+    /// 独立したローカル状態（`toggles`/`buf` をその場でリセット）で実装
+    /// すると、ドレイン側の呼び出しは「終了センチネル1個だけ」を見て
+    /// `toggles == 1`（2に届かない）と誤判定し、実際にはフレームが完成して
+    /// いるにも関わらずタイムアウト扱いになってしまう（実機検証で発覚 —
+    /// 実装当初のバグ）。これを避けるため、読み取りバッファとトグル状態を
+    /// `ZshDaemon` インスタンスに持たせ、`request()` の呼び出しをまたいで
+    /// 引き継ぐ。
+    partial_read: PartialRead,
+    /// Fix D2（サーキットブレーカー）: 直近の「成功したフレーム読み取り」
+    /// 以降に連続したタイムアウト回数。ドレイン自体のタイムアウトも
+    /// 1回とカウントする。2 に達した時点でデーモンをハングとみなし
+    /// kill する（[`mark_dead_and_kill`](Self::mark_dead_and_kill)）。
+    /// 成功したフレーム読み取りが1回でもあればこのカウンタは 0 に戻る。
+    consecutive_timeouts: u8,
+}
+
+/// [`ZshDaemon`] がハングと判定してデーモンを kill するまでに許容する
+/// 連続タイムアウト回数（Fix D2 サーキットブレーカー）。
+///
+/// 「1回のタイムアウト」は遅いが正常な補完関数（例: インタプリタ起動を
+/// 伴う `tmuxinator` 補完）でも普通に起こりうるため即座には殺さない。
+/// 2回連続（= ドレインした上でなお次のリクエストもタイムアウトする、
+/// または2回連続で素の要求がタイムアウトする）で初めて「本当にハングして
+/// いる」とみなす。
+const MAX_CONSECUTIVE_TIMEOUTS: u8 = 2;
+
+/// [`ZshDaemon::read_framed_response`] の結果。
+enum FramedRead {
+    /// 2つのセンチネルに挟まれたフレームを正常に読み取れた。
+    Frame(String),
+    /// `deadline` までにセンチネルが2個揃わなかった（純粋なタイムアウト、
+    /// またはセンチネルが1個も来ないまま `deadline` に達した場合を含む）。
+    Timeout,
+    /// 応答バッファが [`MAX_RESPONSE_BYTES`] を超えた（B4）。プロトコル
+    /// desync 相当として扱う——グレースの対象外。
+    BufferOverflow,
+}
+
+/// [`ZshDaemon::read_framed_response`] が `request()`/`drain_pending_frame`
+/// の呼び出しをまたいで持ち越す部分読み取り状態（Fix D2）。
+///
+/// `ZshDaemon::partial_read` フィールドのドキュメント参照——1つの論理
+/// フレームの開始・終了センチネルが異なる呼び出し（元のリクエストと、
+/// それに続くドレイン呼び出し）にまたがって届くケースに対応するため、
+/// バッファとトグルカウントを呼び出し間で保持する。
+#[derive(Default)]
+struct PartialRead {
+    /// これまでに読み取った生バイト列（フレームが完成する、または
+    /// バッファ上限超過/desync でリセットされるまで蓄積し続ける）。
+    buf: Vec<u8>,
+    /// これまでに検出したセンチネルバイトの個数（0, 1, または 2）。
+    toggles: u8,
+    /// 最初のセンチネル直後のオフセット（`buf` 内、フレーム本体の開始位置）。
+    frame_start: Option<usize>,
+}
+
+impl PartialRead {
+    /// フレームが完成した（`toggles == 2`）ときに、次のリクエストに
+    /// 備えて状態を空にリセットする。
+    fn reset(&mut self) {
+        self.buf.clear();
+        self.toggles = 0;
+        self.frame_start = None;
+    }
 }
 
 /// kill/reap をバックグラウンドスレッドまたは有界同期待ちへ委譲するために
@@ -220,6 +301,9 @@ impl ZshDaemon {
             master,
             alive: true,
             init_script_path: Some(init_script_path),
+            pending_frame: false,
+            partial_read: PartialRead::default(),
+            consecutive_timeouts: 0,
         };
 
         if !daemon.initialize(init_timeout) {
@@ -289,11 +373,32 @@ impl ZshDaemon {
     /// [`super::zsh_bridge::parse_capture_output`] にそのまま渡せる形式
     /// （PTY 由来の `\r\n` 区切り、ANSI・バックスラッシュ未処理）。
     ///
-    /// タイムアウトまたはセンチネルが正しく揃わない場合（プロトコル
-    /// desync）、応答バッファが上限（[`MAX_RESPONSE_BYTES`]）を超えた場合
-    /// （B4）は子プロセスとその子孫ツリーの kill/reap を**バックグラウンド
-    /// スレッドへ委譲**し（B1、呼び出し元スレッドはブロックしない）、
-    /// `alive = false` に遷移して `None` を返す。
+    /// # Fix D2: グレースドレイン + サーキットブレーカー
+    ///
+    /// **クリーンなタイムアウト**（センチネルが1個も来ない、または1個しか
+    /// 来ないまま `timeout` に達した場合）はもはや即座にデーモンを kill
+    /// しない。代わりに [`pending_frame`](Self::pending_frame) を立てて
+    /// `None` を返すだけに留める（この Tab の UI 応答性を確保しつつ、
+    /// 遅いだけで正常な補完関数の結果を捨てない）。次の `request()` 呼び
+    /// 出しは、新しい行を送る**前**にまずこの残留フレームを排水する
+    /// （[`drain_pending_frame`](Self::drain_pending_frame)、予算は
+    /// `timeout` を再利用）。ドレイン自体がタイムアウトした場合、または
+    /// 「連続2回」のクリーンタイムアウト（ドレイン失敗 + 通常リクエスト
+    /// 失敗、または通常リクエストの failure が2回連続、のいずれか）が
+    /// 起きた場合にのみ、デーモンをハングと判定して kill する
+    /// （[`MAX_CONSECUTIVE_TIMEOUTS`]）。フレーム読み取りが1回でも成功
+    /// すればこのカウンタは 0 にリセットされる。
+    ///
+    /// プロトコル desync（センチネルが完全に壊れた並びで来る等、
+    /// [`read_framed_response`](Self::read_framed_response) が
+    /// `FramedRead::Timeout` 以外の失敗として扱うことはない——現行の
+    /// フレーミング実装はタイムアウトと desync を区別しないため、
+    /// **desync も「クリーンなタイムアウト」と同じグレース経路を通る**）
+    /// と応答バッファ上限超過（[`FramedRead::BufferOverflow`]、B4）は
+    /// 従来どおり**グレースの対象外**——即座に子プロセスとその子孫ツリーの
+    /// kill/reap を**バックグラウンドスレッドへ委譲**し（B1、呼び出し元
+    /// スレッドはブロックしない）、`alive = false` に遷移して `None` を
+    /// 返す。
     pub(crate) fn request(&mut self, line: &str, timeout: Duration) -> Option<String> {
         if !self.alive {
             return None;
@@ -321,6 +426,15 @@ impl ZshDaemon {
             }
         }
 
+        // Fix D2: 前回リクエストがタイムアウトして残留フレームがある場合、
+        // 新しい行を送る前にまずそれを排水する。ドレイン自体が失敗した
+        // 場合はサーキットブレーカーのカウンタを進めたうえで即座に
+        // `None` を返す（新しいリクエストは送らない——2つのリクエストの
+        // 応答が PTY 上で混ざる desync を避けるため）。
+        if self.pending_frame && !self.drain_pending_frame(timeout) {
+            return None;
+        }
+
         // ^U (kill-whole-line) で前回リクエストの残留を破棄してから、
         // 新しい行 + ^I (jarvish-complete-word) を送る。
         let payload = format!("\x15{line}\t");
@@ -329,66 +443,134 @@ impl ZshDaemon {
             return None;
         }
 
+        match self.read_framed_response(timeout) {
+            FramedRead::Frame(frame) => {
+                self.consecutive_timeouts = 0;
+                Some(frame)
+            }
+            FramedRead::BufferOverflow => {
+                tracing::debug!(
+                    "zsh daemon: response buffer exceeded {MAX_RESPONSE_BYTES} bytes, treating as desync"
+                );
+                self.mark_dead_and_kill();
+                None
+            }
+            FramedRead::Timeout => {
+                self.register_timeout_and_maybe_kill();
+                None
+            }
+        }
+    }
+
+    /// [`request`](Self::request) 冒頭で前回タイムアウト分の残留フレームを
+    /// 排水する（Fix D2）。`timeout` 予算内でセンチネル2個の対を読み切れ
+    /// れば `pending_frame` を降ろして `true` を返す（読み取った内容自体は
+    /// 破棄する——この Tab のリクエストに対応する応答ではないため）。
+    /// 読み切れなければ（タイムアウト/オーバーフローいずれも）サーキット
+    /// ブレーカーのカウンタを進め、`pending_frame` は立てたままにして
+    /// （まだ排水できていないため）`false` を返す。
+    fn drain_pending_frame(&mut self, timeout: Duration) -> bool {
+        match self.read_framed_response(timeout) {
+            FramedRead::Frame(_) => {
+                self.pending_frame = false;
+                // 排水成功はハング検知の観点では「フレームが取れた」ことに
+                // 変わりないため、カウンタをリセットする（このフレーム自体は
+                // 直前のリクエストに対する遅延応答であり、デーモン自体は
+                // 生きて正常に動いている証拠のため）。
+                self.consecutive_timeouts = 0;
+                true
+            }
+            FramedRead::BufferOverflow => {
+                tracing::debug!(
+                    "zsh daemon: response buffer exceeded {MAX_RESPONSE_BYTES} bytes while \
+                     draining a pending frame, treating as desync"
+                );
+                self.mark_dead_and_kill();
+                false
+            }
+            FramedRead::Timeout => {
+                self.register_timeout_and_maybe_kill();
+                false
+            }
+        }
+    }
+
+    /// クリーンなタイムアウト（ドレイン中・通常リクエスト中いずれも）を
+    /// 1回記録し、[`MAX_CONSECUTIVE_TIMEOUTS`] に達していればデーモンを
+    /// ハングと判定して kill する（Fix D2 サーキットブレーカー）。
+    /// 達していなければ `pending_frame` を立てて次回に排水を持ち越す。
+    fn register_timeout_and_maybe_kill(&mut self) {
+        self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
+        if self.consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
+            tracing::debug!(
+                "zsh daemon: {} consecutive timeouts, treating as hung and killing",
+                self.consecutive_timeouts
+            );
+            self.mark_dead_and_kill();
+        } else {
+            self.pending_frame = true;
+        }
+    }
+
+    /// PTY master から `timeout` 予算内でセンチネル2個に挟まれた1フレーム分
+    /// を読み取る（[`request`](Self::request) / [`drain_pending_frame`]
+    /// 共通のフレーミングロジック、Fix D2 で切り出し）。バッファ上限
+    /// （[`MAX_RESPONSE_BYTES`]、B4）超過はタイムアウトより優先して検知する。
+    ///
+    /// # 呼び出しをまたぐ状態の持ち越し（Fix D2、[`PartialRead`] 参照）
+    /// 読み取り状態（`buf`/`toggles`/`frame_start`）は `self.partial_read`
+    /// に保持し、呼び出しごとにリセットしない。開始センチネルが前回の
+    /// 呼び出し（元のリクエスト）内で既に届いていた場合、この呼び出しは
+    /// 「終了センチネルだけを待てばよい」状態から再開する——`toggles == 1`
+    /// のまま呼ばれることも正常なケースであり、その場合でも新しく読めた
+    /// バイト内で NUL が1個見つかれば `toggles` が2に達してフレーム完成と
+    /// 判定できる。フレームが完成した時点（`toggles == 2`）で
+    /// [`PartialRead::reset`] を呼び、次の論理フレーム用にまっさらな状態へ
+    /// 戻す（バッファ上限超過時も同様——desync 扱いで kill されるため
+    /// どのみち次のフレームは存在しないが、防御的にリセットしておく）。
+    fn read_framed_response(&mut self, timeout: Duration) -> FramedRead {
         let deadline = Instant::now() + timeout;
-        let mut buf: Vec<u8> = Vec::new();
-        let mut toggles = 0u8;
-        let mut frame_start: Option<usize> = None;
-        let mut frame_end: Option<usize> = None;
-        let mut buffer_overflow = false;
 
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let step = remaining.min(Duration::from_millis(200));
             match read_available(&mut self.master, step) {
                 Some(chunk) if !chunk.is_empty() => {
-                    let base = buf.len();
-                    buf.extend_from_slice(&chunk);
+                    let base = self.partial_read.buf.len();
+                    self.partial_read.buf.extend_from_slice(&chunk);
                     // 新しく読めたバイト範囲内で NUL をスキャンする。
                     let mut idx = base;
-                    while idx < buf.len() {
-                        if buf[idx] == SENTINEL_BYTE {
-                            toggles += 1;
-                            if toggles == 1 {
-                                frame_start = Some(idx + 1);
-                            } else if toggles == 2 {
-                                frame_end = Some(idx);
-                                break;
+                    while idx < self.partial_read.buf.len() {
+                        if self.partial_read.buf[idx] == SENTINEL_BYTE {
+                            self.partial_read.toggles += 1;
+                            if self.partial_read.toggles == 1 {
+                                self.partial_read.frame_start = Some(idx + 1);
+                            } else if self.partial_read.toggles == 2 {
+                                let start = self
+                                    .partial_read
+                                    .frame_start
+                                    .expect("toggles==2 implies frame_start was set at toggle 1");
+                                let frame =
+                                    String::from_utf8_lossy(&self.partial_read.buf[start..idx])
+                                        .into_owned();
+                                self.partial_read.reset();
+                                return FramedRead::Frame(frame);
                             }
                         }
                         idx += 1;
                     }
-                    if toggles >= 2 {
-                        break;
-                    }
                     // B4: 上限超過はプロトコル desync 相当として扱い、
                     // タイムアウトを待たず即座に打ち切る。
-                    if buf.len() > MAX_RESPONSE_BYTES {
-                        buffer_overflow = true;
-                        break;
+                    if self.partial_read.buf.len() > MAX_RESPONSE_BYTES {
+                        self.partial_read.reset();
+                        return FramedRead::BufferOverflow;
                     }
                 }
                 _ => continue,
             }
         }
 
-        if buffer_overflow {
-            tracing::debug!(
-                "zsh daemon: response buffer exceeded {MAX_RESPONSE_BYTES} bytes, treating as desync"
-            );
-            self.mark_dead_and_kill();
-            return None;
-        }
-
-        match (frame_start, frame_end) {
-            (Some(start), Some(end)) if start <= end => {
-                Some(String::from_utf8_lossy(&buf[start..end]).into_owned())
-            }
-            _ => {
-                // タイムアウト or desync（センチネルが2個揃わなかった）。
-                self.mark_dead_and_kill();
-                None
-            }
-        }
+        FramedRead::Timeout
     }
 
     /// 子プロセスとその子孫ツリーの kill + reap + 一時ファイル削除を
@@ -873,7 +1055,12 @@ mod tests {
 
     #[test]
     #[serial]
-    fn hung_completion_times_out_and_kills_descendants() {
+    fn hung_completion_first_timeout_stays_alive_second_kills_descendants() {
+        // Fix D2 サーキットブレーカー: `sleep 30` の完全ハング補完関数に
+        // 対して、1回目のタイムアウトではまだデーモンを殺さず（グレース）、
+        // 同じハング状態が続く2回目のリクエスト（= 1回目の残留フレームの
+        // ドレインがタイムアウトし、それ自体が「2回連続」の2回目としてカウント
+        // される）で初めてハングと判定してデーモンを kill することを検証する。
         let Some(zsh) = zsh_binary() else {
             eprintln!("skipping: zsh not found on PATH");
             return;
@@ -895,11 +1082,27 @@ mod tests {
         let child_pid = daemon.child_pid_for_test();
 
         let request_timeout = Duration::from_millis(500);
-        let start = Instant::now();
-        let result = daemon.request("jarvishtesthang ", request_timeout);
-        let elapsed = start.elapsed();
 
-        assert_eq!(result, None, "hung completion should time out to None");
+        // 1回目: タイムアウトするが、グレースによりまだ生きている。
+        let start1 = Instant::now();
+        let result1 = daemon.request("jarvishtesthang ", request_timeout);
+        let elapsed1 = start1.elapsed();
+        assert_eq!(result1, None, "hung completion should time out to None");
+        assert!(
+            elapsed1 < request_timeout + Duration::from_millis(250),
+            "request() must return within timeout + small epsilon, took {elapsed1:?}"
+        );
+        assert!(
+            daemon.is_alive(),
+            "daemon must stay alive after a single (first) timeout (Fix D2 grace)"
+        );
+
+        // 2回目: 残留フレームのドレインがタイムアウトし、これが「2回連続」の
+        // 2回目としてカウントされ、サーキットブレーカーが作動する。
+        let start2 = Instant::now();
+        let result2 = daemon.request("jarvishtesthang ", request_timeout);
+        let elapsed2 = start2.elapsed();
+        assert_eq!(result2, None);
         // B1: kill_tree + reap は request() のタイムアウト/desync 経路から
         // バックグラウンドスレッドへ委譲されるようになったため、
         // request() 自体は「タイムアウト値 + 小さな epsilon」以内に戻る
@@ -908,13 +1111,13 @@ mod tests {
         // — 実測 2.86 秒 vs 500ms タイムアウト。この下限を厳しくすること
         // 自体が「reap を呼び出し元スレッドから追い出せた」ことの直接証拠）。
         assert!(
-            elapsed < request_timeout + Duration::from_millis(250),
+            elapsed2 < request_timeout + Duration::from_millis(250),
             "request() must return within timeout + small epsilon (reap must not block \
-             the caller thread), timeout={request_timeout:?}, took {elapsed:?}"
+             the caller thread), timeout={request_timeout:?}, took {elapsed2:?}"
         );
         assert!(
             !daemon.is_alive(),
-            "daemon must be marked dead after a timeout"
+            "daemon must be marked dead after 2 consecutive timeouts (circuit breaker)"
         );
 
         // 子プロセス（と、可能なら子孫）は request() が戻った後も
@@ -935,6 +1138,156 @@ mod tests {
         assert!(
             !alive,
             "child pid {child_pid} should eventually be dead after background reap"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn grace_drain_recovers_slow_first_call_and_serves_second_request_correctly() {
+        // Fix D2 の核心保証: 1回目の呼び出しだけ遅く（テスト用タイムアウトを
+        // 超えて）、2回目以降は速く応答する補完関数フィクスチャで、
+        // 1回目は None（グレースで daemon は生存継続）、2回目は 1回目の
+        // 残留フレームをドレインしたうえで、正しい候補（2回目のリクエスト
+        // に対応するもの）を返すことを検証する。
+        //
+        // フィクスチャ: マーカーファイルの有無で初回/以降を判別する
+        // （プロセスをまたいで状態を持たせる必要があるため、zsh の変数では
+        // なくファイルシステムを使う——1回目の呼び出しで sleep してから
+        // マーカーを作り、2回目以降はマーカーがあるので即座に応答する）。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let tmpdir = tempfile::tempdir().unwrap();
+        let marker = tmpdir.path().join("first-call-done");
+        let fixture = setup_fixture(&[(
+            "_jarvishtestslow",
+            &format!(
+                "#compdef jarvishtestslow\n\
+                 if [[ ! -f {marker} ]]; then\n\
+                 touch {marker}\n\
+                 sleep 2\n\
+                 fi\n\
+                 compadd -- fastcandidate\n",
+                marker = marker.display()
+            ),
+        )]);
+
+        let mut daemon = ZshDaemon::spawn(
+            &zsh,
+            &fixture.zdotdir,
+            &extra_envs_for(&fixture),
+            Duration::from_secs(10),
+        )
+        .expect("daemon should spawn");
+        let pid_before = daemon.child_pid_for_test();
+
+        // テスト用の短いウォームタイムアウト（1回目の sleep 2 秒より短い）。
+        let short_timeout = Duration::from_millis(400);
+
+        let first = daemon.request("jarvishtestslow ", short_timeout);
+        assert_eq!(
+            first, None,
+            "first (slow) call should yield None under the short test timeout"
+        );
+        assert!(
+            daemon.is_alive(),
+            "daemon must stay alive after the first timeout (grace)"
+        );
+        assert_eq!(
+            daemon.child_pid_for_test(),
+            pid_before,
+            "grace must not respawn the daemon"
+        );
+
+        // 2回目: 残留フレームをドレインしたうえで、今回のリクエストの
+        // 応答（fastcandidate）を正しく返す。ドレイン + 新リクエストの
+        // 両方を賄うのに十分な予算を与える。
+        let second = daemon.request("jarvishtestslow ", Duration::from_secs(5));
+        let candidates = second.expect("second request should recover and return candidates");
+        let values = parse_capture_output(&candidates);
+        assert!(
+            values.iter().any(|c| c.value == "fastcandidate"),
+            "second request should see its own response, got {values:?}"
+        );
+        assert!(
+            daemon.is_alive(),
+            "daemon must still be alive after a successful drain + request"
+        );
+        assert_eq!(
+            daemon.child_pid_for_test(),
+            pid_before,
+            "the same daemon process must still be serving requests (no respawn)"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn success_between_timeouts_resets_consecutive_counter() {
+        // Fix D2: timeout → success → timeout という並びでは、途中の success
+        // がカウンタをリセットするため、2回目の timeout だけではサーキット
+        // ブレーカーは作動せず、デーモンは生きたままである。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let fixture = setup_fixture(&[
+            (
+                "_jarvishtesthang",
+                "#compdef jarvishtesthang\nsleep 30\ncompadd -- neverseen\n",
+            ),
+            (
+                "_jarvishtestcmd",
+                "#compdef jarvishtestcmd\ncompadd -- alpha beta gamma\n",
+            ),
+        ]);
+
+        let mut daemon = ZshDaemon::spawn(
+            &zsh,
+            &fixture.zdotdir,
+            &extra_envs_for(&fixture),
+            Duration::from_secs(10),
+        )
+        .expect("daemon should spawn");
+        let pid_before = daemon.child_pid_for_test();
+
+        let request_timeout = Duration::from_millis(500);
+
+        // 1回目: timeout (グレース、まだ生存)。
+        let r1 = daemon.request("jarvishtesthang ", request_timeout);
+        assert_eq!(r1, None);
+        assert!(daemon.is_alive());
+
+        // 2回目: 別の（ハングしない）コマンドへのリクエスト。まず1回目の
+        // 残留フレームをドレインする必要があるが、`sleep 30` はまだ動作中
+        // なのでこのドレイン自体もタイムアウトしうる——このテストの主張は
+        // 「ドレインが失敗してもリクエスト自体は諦めて None を返すこと」
+        // ではなく、**ドレインさえ間に合えば**カウンタがリセットされる
+        // ことなので、ドレイン予算に十分な余裕を与える（`sleep 30` の残り
+        // 時間を上回るテスト用タイムアウト）ことで確実にドレインを成功させる。
+        let r2 = daemon.request("jarvishtestcmd ", Duration::from_secs(35));
+        let candidates =
+            r2.expect("second request should succeed once the stale hang frame is drained");
+        let values = parse_capture_output(&candidates);
+        assert!(values.iter().any(|c| c.value == "alpha"));
+        assert!(
+            daemon.is_alive(),
+            "daemon must be alive after a successful request"
+        );
+
+        // 3回目: 再びハングするコマンド。timeout が起きるが、直前の success
+        // がカウンタをリセットしているため、これは「連続1回目」に過ぎず、
+        // まだ kill されない。
+        let r3 = daemon.request("jarvishtesthang ", request_timeout);
+        assert_eq!(r3, None);
+        assert!(
+            daemon.is_alive(),
+            "daemon must stay alive: the counter was reset by the success in between"
+        );
+        assert_eq!(
+            daemon.child_pid_for_test(),
+            pid_before,
+            "no respawn should have happened throughout"
         );
     }
 

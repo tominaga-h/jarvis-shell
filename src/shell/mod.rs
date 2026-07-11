@@ -26,8 +26,8 @@ static RESTART_FLAG: StaticAtomicBool = StaticAtomicBool::new(false);
 use crate::ai::{ConversationState, JarvisAI};
 use crate::cli::completer::{
     format_external_binaries_display, format_external_summary, new_shared_daemon_slot,
-    shutdown_shared_daemon, shutdown_shared_daemon_blocking, ExternalCompletionSettings,
-    SharedDaemonSlot,
+    prewarm_zsh_daemon, shutdown_shared_daemon, shutdown_shared_daemon_blocking,
+    ExternalCompletionSettings, SharedDaemonSlot,
 };
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 use crate::cli::prompt::{ShellPrompt, EXIT_CODE_NONE};
@@ -113,6 +113,22 @@ impl Shell {
         // `Shell` 側からライフサイクルイベント（reload/exit/restart）で
         // 直接 shutdown できるようにする（Task A, #89）。
         let zsh_daemon = new_shared_daemon_slot();
+
+        // Fix D4: 起動時のバックグラウンド事前ウォームアップ。設定でデーモン
+        // が有効（フラグ on + zsh が enabled-kinds に含まれる + zsh バイナリ
+        // 検出済み）なら、デタッチしたバックグラウンドスレッドから spawn を
+        // 開始し、ユーザーの最初の Tab 押下までに温存デーモンが生きている
+        // 状態を狙う（起動そのものはブロックしない）。無効なら
+        // `prewarm_zsh_daemon` 内部で即座に no-op として戻る。`provide()`
+        // とのレースは `prewarm_zsh_daemon` 側の Mutex 二重チェックで防止
+        // 済み（同モジュールのドキュメント参照）。
+        {
+            let settings_for_prewarm = Arc::clone(&external_completion);
+            let daemon_for_prewarm = Arc::clone(&zsh_daemon);
+            std::thread::spawn(move || {
+                prewarm_zsh_daemon(&settings_for_prewarm, &daemon_for_prewarm);
+            });
+        }
 
         let db_path = data_dir.join("history.db");
         let (reedline, history_available) = editor::build_editor(
