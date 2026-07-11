@@ -29,4 +29,5 @@ pub use command_subst::{CmdSubstError, SubstQuoting};
 pub use pipeline::{
     expand_token_globs, expand_token_globs_with_quoting, expand_token_subst_only, ExpandError,
 };
+pub(crate) use quote::operator_prefix_len;
 pub use quote::{split_quoted, SplitError, Token};

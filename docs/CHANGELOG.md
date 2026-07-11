@@ -3,6 +3,22 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.14.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.14.0) - 2026-07-12
+
+### Added
+
+- Tab 補完システムを全面刷新 ([#88](https://github.com/tominaga-h/jarvis-shell/issues/88), [#89](https://github.com/tominaga-h/jarvis-shell/issues/89))
+  - `complete` ビルトイン（登録 / 一覧 / 消去）を追加。静的候補・動的候補（`$(...)`）・条件評価（`-n <word>`）に対応し、`RegistryProvider` 経由で即座に Tab 補完へ反映
+  - carapace 外部補完プロバイダを追加。`carapace` バイナリ検出時に自動で有効化、`cd` の dirs-only 防御フィルタ・設定ホットリロードに対応
+  - zsh 補完ブリッジを追加。`zsh -i` を常駐デーモン化して起動コストを削減（既定 `external_zsh_daemon = true`）、シェル起動直後に事前ウォームアップ。ワンショット方式にも切り替え可能
+  - alias 対応補完を実装。`Shell.aliases` を `Arc<RwLock<HashMap>>` 化して補完系と実行系で共有
+  - `CompletionProvider` trait 化により既存 3 補完（コマンド / パス / git）を移植し、orchestrator が複数プロバイダを連鎖評価する構成へ再編
+  - `[completion]` セクションに `external` / `external_timeout_ms` / `external_zsh_daemon` / `git_branch_commands` を追加
+
+### Changed
+
+- ビルトインコマンド一覧を単一テーブルに一元化 (`src/engine/builtins/mod.rs`)
+
 ## [v1.13.3](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.13.3) - 2026-07-05
 
 ### Fixed

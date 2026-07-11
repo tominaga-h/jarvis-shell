@@ -1,7 +1,7 @@
 # 🤵 Jarvish — The AI-Native Shell
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-[![version](https://img.shields.io/badge/version-1.13.3-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.13.3)
+[![version](https://img.shields.io/badge/version-1.14.0-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.14.0)
 
 > 🌐 [日本語版 README はこちら](docs/README_JA.md)
 
@@ -29,6 +29,9 @@ The days of copy-pasting errors into a browser to ask AI are over. Just ask Jarv
 - [Updating](#-updating)
 - [Setup and Configuration](#️-setup-and-configuration)
   - [Starship Prompt Integration](#starship-prompt-integration)
+  - [External Completion (carapace)](#external-completion-carapace)
+  - [zsh Completion Bridge](#zsh-completion-bridge)
+  - [Custom Completions (`complete` builtin)](#custom-completions-complete-builtin)
 - [Architecture](#️-architecture)
 - [Development](#-development)
 
@@ -68,7 +71,7 @@ Jarvish remembers everything that happens in your terminal.
 Despite deep AI integration, Jarvish leverages Rust's strengths to deliver outstanding performance as an infrastructure tool.
 
 - **Async Background Prompt**: Git status scanning runs in a separate thread (using the Stale-While-Revalidate pattern), achieving **zero UI jitter** regardless of repository size.
-- **Fish-like Autocomplete**: Real-time syntax highlighting with powerful auto-completion for PATH binaries and file paths.
+- **Fish-like Autocomplete**: Real-time syntax highlighting with powerful auto-completion for PATH binaries and file paths, plus optional [carapace](#external-completion-carapace) integration for argument/flag completion across hundreds of CLI tools.
 - **Full PTY Support**: Interactive programs like `vim` and `top` work natively.
 - **Job-control Ctrl+C**: Pressing `Ctrl+C` while a command runs interrupts only that command — the Jarvish shell itself keeps running. External commands are spawned into their own process group and given the terminal foreground, so the terminal-generated `SIGINT` reaches the child group only.
 - **Starship Integration**: Native support for [Starship](https://starship.rs/) prompt — use your existing Starship configuration as-is.
@@ -175,6 +178,9 @@ starship = false              # Set to true to use Starship prompt (requires: st
 
 [completion]
 git_branch_commands = ["checkout", "switch", "merge", "rebase", "branch", "diff", "log", "cherry-pick", "reset", "push", "fetch"]
+external = "auto"             # "auto" | "carapace" | "zsh" | "none" | ["carapace", "zsh"] — external completion policy (string or array)
+external_timeout_ms = 400     # Timeout for the external completion process (milliseconds)
+external_zsh_daemon = true    # Keep the zsh bridge warm in a persistent daemon (see "zsh Completion Bridge" below)
 
 [startup]
 commands = [                      # Commands to run on shell startup (skipped with -c option)
@@ -209,6 +215,74 @@ starship = true
 Jarvish passes `--status`, `--cmd-duration`, and `--terminal-width` to `starship prompt`, so modules like `character`, `cmd_duration`, and `status` work as expected.
 
 If `starship = true` is set but the prerequisites are not met, Jarvish falls back to the built-in prompt with a warning.
+
+### External Completion (carapace)
+
+Jarvish's Tab completion can bridge to [carapace](https://github.com/carapace-sh/carapace-bin), a multi-shell completion engine that ships completions for 500+ CLI tools (git, docker, kubectl, etc.). Install it with `brew install carapace`.
+
+- **`[completion] external` accepts a string or an array**:
+  - `"auto"` (the default) tries each provider in priority order (carapace, then the [zsh bridge](#zsh-completion-bridge)) and enables whichever binaries are found on `PATH` — no further configuration needed.
+  - `"none"` disables external completion entirely.
+  - `"carapace"` / `"zsh"` enables only that one provider (a warning is printed if its binary is missing).
+  - An array such as `["zsh", "carapace"]` explicitly sets the priority order — providers are tried left to right, and each is enabled only if its binary is found. Unrecognized array entries are skipped with a warning; the rest of the array still applies.
+- **Timeout + fallback**: Each external completion invocation is capped by `external_timeout_ms` (default 400ms). If a provider hangs, errors, or returns no candidates, Jarvish silently falls through to the next provider (and ultimately to its built-in path completion) — Tab never blocks waiting on an external process.
+- **Hot-reload**: `external` and `external_timeout_ms` are re-read by the `source` builtin, and every configured provider's binary is re-detected (via `which`) on every reload. This means you can `brew install carapace` mid-session and run `source ~/.config/jarvish/config.toml` to enable it immediately, without restarting Jarvish. (Note: changing the *order* of an array — e.g. swapping `["carapace", "zsh"]` to `["zsh", "carapace"]` — takes effect on the next Jarvish restart, not on `source`; enabling/disabling a provider and re-detecting its binary does apply immediately.)
+- **Widening coverage**: carapace also supports bridging to real shell completion functions (e.g. zsh's `compsys`). Export `CARAPACE_BRIDGES` (e.g. `CARAPACE_BRIDGES = "zsh"`) in the `[export]` section of `config.toml` to pull in completions that carapace doesn't natively ship.
+
+### zsh Completion Bridge
+
+If [carapace](#external-completion-carapace) doesn't have candidates for a command (or isn't enabled), Jarvish falls back to a built-in zsh bridge: it spawns a real zsh in the background and asks its native completion system (`compsys`, the `_*` functions) for suggestions. This means any completion function that works in zsh — including ones from third-party packages — can work in Jarvish too, without carapace support. Like carapace, it is controlled by the same `[completion] external` setting described above (e.g. `external = "zsh"` to use only the zsh bridge, or `external = ["zsh", "carapace"]` to prefer it over carapace).
+
+- **Bridge zshrc**: The bridge zsh sources `~/.config/jarvish/zsh-bridge/.zshrc` instead of your real `~/.zshrc`, so it stays isolated from your interactive shell setup. Jarvish auto-generates this file (with commented examples) the first time the bridge runs, if it doesn't already exist — it is never overwritten afterward, so your edits are safe.
+- **Adding completions**: Write ordinary zsh syntax in the bridge zshrc. For example, to pull in the [`zsh-completions`](https://github.com/zsh-users/zsh-completions) project installed via Homebrew:
+  ```sh
+  # ~/.config/jarvish/zsh-bridge/.zshrc
+  fpath=(/opt/homebrew/share/zsh-completions $fpath)
+  ```
+  You can also add `compdef` lines to bind a completion function to a specific command, just as you would in a normal `~/.zshrc`.
+- **Timeout + fallback**: Like carapace, every bridge invocation is capped by a timeout (shared with `external_timeout_ms`, with a higher floor to accommodate zsh's `compinit` startup cost). If the bridge hangs, errors, or returns nothing, Jarvish falls back to built-in path completion — Tab never blocks the UI.
+- **Warm daemon (`external_zsh_daemon`)**: A one-shot zsh invocation (spawn a fresh `zsh`, run `compinit`, complete, exit) typically costs 700-1100ms per Tab press — mostly process/PTY startup, not the completion itself. When `external_zsh_daemon = true` (the default), Jarvish instead spawns a single `zsh -i` **as a plain child process of Jarvish** and keeps reusing it for every Tab press. This is not a system service and involves no `launchd`/`launchctl` — it is a per-session child process that lives only as long as your Jarvish shell does. Jarvish warms this daemon up **in the background as soon as the shell starts**, so your first Tab press is usually already warm; if the prewarm hasn't finished yet (or was skipped, e.g. `zsh` wasn't found at the time), the daemon is instead spawned lazily on whichever Tab press needs it first. Once warm, requests only pay for the completion computation itself — typically a couple of milliseconds. Completions that shell out to a slow interpreter (e.g. `tmuxinator`'s Ruby-based completion) are tolerated: the warm request timeout is floored at 2000ms, and a single slow/timed-out completion does **not** kill the daemon — Jarvish drains the late response on your next Tab press instead. Only two *consecutive* timeouts are treated as a real hang, at which point the daemon is killed in the background and the next Tab press lazily spawns a fresh one. Editing the bridge zshrc (see below) is detected automatically (by its file modification time) and transparently restarts the daemon on your next Tab press, so you never need to restart Jarvish after tweaking `fpath`/`compdef` entries. Set `external_zsh_daemon = false` to always use the one-shot invocation instead (this also serves as a manual escape hatch when troubleshooting the bridge); hot-reloadable via `source` — flipping it off shuts down any running daemon immediately, at `source` time, and flipping it back on spawns a new one lazily on the next zsh completion request. A running daemon is also always shut down before Jarvish exits or restarts (including via the `restart` builtin) — it never outlives the Jarvish session that spawned it.
+
+**Troubleshooting: bridge completions suddenly return nothing after editing `fpath`.** If you add a directory to `fpath` in the bridge zshrc (as in the example above) and the zsh bridge stops returning candidates for *every* command, the cause is almost always zsh's `compinit` security check. `compinit` runs `compaudit`, which inspects not just the directories you added to `fpath` but also their parent directories, and refuses to proceed if any of them are group-writable — instead it prints an interactive `Ignore insecure directories and continue [ny]?` prompt. Since the bridge zsh runs inside an invisible `zpty` session, nothing can answer that prompt, so `compinit` hangs and completions silently fail across the board. This is common on Intel Macs, where Homebrew's `/usr/local/share` is group-writable by default (Apple Silicon's `/opt/homebrew` is much less likely to hit this). Run `compaudit` to list the offending directories, then fix it the same way Homebrew recommends: `chmod g-w /usr/local/share`.
+
+### Custom Completions (`complete` builtin)
+
+For commands not covered by carapace or the zsh bridge (your own scripts, an internal CLI, etc.), Jarvish provides a fish-style `complete` builtin for defining ad-hoc completions directly at the prompt — no external tool required.
+
+- **Register**: `complete -c CMD [-s X]... [-l LONG]... [-a 'WORDS'] [-d DESC] [-n COND]` adds one completion spec for `CMD`. `-c/--command` is required. `-s` takes a single-character short flag (e.g. `-s v` for `-v`) — it must be a single ASCII graphic character and cannot be a quote (`'`/`"`) or backslash; `-l/--long-option` takes a long flag name (e.g. `-l verbose` for `--verbose`) — it must be non-empty and cannot contain whitespace or backslash. Both may be repeated to register several flags in one call, or accumulated by calling `complete` again for the same command. `-a/--arguments` supplies either a space-separated (optionally quoted) list of static candidate words, or a single dynamic source `"$(command)"` (see below). `-d/--description` sets the fallback text shown in the completion menu. `-n/--condition` restricts the spec to a subset of built-in conditions (see below); specs with an unrecognized condition are still registered and listed, but never offer completions. `-c`, `-a`, `-d`, and `-n` values must not contain a newline, carriage return, or NUL byte — such values would corrupt `complete`'s round-trippable listing and are rejected at registration (exit code 2).
+- **List**: `complete` with no arguments prints every registered spec, one per line, in the same `complete -c ...` syntax you'd use to register it — so the output is directly re-runnable (round-trippable) once re-tokenized by Jarvish's own shell parser. Values containing anything outside a conservative safe set of characters (letters, digits, and `_ . / : = + , @ % ^ -`) are automatically wrapped in single quotes, including values containing backslashes — this avoids the backslash being reinterpreted as an escape character on re-parse.
+- **Erase**: `complete -e -c CMD` removes every spec registered for `CMD`. `-e` without `-c` is an error.
+- **Standalone only**: `complete` must be run as its own simple command (no `;`, `&&`, `||`, or pipe) — e.g. `complete -c foo -a bar` on its own line, or as `jarvish -c "complete -c foo -a bar"`. Running it inside a pipeline, a `cmd1 ; complete ...` list, or piped into `ai` has no access to the shell's live registry and fails with `complete: can only be used as a standalone command` (exit code 1) rather than silently discarding the registration; `complete --help` keeps working everywhere.
+
+Example:
+
+```sh
+complete -c mycmd -s v -l verbose -d 'Verbose output'
+complete -c mycmd -a 'start stop restart' -d 'Subcommand'
+complete            # list everything you've registered so far
+complete -e -c mycmd  # forget mycmd's completions
+```
+
+Once registered, pressing Tab after `mycmd ` (or `mycmd -`) offers the matching flags or argument words alongside Jarvish's other completion sources. Prefix matching (both for flags and for `-a` argument words) is **case-sensitive** — typing `mycmd B` will not match a candidate registered as `build`.
+
+**Dynamic candidates (`-a "$(...)"`)**: if `-a`'s value is (once trimmed) exactly of the form `$(command)`, Jarvish treats it as a *dynamic* source instead of a static word list — `command` is run through `/bin/sh -c` on every Tab press and its stdout supplies the candidates. Each line of output is parsed as `value<TAB>description` (the tab and description are optional — a bare `value` line is fine and falls back to the spec's `-d`); blank lines are skipped and a trailing `\r` is stripped. The command is capped by `[completion] external_timeout_ms` (floored at 200ms); a timeout, non-zero exit, or spawn failure is treated as "zero candidates from this spec" rather than an error — other specs for the same command still apply, and Jarvish falls through to its other completion sources if nothing matches overall. Mixing static words and `$(...)` in one `-a` string is **not** supported — a spec's `-a` is either a static word list or a single `$(...)`, never both.
+
+**Conditions (`-n`)**: only two condition forms are evaluated, and both run without spawning a subprocess:
+- `__fish_use_subcommand` — true as long as no non-flag word has appeared yet after the command name (so `mycmd -v <Tab>` still counts as "no subcommand seen").
+- `__fish_seen_subcommand_from w1 w2 ...` — true once any of the listed words has appeared after the command name.
+
+A spec whose `-n` is anything else is **inactive for completion** (it never contributes candidates) but is still registered and shown by `complete`'s listing — this is a known limitation of this phase, not a bug.
+
+Worked example — a `mycmd` with two subcommands, the second of which takes a dynamically-listed argument:
+
+```sh
+complete -c mycmd -n '__fish_use_subcommand' -a 'start stop'
+complete -c mycmd -n '__fish_seen_subcommand_from start' -a "$(mycmd --list-targets)"
+```
+
+Pressing Tab right after `mycmd ` offers `start`/`stop`; after `mycmd start `, it instead runs `mycmd --list-targets` and offers its output as candidates.
+
+**Session-only for now**: specs registered via `complete` live only in memory and are lost when Jarvish exits. A `rc.jsh` startup script (planned) will let you persist `complete` calls across restarts — until then, add them to a shell alias or re-run them manually each session.
 
 ## 🏗️ Architecture
 

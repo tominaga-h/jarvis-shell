@@ -1,8 +1,11 @@
 //! Git 補完 — ブランチ名補完 + エイリアス解決（CWD キャッシュ付き）
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
-use reedline::{Span, Suggestion};
+use super::context::CompletionContext;
+use super::provider::{Candidate, CompletionProvider};
 
 /// カレントブランチ名を `git2` 経由で取得する。Git リポジトリ外では `None`。
 fn current_branch() -> Option<String> {
@@ -11,83 +14,54 @@ fn current_branch() -> Option<String> {
     head.shorthand().map(str::to_string)
 }
 
-impl super::JarvishCompleter {
-    /// Git サブコマンドに応じたブランチ名補完を試みる。
-    /// Git 関連の補完が適用できた場合は `Some(suggestions)` を返し、
-    /// 適用外の場合は `None` を返す。
-    ///
-    /// 補完対象サブコマンドは `config.toml` の `[completion].git_branch_commands` で設定可能。
-    pub(super) fn try_complete_git(
-        &self,
-        tokens: &[&str],
-        partial: &str,
-        span: Span,
-    ) -> Option<Vec<Suggestion>> {
-        let first_token = tokens.first().copied().unwrap_or("");
-        if first_token != "git" || tokens.len() < 2 {
+/// Git ブランチ名補完プロバイダ。
+///
+/// 先頭コマンドが `git` かつサブコマンドが `git_branch_commands`（または
+/// その git エイリアス解決結果）に含まれる場合のみ `Some` を返す。
+/// それ以外は `None`（対象外、次のプロバイダへ）。
+pub(super) struct GitProvider {
+    /// ブランチ名補完を提供する git サブコマンド（config.toml で設定可能）
+    pub(super) git_branch_commands: Arc<RwLock<Vec<String>>>,
+    /// CWD ごとの Git エイリアスマップ: `{ CWD: { "co": "checkout", "b": "branch", ... } }`
+    pub(super) git_aliases_cache: RwLock<HashMap<PathBuf, HashMap<String, String>>>,
+}
+
+impl GitProvider {
+    pub(super) fn new(git_branch_commands: Arc<RwLock<Vec<String>>>) -> Self {
+        Self {
+            git_branch_commands,
+            git_aliases_cache: RwLock::new(HashMap::new()),
+        }
+    }
+}
+
+impl CompletionProvider for GitProvider {
+    fn provide(&self, ctx: &CompletionContext) -> Option<Vec<Candidate>> {
+        let words = ctx.command_words();
+        if words.first().copied() != Some("git") || words.len() < 2 {
             return None;
         }
 
-        let subcmd = tokens[1];
+        let subcmd = words[1];
 
         let commands = self.git_branch_commands.read().ok()?;
 
         if commands.iter().any(|c| c == subcmd) {
-            return Some(self.complete_git_branch(partial, span));
+            return Some(complete_git_branch(&ctx.partial));
         }
 
         if let Some(resolved) = self.resolve_git_alias(subcmd) {
             let main_cmd = resolved.split_whitespace().next().unwrap_or("");
             if commands.iter().any(|c| c == main_cmd) {
-                return Some(self.complete_git_branch(partial, span));
+                return Some(complete_git_branch(&ctx.partial));
             }
         }
 
         None
     }
+}
 
-    /// Git ブランチ名補完
-    ///
-    /// `git branch --format=%(refname:short)` を実行してローカルブランチ一覧を取得し、
-    /// `partial` に前方一致するものを候補として返す。
-    pub(super) fn complete_git_branch(&self, partial: &str, span: Span) -> Vec<Suggestion> {
-        let output = match std::process::Command::new("git")
-            .args(["branch", "--format=%(refname:short)"])
-            .stderr(std::process::Stdio::null())
-            .output()
-        {
-            Ok(o) if o.status.success() => o,
-            _ => return vec![],
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        let mut branches: Vec<&str> = stdout.lines().filter(|b| b.starts_with(partial)).collect();
-
-        branches.sort_unstable();
-        branches.dedup();
-
-        if let Some(ref current) = current_branch() {
-            if let Some(pos) = branches.iter().position(|b| *b == current.as_str()) {
-                let branch = branches.remove(pos);
-                branches.insert(0, branch);
-            }
-        }
-
-        branches
-            .into_iter()
-            .map(|branch| Suggestion {
-                value: branch.to_string(),
-                description: None,
-                style: None,
-                extra: None,
-                span,
-                append_whitespace: true,
-                match_indices: None,
-            })
-            .collect()
-    }
-
+impl GitProvider {
     /// Git エイリアスを解決する（CWD ごとの遅延評価キャッシュ付き）。
     pub(super) fn resolve_git_alias(&self, alias: &str) -> Option<String> {
         let cwd = std::env::current_dir().ok()?;
@@ -98,7 +72,7 @@ impl super::JarvishCompleter {
             }
         }
 
-        let aliases_map = Self::fetch_git_aliases();
+        let aliases_map = fetch_git_aliases();
         let result = aliases_map.get(alias).cloned();
 
         if let Ok(mut cache) = self.git_aliases_cache.write() {
@@ -107,47 +81,83 @@ impl super::JarvishCompleter {
 
         result
     }
+}
 
-    /// `git config --get-regexp '^alias\.'` を実行し、エイリアスマップを構築する。
-    fn fetch_git_aliases() -> HashMap<String, String> {
-        let output = match std::process::Command::new("git")
-            .args(["config", "--get-regexp", "^alias\\."])
-            .stderr(std::process::Stdio::null())
-            .output()
-        {
-            Ok(o) if o.status.success() => o,
-            _ => return HashMap::new(),
-        };
+/// Git ブランチ名補完
+///
+/// `git branch --format=%(refname:short)` を実行してローカルブランチ一覧を取得し、
+/// `partial` に前方一致するものを候補として返す。
+fn complete_git_branch(partial: &str) -> Vec<Candidate> {
+    let output = match std::process::Command::new("git")
+        .args(["branch", "--format=%(refname:short)"])
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return vec![],
+    };
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut map = HashMap::new();
+    let stdout = String::from_utf8_lossy(&output.stdout);
 
-        for line in stdout.lines() {
-            if let Some(rest) = line.strip_prefix("alias.") {
-                if let Some((name, value)) = rest.split_once(' ') {
-                    map.insert(name.to_string(), value.to_string());
-                }
+    let mut branches: Vec<&str> = stdout.lines().filter(|b| b.starts_with(partial)).collect();
+
+    branches.sort_unstable();
+    branches.dedup();
+
+    if let Some(ref current) = current_branch() {
+        if let Some(pos) = branches.iter().position(|b| *b == current.as_str()) {
+            let branch = branches.remove(pos);
+            branches.insert(0, branch);
+        }
+    }
+
+    branches
+        .into_iter()
+        .map(|branch| Candidate {
+            value: branch.to_string(),
+            description: None,
+            append_whitespace: true,
+        })
+        .collect()
+}
+
+/// `git config --get-regexp '^alias\.'` を実行し、エイリアスマップを構築する。
+fn fetch_git_aliases() -> HashMap<String, String> {
+    let output = match std::process::Command::new("git")
+        .args(["config", "--get-regexp", "^alias\\."])
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return HashMap::new(),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut map = HashMap::new();
+
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("alias.") {
+            if let Some((name, value)) = rest.split_once(' ') {
+                map.insert(name.to_string(), value.to_string());
             }
         }
-
-        map
     }
+
+    map
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, RwLock};
-
-    use reedline::Span;
-    use serial_test::serial;
     use std::env;
 
-    use crate::cli::completer::JarvishCompleter;
+    use serial_test::serial;
+
+    use super::*;
     use crate::config::CompletionConfig;
 
-    fn test_completer() -> JarvishCompleter {
+    fn test_provider() -> GitProvider {
         let commands = CompletionConfig::default().git_branch_commands;
-        JarvishCompleter::new(Arc::new(RwLock::new(commands)))
+        GitProvider::new(Arc::new(RwLock::new(commands)))
     }
 
     fn create_test_git_repo() -> tempfile::TempDir {
@@ -212,13 +222,11 @@ mod tests {
         let original_dir = env::current_dir().unwrap();
         env::set_current_dir(tmpdir.path()).unwrap();
 
-        let completer = test_completer();
-        let span = Span::new(0, 0);
-        let suggestions = completer.complete_git_branch("", span);
+        let candidates = complete_git_branch("");
 
         env::set_current_dir(&original_dir).unwrap();
 
-        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        let values: Vec<&str> = candidates.iter().map(|c| c.value.as_str()).collect();
         assert!(
             values.contains(&"test-feature"),
             "test-feature branch should be in suggestions: {values:?}"
@@ -232,13 +240,11 @@ mod tests {
         let original_dir = env::current_dir().unwrap();
         env::set_current_dir(tmpdir.path()).unwrap();
 
-        let completer = test_completer();
-        let span = Span::new(0, 5);
-        let suggestions = completer.complete_git_branch("test-", span);
+        let candidates = complete_git_branch("test-");
 
         env::set_current_dir(&original_dir).unwrap();
 
-        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        let values: Vec<&str> = candidates.iter().map(|c| c.value.as_str()).collect();
         assert!(values.contains(&"test-feature"));
         for v in &values {
             assert!(v.starts_with("test-"), "'{v}' should start with 'test-'");
@@ -247,11 +253,8 @@ mod tests {
 
     #[test]
     fn complete_git_branch_nonexistent_prefix_returns_empty() {
-        let completer = test_completer();
-        let span = Span::new(0, 0);
-
-        let suggestions = completer.complete_git_branch("zzz_no_such_branch_", span);
-        assert!(suggestions.is_empty());
+        let candidates = complete_git_branch("zzz_no_such_branch_");
+        assert!(candidates.is_empty());
     }
 
     #[test]
@@ -261,8 +264,8 @@ mod tests {
         let original_dir = env::current_dir().unwrap();
         env::set_current_dir(tmpdir.path()).unwrap();
 
-        let completer = test_completer();
-        let result = completer.resolve_git_alias("co");
+        let provider = test_provider();
+        let result = provider.resolve_git_alias("co");
 
         env::set_current_dir(&original_dir).unwrap();
 
@@ -276,8 +279,8 @@ mod tests {
         let original_dir = env::current_dir().unwrap();
         env::set_current_dir(tmpdir.path()).unwrap();
 
-        let completer = test_completer();
-        let result = completer.resolve_git_alias("zzz_no_such_alias");
+        let provider = test_provider();
+        let result = provider.resolve_git_alias("zzz_no_such_alias");
 
         env::set_current_dir(&original_dir).unwrap();
 
@@ -291,8 +294,8 @@ mod tests {
         let original_dir = env::current_dir().unwrap();
         env::set_current_dir(tmpdir.path()).unwrap();
 
-        let completer = test_completer();
-        let result = completer.resolve_git_alias("nb");
+        let provider = test_provider();
+        let result = provider.resolve_git_alias("nb");
 
         env::set_current_dir(&original_dir).unwrap();
 
@@ -306,17 +309,15 @@ mod tests {
         let original_dir = env::current_dir().unwrap();
         env::set_current_dir(tmpdir.path()).unwrap();
 
-        let completer = test_completer();
-        let span = Span::new(0, 0);
-        let suggestions = completer.complete_git_branch("", span);
+        let candidates = complete_git_branch("");
 
         env::set_current_dir(&original_dir).unwrap();
 
         assert!(
-            suggestions.len() >= 2,
-            "should have at least 2 branches (main/master + test-feature): {suggestions:?}"
+            candidates.len() >= 2,
+            "should have at least 2 branches (main/master + test-feature): {candidates:?}"
         );
-        let first = &suggestions[0].value;
+        let first = &candidates[0].value;
         let current = &["main", "master"];
         assert!(
             current.contains(&first.as_str()),
@@ -333,18 +334,18 @@ mod tests {
 
         let canonical_cwd = env::current_dir().unwrap();
 
-        let completer = test_completer();
+        let provider = test_provider();
 
         {
-            let cache = completer.git_aliases_cache.read().unwrap();
+            let cache = provider.git_aliases_cache.read().unwrap();
             assert!(cache.is_empty(), "cache should be empty before first call");
         }
 
-        let _ = completer.resolve_git_alias("co");
+        let _ = provider.resolve_git_alias("co");
 
         env::set_current_dir(&original_dir).unwrap();
 
-        let cache = completer.git_aliases_cache.read().unwrap();
+        let cache = provider.git_aliases_cache.read().unwrap();
         assert_eq!(cache.len(), 1, "cache should have one CWD entry");
         let aliases = cache.get(&canonical_cwd).unwrap();
         assert_eq!(aliases.get("co"), Some(&"checkout".to_string()));

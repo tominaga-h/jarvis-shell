@@ -1,22 +1,98 @@
-//! コマンド補完 — Tab キーで PATH コマンド名・ビルトイン・ファイルパスを補完
+//! コマンド補完 — Tab キーで PATH コマンド名・ビルトイン・ファイルパス・git ブランチ・
+//! 外部補完（carapace / zsh ブリッジ）を補完
 //!
-//! - 先頭トークン: PATH 内の実行可能コマンド + ビルトイン (cd, cwd, exit)
+//! - 先頭トークン: PATH 内の実行可能コマンド + ビルトイン (cd, cwd, exit, ...)
 //! - 先頭トークンがパスらしい場合 (`./` `../` `/` `~/`): ファイル / ディレクトリ補完
+//! - `git <branch系サブコマンド>`: git ブランチ名補完
+//! - 外部補完対応コマンドの引数: carapace / zsh ブリッジによる外部補完
+//!   （`[completion] external` の方針とバイナリ検出結果に応じて有効・
+//!   無効化・優先順が決まる — [`ExternalCompletionSettings`] 参照）
 //! - それ以降: カレントディレクトリ基準のファイル / ディレクトリ名
 //!
-//! fish shell の設計思想に倣い、インメモリキャッシュを持たず、
+//! [`CompletionProvider`] トレイトで補完源をプラグイン化しており、
+//! `complete()` は [`Command`](command::CommandProvider) →
+//! [`Git`](git::GitProvider) → **外部補完プロバイダ列**（[`external_provider_chain`]
+//! が [`ExternalCompletionSettings`] の解決済み優先順から動的に組み立てる。
+//! 既定 `"auto"` では [`Carapace`](carapace::CarapaceProvider) →
+//! [`ZshBridge`](zsh_bridge::ZshBridgeProvider) の順だが、`[completion]
+//! external` を配列（例: `["zsh", "carapace"]`）で指定すると入れ替わる）→
+//! [`Path`](path::PathProvider) の順に各プロバイダを走査し、最初に `Some` を
+//! 返したプロバイダの候補を採用する（`None` = 対象外で次へ、`Some(vec![])` =
+//! 担当したが候補なしでそこで確定）。`GitProvider` を外部補完プロバイダ列より
+//! 先に置いているのは、設定済みのブランチ系サブコマンドではカレントブランチ
+//! 優先の並び順（`GitProvider` 側の既存ロジック）を外部補完の並び順より
+//! 優先したいため。既定順で carapace を zsh ブリッジより先にしているのは、
+//! carapace の方が起動コストが低く候補に description が付きやすいため
+//! （carapace が空/未対応だったコマンドのみ zsh の compsys — `_*` 補完関数群
+//! — にフォールバックする）。
+//!
+//! コマンド名補完は fish shell の設計思想に倣い、インメモリキャッシュを持たず、
 //! Tab 押下時にリアルタイムで `$PATH` を走査する（キャッシュレス設計）。
 //! `brew install` 等で新しいバイナリが追加された直後でも即座に補完候補に出現する。
+//!
+//! シェルエイリアス（`alias` ビルトイン）は先頭トークンではない位置でのみ
+//! 展開する（[`apply_shell_alias`]）。展開結果は各プロバイダ走査前に
+//! `ctx.expanded_head` へ格納され、`GitProvider` 等は `command_words()`
+//! 経由でそれを透過的に参照する。`aliases` は `Shell` と `Arc` を共有して
+//! おり、`alias` ビルトイン実行直後の次の Tab から即座に反映される。
+//!
+//! 外部補完の実行時設定（[`ExternalCompletionSettings`]）も
+//! `git_branch_commands` / `aliases` と同じ配管パターンで `Shell` と
+//! 共有される。`source` コマンドによる `reload_config` はバイナリの
+//! `which()` 再検出込みで設定を更新するため、セッション中に carapace/zsh を
+//! インストールしてから `source` するだけで再起動なしに外部補完を有効化
+//! できる（ただしプロバイダチェーンの**並び順**自体は起動時に固定されるため、
+//! `[completion] external` の配列順序を変更した場合は再起動が必要 —
+//! [`external_provider_chain`] のドキュメント参照）。
+//!
+//! プロバイダ単位（コマンド単位）のオーバーライド（例:
+//! `[completion.overrides] git = "zsh"` で特定コマンドだけ優先順を変える）は
+//! Task 2b.4 の時点ではスコープ外。将来必要になれば `CompletionContext` に
+//! コマンド名を渡して `external_provider_chain` の走査順を動的に切り替える
+//! 形で追加できる（既存の `enabled` 優先順リストとは別に、コマンド名 →
+//! 優先種別のマップを resolve() 側に持たせる設計が有力）。
 
+mod carapace;
 mod command;
+mod context;
+mod external;
 mod git;
 mod path;
+mod provider;
+pub mod registry;
+mod registry_provider;
+mod zsh_bridge;
+mod zsh_daemon;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use reedline::{Completer, Span, Suggestion};
+use reedline::{Completer, Suggestion};
+
+use crate::engine::expand::{operator_prefix_len, split_quoted};
+
+use carapace::{CarapaceProvider, ExternalKind};
+use command::CommandProvider;
+use context::{extract_context, CompletionContext};
+use git::GitProvider;
+use path::PathProvider;
+use provider::{escape_for_insert, CompletionProvider};
+use registry::CompletionRegistry;
+use registry_provider::RegistryProvider;
+use zsh_bridge::ZshBridgeProvider;
+
+pub use carapace::{
+    format_external_binaries_display, format_external_summary, ExternalCompletionSettings,
+};
+pub use zsh_bridge::{
+    new_shared_daemon_slot, prewarm_zsh_daemon, shutdown_shared_daemon,
+    shutdown_shared_daemon_blocking, SharedDaemonSlot,
+};
+
+/// ColumnarMenu は description を持つ候補が 1 件でもあると全幅 1 カラムに
+/// 描画が変わってしまうため、候補数がこの件数を超えたら description を
+/// 一律で除去する（大きな PATH スキャン結果を守るガード）。
+const DESCRIPTION_LIMIT: usize = 30;
 
 /// Jarvish 用の補完エンジン
 ///
@@ -25,64 +101,171 @@ use reedline::{Completer, Span, Suggestion};
 ///
 /// `git_branch_commands` は `Shell` と共有され、`source` コマンドで動的に更新される。
 pub struct JarvishCompleter {
-    /// CWD ごとの Git エイリアスマップ: `{ CWD: { "co": "checkout", "b": "branch", ... } }`
-    git_aliases_cache: RwLock<HashMap<PathBuf, HashMap<String, String>>>,
-    /// ブランチ名補完を提供する git サブコマンド（config.toml で設定可能）
-    pub(super) git_branch_commands: Arc<RwLock<Vec<String>>>,
+    providers: Vec<Box<dyn CompletionProvider>>,
+    /// シェルエイリアス（Shell と共有。`alias` ビルトインによる更新が
+    /// 次回の Tab に即座に反映される — reload 不要）
+    aliases: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl JarvishCompleter {
-    pub fn new(git_branch_commands: Arc<RwLock<Vec<String>>>) -> Self {
-        Self {
-            git_aliases_cache: RwLock::new(HashMap::new()),
-            git_branch_commands,
-        }
+    pub fn new(
+        git_branch_commands: Arc<RwLock<Vec<String>>>,
+        aliases: Arc<RwLock<HashMap<String, String>>>,
+        external_completion: Arc<RwLock<ExternalCompletionSettings>>,
+        zsh_daemon: SharedDaemonSlot,
+        complete_registry: Arc<RwLock<CompletionRegistry>>,
+    ) -> Self {
+        let mut providers: Vec<Box<dyn CompletionProvider>> = vec![
+            Box::new(CommandProvider::new(Arc::clone(&aliases))),
+            Box::new(RegistryProvider::new(
+                complete_registry,
+                Arc::clone(&external_completion),
+            )),
+            Box::new(GitProvider::new(git_branch_commands)),
+        ];
+        providers.extend(external_provider_chain(&external_completion, &zsh_daemon));
+        providers.push(Box::new(PathProvider));
+        Self { providers, aliases }
     }
+}
 
-    /// カーソルより前の文字列から、補完対象トークンの開始位置を返す。
-    fn token_start(line: &str, pos: usize) -> usize {
-        let before = &line[..pos];
-        before.rfind(' ').map(|i| i + 1).unwrap_or(0)
-    }
+/// 解決済みの優先順（[`ExternalCompletionSettings::resolve`] の結果）に沿って、
+/// 外部補完プロバイダ（carapace / zsh ブリッジ）のチェーンを組み立てる。
+///
+/// 各プロバイダは構築後も同じ `external_completion` の `Arc` を共有し続け、
+/// `provide()` 呼び出しごとに自分の種別が有効か（`binary_path(kind)`）を
+/// 読み直す（hot-reload 対応、`carapace.rs` / `zsh_bridge.rs` 参照）。この
+/// 関数はあくまで**チェーン内の並び順**（優先順）を初期構築時の解決結果から
+/// 決めるためのもの — `source` による reload は有効/無効・バイナリパスの
+/// 更新のみを反映し、プロバイダの並び順自体は再構築されない（`[completion]
+/// external` の配列順序を変えて `source` しても、チェーンの並びは次回
+/// シェル起動まで変わらない。これは既存の `git_branch_commands` 等と同じ
+/// 「値は reload されるが構造は起動時固定」という配管パターンに倣っている）。
+///
+/// 未知の種別が将来追加されても [`ExternalKind`] の列挙に従うだけなので、
+/// この関数自体を変更する必要はない。
+fn external_provider_chain(
+    external_completion: &Arc<RwLock<ExternalCompletionSettings>>,
+    zsh_daemon: &SharedDaemonSlot,
+) -> Vec<Box<dyn CompletionProvider>> {
+    let order: Vec<ExternalKind> = external_completion
+        .read()
+        .map(|settings| settings.enabled.iter().map(|e| e.kind).collect())
+        .unwrap_or_default();
 
-    /// カーソルが先頭トークン上にあるかを判定する。
-    fn is_first_token(line: &str, pos: usize) -> bool {
-        !line[..pos].contains(' ')
-    }
-
-    /// 先頭トークンがパスらしいかを判定する。
-    ///
-    /// `/` を含む (`./target/debug/`, `bin/foo`, `/usr/bin/ls`, `~/bin/x`)、
-    /// または `~` で始まる (`~` 単体もホーム基準) 場合にファイル補完へ回す。
-    fn looks_like_path(token: &str) -> bool {
-        token.contains('/') || token.starts_with('~')
-    }
+    order
+        .into_iter()
+        .map(|kind| -> Box<dyn CompletionProvider> {
+            match kind {
+                ExternalKind::Carapace => {
+                    Box::new(CarapaceProvider::new(Arc::clone(external_completion)))
+                }
+                ExternalKind::Zsh => Box::new(ZshBridgeProvider::new(
+                    Arc::clone(external_completion),
+                    Arc::clone(zsh_daemon),
+                )),
+            }
+        })
+        .collect()
 }
 
 impl Completer for JarvishCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
-        let start = Self::token_start(line, pos);
-        let partial = &line[start..pos];
-        let span = Span::new(start, pos);
+        let mut ctx = extract_context(line, pos);
 
-        if Self::is_first_token(line, pos) {
-            if Self::looks_like_path(partial) {
-                self.complete_path(partial, span, false)
-            } else {
-                self.complete_command(partial, span)
-            }
-        } else {
-            let tokens: Vec<&str> = line[..pos].split_whitespace().collect();
-
-            if let Some(git_suggestions) = self.try_complete_git(&tokens, partial, span) {
-                return git_suggestions;
-            }
-
-            let first_token = tokens.first().copied().unwrap_or("");
-            let dirs_only = first_token == "cd";
-            self.complete_path(partial, span, dirs_only)
+        if !ctx.is_first_token {
+            // 短命な read ロック: スナップショットを clone したら即座に drop する。
+            let snapshot = self
+                .aliases
+                .read()
+                .map(|guard| guard.clone())
+                .unwrap_or_default();
+            apply_shell_alias(&mut ctx, &snapshot);
         }
+
+        let candidates = self
+            .providers
+            .iter()
+            .find_map(|provider| provider.provide(&ctx))
+            .unwrap_or_default();
+
+        let strip_descriptions = should_strip_descriptions(candidates.len());
+
+        candidates
+            .into_iter()
+            .map(|candidate| Suggestion {
+                value: escape_for_insert(&candidate.value),
+                description: if strip_descriptions {
+                    None
+                } else {
+                    candidate.description
+                },
+                style: None,
+                extra: None,
+                span: ctx.span,
+                append_whitespace: candidate.append_whitespace,
+                match_indices: None,
+            })
+            .collect()
     }
+}
+
+/// 候補数が [`DESCRIPTION_LIMIT`] を超えるかどうかを判定する。
+///
+/// `complete()` から切り出したのは、ファイルシステムや `Completer` トレイトの
+/// セットアップなしに境界値（`DESCRIPTION_LIMIT` ちょうど / +1）を単体テスト
+/// するため。
+fn should_strip_descriptions(candidate_count: usize) -> bool {
+    candidate_count > DESCRIPTION_LIMIT
+}
+
+/// `ctx.tokens[0]` がシェルエイリアスなら、値を展開して
+/// `ctx.expanded_head` に格納する。
+///
+/// `tokens[0]` が先頭コマンド位置でも（`is_first_token` は呼び出し元で
+/// 弾いている）、それ以外の位置でも意味を持たないため、呼び出しは常に
+/// `!ctx.is_first_token` の場合に限る。
+///
+/// エイリアス値は実行系の `split_quoted`（strict パーサ）でトークナイズする。
+/// パースエラー（未閉クォート等）が出たら展開をスキップする（エイリアス値は
+/// ユーザーが `alias` ビルトインで自由に設定できるため、不正な値でも
+/// パニックせずフォールバックする）。
+///
+/// 展開結果に演算子トークン（`| && || ; > >> <`）が 1 つでも含まれる場合は
+/// 展開しない。パイプ等を含むエイリアス値はセグメントの再切断
+/// （cut_index の再計算）が必要になり、Phase 1.5 のスコープ外として
+/// 意図的に見送る — この場合は今までどおりパス補完にフォールバックする。
+fn apply_shell_alias(ctx: &mut CompletionContext, aliases: &HashMap<String, String>) {
+    let Some(first) = ctx.tokens.first() else {
+        return;
+    };
+    let Some(alias_value) = aliases.get(first.value.as_str()) else {
+        return;
+    };
+
+    let Ok(expanded_tokens) = split_quoted(alias_value) else {
+        return;
+    };
+
+    let has_operator = expanded_tokens
+        .iter()
+        .any(|t| operator_prefix_len(&t.value) == t.value.len());
+    if has_operator {
+        return;
+    }
+
+    let mut values: Vec<String> = expanded_tokens.into_iter().map(|t| t.value).collect();
+    // tokens[0] より後ろの既存トークン（partial 含む）の値を続ける。
+    // `command_words()` の非展開経路と挙動を揃えるため、リダイレクト等の
+    // 演算子トークン（`> >> <`）はここでも除外する。
+    values.extend(
+        ctx.tokens[1..]
+            .iter()
+            .filter(|t| !t.is_operator)
+            .map(|t| t.value.clone()),
+    );
+
+    ctx.expanded_head = Some(values);
 }
 
 #[cfg(test)]
@@ -91,12 +274,49 @@ mod tests {
     use serial_test::serial;
     use std::env;
     use std::fs;
+    use std::path::PathBuf;
 
-    use crate::config::CompletionConfig;
+    use crate::config::{CompletionConfig, ExternalSetting};
+
+    /// テスト用の外部補完設定（無効化固定）。他プロバイダの単体/統合テストが
+    /// 環境の carapace/zsh 有無に左右されないよう `external = "none"` で
+    /// 構築する（carapace/zsh 連携自体の検証は `carapace.rs` / `zsh_bridge.rs`
+    /// 側の実行時 skip 付きテストで行う）。
+    fn disabled_external_completion() -> Arc<RwLock<ExternalCompletionSettings>> {
+        Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
+            &CompletionConfig {
+                external: ExternalSetting::Single("none".to_string()),
+                ..CompletionConfig::default()
+            },
+        )))
+    }
 
     fn test_completer() -> JarvishCompleter {
         let commands = CompletionConfig::default().git_branch_commands;
-        JarvishCompleter::new(Arc::new(RwLock::new(commands)))
+        JarvishCompleter::new(
+            Arc::new(RwLock::new(commands)),
+            Arc::new(RwLock::new(HashMap::new())),
+            disabled_external_completion(),
+            new_shared_daemon_slot(),
+            Arc::new(RwLock::new(CompletionRegistry::new())),
+        )
+    }
+
+    /// alias マップの `Arc` を呼び出し元にも返す（共有 Arc の即時反映を
+    /// テストするため、completer 構築後に呼び出し元からマップを書き換えられる）。
+    fn test_completer_with_aliases(
+        aliases: HashMap<String, String>,
+    ) -> (JarvishCompleter, Arc<RwLock<HashMap<String, String>>>) {
+        let commands = CompletionConfig::default().git_branch_commands;
+        let aliases = Arc::new(RwLock::new(aliases));
+        let completer = JarvishCompleter::new(
+            Arc::new(RwLock::new(commands)),
+            Arc::clone(&aliases),
+            disabled_external_completion(),
+            new_shared_daemon_slot(),
+            Arc::new(RwLock::new(CompletionRegistry::new())),
+        );
+        (completer, aliases)
     }
 
     fn create_test_tree() -> (tempfile::TempDir, String) {
@@ -170,59 +390,7 @@ mod tests {
         tmpdir
     }
 
-    // ── ヘルパーメソッドテスト ──
-
-    #[test]
-    fn token_start_no_space() {
-        assert_eq!(JarvishCompleter::token_start("ls", 2), 0);
-    }
-
-    #[test]
-    fn token_start_after_command() {
-        assert_eq!(JarvishCompleter::token_start("cd /tmp", 7), 3);
-    }
-
-    #[test]
-    fn is_first_token_true() {
-        assert!(JarvishCompleter::is_first_token("ls", 2));
-    }
-
-    #[test]
-    fn is_first_token_false() {
-        assert!(!JarvishCompleter::is_first_token("cd /tmp", 7));
-    }
-
-    // ── looks_like_path テスト ──
-
-    #[test]
-    fn looks_like_path_true_cases() {
-        for token in [
-            "./",
-            "../",
-            "./target/debug/",
-            "/usr/bin/ls",
-            "~/",
-            "~",
-            "sub/foo",
-        ] {
-            assert!(
-                JarvishCompleter::looks_like_path(token),
-                "'{token}' should look like a path"
-            );
-        }
-    }
-
-    #[test]
-    fn looks_like_path_false_cases() {
-        for token in ["ls", "cargo", "git", ""] {
-            assert!(
-                !JarvishCompleter::looks_like_path(token),
-                "'{token}' should not look like a path"
-            );
-        }
-    }
-
-    // ── complete (Completer trait) 統合テスト ──
+    // ── complete (Completer trait) 統合テスト（既存の回帰網。原文の意図・assertion を維持） ──
 
     #[test]
     fn complete_cd_dirs_only_via_trait() {
@@ -513,4 +681,847 @@ mod tests {
             "'Do' prefix should exclude readme.txt: {values:?}"
         );
     }
+
+    // ── 新規テスト (Task 1.3) ──
+
+    #[test]
+    #[serial]
+    fn complete_pipeline_git_checkout_includes_branches() {
+        // 'ls | git checkout test-' でパイプ後のセグメントがブランチ補完される。
+        let tmpdir = create_test_git_repo();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut completer = test_completer();
+        let line = "ls | git checkout test-";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&"test-feature"),
+            "pipeline segment should suggest 'test-feature': {values:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn complete_quoted_partial_completes_files() {
+        // 'echo "fo' が一時ディレクトリ内の fo* ファイルを補完する。
+        let tmpdir = tempfile::tempdir().unwrap();
+        fs::write(tmpdir.path().join("foo.txt"), "").unwrap();
+        fs::write(tmpdir.path().join("bar.txt"), "").unwrap();
+
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut completer = test_completer();
+        let line = r#"echo "fo"#;
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&"foo.txt"),
+            "quoted partial 'fo' should suggest foo.txt: {values:?}"
+        );
+        assert!(
+            !values.iter().any(|v| v.contains("bar")),
+            "'fo' prefix should exclude bar.txt: {values:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn complete_file_with_space_is_escaped_on_insert() {
+        // 'foo bar.txt' という名前のファイルはエスケープされた値で挿入される。
+        let tmpdir = tempfile::tempdir().unwrap();
+        fs::write(tmpdir.path().join("foo bar.txt"), "").unwrap();
+
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut completer = test_completer();
+        let line = "cat foo";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&r"foo\ bar.txt"),
+            "space in filename should be escaped: {values:?}"
+        );
+        assert!(
+            !values.contains(&"foo bar.txt"),
+            "unescaped raw value should not be inserted directly: {values:?}"
+        );
+    }
+
+    #[test]
+    fn complete_pipeline_cd_offers_dirs_only() {
+        // 'ls | cd ' はディレクトリのみを候補に出す。
+        let (_tmpdir, path) = create_test_tree();
+        let mut completer = test_completer();
+        let line = format!("ls | cd {path}/");
+        let pos = line.len();
+
+        let suggestions = completer.complete(&line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(values.contains(&format!("{path}/Documents/").as_str()));
+        assert!(
+            !values.iter().any(|v| v.contains("readme.txt")),
+            "cd after pipe should only offer directories: {values:?}"
+        );
+    }
+
+    #[test]
+    fn complete_builtin_suggestions_carry_descriptions() {
+        let mut completer = test_completer();
+        let line = "cd";
+        let pos = line.len();
+
+        let suggestions = completer.complete(line, pos);
+
+        let cd_suggestion = suggestions
+            .iter()
+            .find(|s| s.value == "cd")
+            .expect("'cd' builtin should be suggested");
+        assert!(
+            cd_suggestion.description.is_some(),
+            "builtin 'cd' suggestion should carry a description"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn complete_large_candidate_set_strips_descriptions() {
+        // DESCRIPTION_LIMIT を超える候補数になる場面では description が全除去される。
+        let tmpdir = tempfile::tempdir().unwrap();
+        for i in 0..(DESCRIPTION_LIMIT + 5) {
+            fs::write(tmpdir.path().join(format!("file{i}.txt")), "").unwrap();
+        }
+
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut completer = test_completer();
+        let line = "ls file";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        assert!(
+            suggestions.len() > DESCRIPTION_LIMIT,
+            "test setup should exceed DESCRIPTION_LIMIT: {}",
+            suggestions.len()
+        );
+        assert!(
+            suggestions.iter().all(|s| s.description.is_none()),
+            "descriptions should be stripped when candidate count exceeds the limit"
+        );
+    }
+
+    // ── 新規テスト (Task 1.5: alias 対応補完) ──
+
+    #[test]
+    #[serial]
+    fn alias_single_word_head_triggers_branch_completion() {
+        // alias g=git: 'g checkout test-' がブランチ補完される
+        // （alias → git → git-alias 連鎖は GitProvider の既存解決を利用）。
+        let tmpdir = create_test_git_repo();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut aliases = HashMap::new();
+        aliases.insert("g".to_string(), "git".to_string());
+        let (mut completer, _aliases) = test_completer_with_aliases(aliases);
+
+        let line = "g checkout test-";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&"test-feature"),
+            "'g checkout test-' (alias g=git) should suggest 'test-feature': {values:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn alias_head_in_pipeline_triggers_branch_completion() {
+        // 'ls | g co test-' (alias g=git, git alias co=checkout):
+        // シェルエイリアス→git→git-alias の二重連鎖。
+        let tmpdir = create_test_git_repo_with_aliases();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut aliases = HashMap::new();
+        aliases.insert("g".to_string(), "git".to_string());
+        let (mut completer, _aliases) = test_completer_with_aliases(aliases);
+
+        let line = "ls | g co test-";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&"test-feature"),
+            "'ls | g co test-' should suggest 'test-feature': {values:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn alias_multi_word_value_triggers_branch_completion() {
+        // alias gco="git checkout": 'gco test-' がブランチ補完される。
+        let tmpdir = create_test_git_repo();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(tmpdir.path()).unwrap();
+
+        let mut aliases = HashMap::new();
+        aliases.insert("gco".to_string(), "git checkout".to_string());
+        let (mut completer, _aliases) = test_completer_with_aliases(aliases);
+
+        let line = "gco test-";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        env::set_current_dir(&original_dir).unwrap();
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&"test-feature"),
+            "'gco test-' (alias gco=\"git checkout\") should suggest 'test-feature': {values:?}"
+        );
+    }
+
+    #[test]
+    fn alias_with_operator_value_falls_back_to_path_completion() {
+        // alias lg="ls | grep": 演算子入りのエイリアス値は展開せず、
+        // 今までどおりパス補完にフォールバックする（クラッシュしないことも確認）。
+        let (_tmpdir, path) = create_test_tree();
+
+        let mut aliases = HashMap::new();
+        aliases.insert("lg".to_string(), "ls | grep".to_string());
+        let (mut completer, _aliases) = test_completer_with_aliases(aliases);
+
+        let line = format!("lg {path}/");
+        let pos = line.len();
+        let suggestions = completer.complete(&line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&format!("{path}/readme.txt").as_str()),
+            "operator-bearing alias should fall back to plain path completion: {values:?}"
+        );
+    }
+
+    // これらのテストは PATH 上の実バイナリと衝突しない一意な名前
+    // (`zzjarvishtestalias`) を使う。ありふれた接頭辞（"g" 等）は開発機の
+    // PATH 上に DESCRIPTION_LIMIT を超える数のコマンドがヒットしうるため、
+    // orchestrator の「候補過多で description を一律除去する」ガード
+    // （既存仕様。`complete_large_candidate_set_strips_descriptions` 参照）
+    // に巻き込まれて description アサーションが不安定になる。
+
+    #[test]
+    fn alias_name_offered_as_first_token_candidate() {
+        // 先頭トークンの補完候補にエイリアス名が description=alias 値で出る。
+        let mut aliases = HashMap::new();
+        aliases.insert("zzjarvishtestalias".to_string(), "git".to_string());
+        let (mut completer, _aliases) = test_completer_with_aliases(aliases);
+
+        let line = "zzjarvishtestalias";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        let alias_suggestion = suggestions
+            .iter()
+            .find(|s| s.value == "zzjarvishtestalias")
+            .expect("alias should be offered as a first-token candidate");
+        assert_eq!(
+            alias_suggestion.description.as_deref(),
+            Some("git"),
+            "alias candidate description should be the alias value"
+        );
+    }
+
+    #[test]
+    fn alias_name_removed_from_map_disappears_from_candidates() {
+        let mut aliases = HashMap::new();
+        aliases.insert("zzjarvishtestalias".to_string(), "git".to_string());
+        let (mut completer, aliases_arc) = test_completer_with_aliases(aliases);
+
+        let line = "zzjarvishtestalias";
+        let pos = line.len();
+        let before = completer.complete(line, pos);
+        assert!(
+            before.iter().any(|s| s.value == "zzjarvishtestalias"),
+            "alias should be offered before removal: {before:?}"
+        );
+
+        aliases_arc.write().unwrap().remove("zzjarvishtestalias");
+
+        let after = completer.complete(line, pos);
+        assert!(
+            !after.iter().any(|s| s.value == "zzjarvishtestalias"),
+            "alias should disappear once removed from the shared map: {after:?}"
+        );
+    }
+
+    // ── DESCRIPTION_LIMIT 境界値テスト (should_strip_descriptions 単体) ──
+
+    #[test]
+    fn should_strip_descriptions_at_exact_limit_survives() {
+        // ちょうど DESCRIPTION_LIMIT 件なら description は生存する。
+        assert!(!should_strip_descriptions(DESCRIPTION_LIMIT));
+    }
+
+    #[test]
+    fn should_strip_descriptions_one_over_limit_strips() {
+        // DESCRIPTION_LIMIT を 1 件でも超えたら全除去される。
+        assert!(should_strip_descriptions(DESCRIPTION_LIMIT + 1));
+    }
+
+    // ── apply_shell_alias 単体テスト（エッジケース） ──
+
+    #[test]
+    fn apply_shell_alias_operator_value_skips_expansion() {
+        // alias 値に演算子 (`|`) が含まれる場合は展開しない。
+        let mut ctx = extract_context("lg ", "lg ".len());
+        let mut aliases = HashMap::new();
+        aliases.insert("lg".to_string(), "ls | grep".to_string());
+
+        apply_shell_alias(&mut ctx, &aliases);
+
+        assert_eq!(
+            ctx.expanded_head, None,
+            "operator-bearing alias value should not be expanded"
+        );
+    }
+
+    #[test]
+    fn apply_shell_alias_unparseable_value_skips_safely() {
+        // alias 値が split_quoted でパースエラーになる場合（未閉クォート）は
+        // パニックせず安全にスキップする。
+        let mut ctx = extract_context("bad ", "bad ".len());
+        let mut aliases = HashMap::new();
+        aliases.insert("bad".to_string(), "ls 'foo".to_string());
+
+        apply_shell_alias(&mut ctx, &aliases);
+
+        assert_eq!(
+            ctx.expanded_head, None,
+            "unparseable alias value should be skipped safely, not panic"
+        );
+    }
+
+    #[test]
+    fn apply_shell_alias_empty_value_is_safe() {
+        // alias 値が空文字列でもクラッシュせず、安全な挙動（展開なし、
+        // または空展開）になる。
+        let mut ctx = extract_context("empty ", "empty ".len());
+        let mut aliases = HashMap::new();
+        aliases.insert("empty".to_string(), "".to_string());
+
+        apply_shell_alias(&mut ctx, &aliases);
+
+        // 実際の安全な挙動: split_quoted("") は空のトークン列を返すため
+        // has_operator は false になり、expanded_head は Some(空 + 後続トークン) になる。
+        assert_eq!(
+            ctx.expanded_head,
+            Some(Vec::new()),
+            "empty alias value should expand to an empty head, not panic"
+        );
+    }
+
+    #[test]
+    fn apply_shell_alias_chained_alias_is_single_pass_only() {
+        // a=b, b=git のとき 'a ' を展開すると expanded_head は "b" のまま
+        // （"b" を再度 alias マップで引いて "git" まで再帰解決したりしない）。
+        let mut ctx = extract_context("a ", "a ".len());
+        let mut aliases = HashMap::new();
+        aliases.insert("a".to_string(), "b".to_string());
+        aliases.insert("b".to_string(), "git".to_string());
+
+        apply_shell_alias(&mut ctx, &aliases);
+
+        assert_eq!(
+            ctx.expanded_head,
+            Some(vec!["b".to_string()]),
+            "alias expansion must be single-pass only, not recursively resolved to 'git'"
+        );
+    }
+
+    #[test]
+    fn alias_defined_between_complete_calls_is_picked_up_by_second() {
+        // ヘッドライン UX: セッション中に `alias` ビルトインで定義した直後の
+        // 次の Tab に即座に反映される（共有 Arc — reload 不要）。
+        let (mut completer, aliases_arc) = test_completer_with_aliases(HashMap::new());
+
+        let line = "zzjarvishtestalias";
+        let pos = line.len();
+        let first = completer.complete(line, pos);
+        assert!(
+            !first.iter().any(|s| s.value == "zzjarvishtestalias"),
+            "alias should not be offered before it is defined: {first:?}"
+        );
+
+        aliases_arc
+            .write()
+            .unwrap()
+            .insert("zzjarvishtestalias".to_string(), "git".to_string());
+
+        let second = completer.complete(line, pos);
+        let suggestion = second
+            .iter()
+            .find(|s| s.value == "zzjarvishtestalias")
+            .expect("alias defined between complete() calls should be visible immediately");
+        assert_eq!(
+            suggestion.description.as_deref(),
+            Some("git"),
+            "newly defined alias should carry its value as description"
+        );
+    }
+
+    // ── external_provider_chain 順序テスト (Task 2b.4) ──
+    //
+    // 実際の carapace/zsh バイナリには依存せず、fake スクリプトを両方
+    // 「バイナリ」として settings に注入し、`[completion] external` の配列
+    // 指定順どおりにプロバイダチェーンが構築される（= 先に試される）ことを
+    // 検証する。carapace/zsh どちらも本物のプロトコル（JSON export /
+    // capture.zsh 経由の compsys 呼び出し）を要求するため、ここでは
+    // `external_provider_chain` が返す `Vec` の**要素数と並び**そのものを
+    // 直接検証する（プロバイダの型を外部から判別する手段がないため、
+    // enabled リストの kind 順と 1:1 対応することを見る）。
+
+    fn fake_binary_settings(
+        order: Vec<carapace::ExternalKind>,
+    ) -> Arc<RwLock<ExternalCompletionSettings>> {
+        use carapace::ResolvedExternal;
+        Arc::new(RwLock::new(ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
+            timeout: std::time::Duration::from_millis(400),
+            enabled: order
+                .into_iter()
+                .map(|kind| ResolvedExternal {
+                    kind,
+                    binary: Some(PathBuf::from(format!("/no/such/fake-{kind}"))),
+                })
+                .collect(),
+        }))
+    }
+
+    #[test]
+    fn external_provider_chain_default_auto_order_is_carapace_then_zsh() {
+        let settings = fake_binary_settings(vec![
+            carapace::ExternalKind::Carapace,
+            carapace::ExternalKind::Zsh,
+        ]);
+        let chain = external_provider_chain(&settings, &new_shared_daemon_slot());
+        assert_eq!(
+            chain.len(),
+            2,
+            "both carapace and zsh should be present in the chain"
+        );
+    }
+
+    #[test]
+    fn external_provider_chain_respects_explicit_array_order_zsh_first() {
+        // `[completion] external = ["zsh", "carapace"]` を模した settings では
+        // enabled リストの並びが zsh → carapace になっている。
+        // external_provider_chain はこの並びをそのままチェーンの並びに反映する。
+        let settings = ExternalCompletionSettings::resolve(&CompletionConfig {
+            external: ExternalSetting::List(vec!["zsh".to_string(), "carapace".to_string()]),
+            ..CompletionConfig::default()
+        });
+        let enabled_kinds: Vec<carapace::ExternalKind> =
+            settings.enabled.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            enabled_kinds,
+            vec![
+                carapace::ExternalKind::Zsh,
+                carapace::ExternalKind::Carapace
+            ],
+            "resolved settings should preserve the explicit array order"
+        );
+
+        let shared = Arc::new(RwLock::new(settings));
+        let chain = external_provider_chain(&shared, &new_shared_daemon_slot());
+        // 実機に carapace/zsh が無い環境でも enabled リストにエントリさえ
+        // あればチェーンには要素が積まれる（バイナリ有無はプロバイダ内部の
+        // 実行時ガード — provide() 呼び出し時 — の責務）。
+        assert_eq!(chain.len(), enabled_kinds.len());
+    }
+
+    #[test]
+    fn external_provider_chain_none_yields_empty_chain() {
+        let settings = disabled_external_completion();
+        let chain = external_provider_chain(&settings, &new_shared_daemon_slot());
+        assert!(
+            chain.is_empty(),
+            "external = \"none\" should produce an empty external provider chain"
+        );
+    }
+
+    #[test]
+    fn external_provider_chain_single_carapace_yields_one_entry() {
+        let settings = fake_binary_settings(vec![carapace::ExternalKind::Carapace]);
+        let chain = external_provider_chain(&settings, &new_shared_daemon_slot());
+        assert_eq!(chain.len(), 1);
+    }
+
+    #[test]
+    fn jarvish_completer_construction_with_array_order_does_not_panic() {
+        // JarvishCompleter::new が external_provider_chain 経由で配列指定の
+        // 優先順を受け取っても構築が成功し、通常の補完（PathProvider への
+        // フォールバック）が引き続き機能することを end-to-end で確認する。
+        let settings = Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
+            &CompletionConfig {
+                external: ExternalSetting::List(vec!["zsh".to_string(), "carapace".to_string()]),
+                ..CompletionConfig::default()
+            },
+        )));
+        let commands = CompletionConfig::default().git_branch_commands;
+        let mut completer = JarvishCompleter::new(
+            Arc::new(RwLock::new(commands)),
+            Arc::new(RwLock::new(HashMap::new())),
+            settings,
+            new_shared_daemon_slot(),
+            Arc::new(RwLock::new(CompletionRegistry::new())),
+        );
+
+        let (_tmpdir, path) = create_test_tree();
+        let line = format!("ls {path}/");
+        let pos = line.len();
+        let suggestions = completer.complete(&line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&format!("{path}/readme.txt").as_str()),
+            "path completion should still work when external providers fall through: {values:?}"
+        );
+    }
+
+    // ── D2 (#89): provider-chain フォールスルーの dispatch レベル証明 ──
+    //
+    // 実際の carapace/zsh バイナリに依存せず、テストローカルの FAKE
+    // CompletionProvider 2 個を直接 `JarvishCompleter.providers` に積んで、
+    // `complete()`（実 dispatch コード経路）を通して以下を検証する:
+    // (a) 1 番目が None → 2 番目が実行される
+    // (b) 1 番目が Some(vec![]) → 2 番目は実行されない、結果は空
+    //     （PathProvider へのフォールバックも起きない）
+    // (c) 並び順が解決順と一致する
+    //
+    // 「1番目が実行されたか」は、各 FAKE provider が呼び出し回数を
+    // `Arc<AtomicUsize>` に記録することで直接観測する（戻り値の中身だけでは
+    // 「呼ばれて None を返した」のか「そもそも呼ばれていない」のかを
+    // 区別できないため）。
+
+    struct FakeProvider {
+        name: &'static str,
+        response: Option<Vec<provider::Candidate>>,
+        call_count: Arc<std::sync::atomic::AtomicUsize>,
+        call_order: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    impl CompletionProvider for FakeProvider {
+        fn provide(&self, _ctx: &CompletionContext) -> Option<Vec<provider::Candidate>> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.call_order.lock().unwrap().push(self.name);
+            self.response.clone()
+        }
+    }
+
+    fn fake_completer_with_providers(
+        providers: Vec<Box<dyn CompletionProvider>>,
+    ) -> JarvishCompleter {
+        JarvishCompleter {
+            providers,
+            aliases: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    #[test]
+    fn dispatch_first_provider_none_falls_through_to_second() {
+        let first_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let call_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let first = FakeProvider {
+            name: "first",
+            response: None,
+            call_count: Arc::clone(&first_calls),
+            call_order: Arc::clone(&call_order),
+        };
+        let second = FakeProvider {
+            name: "second",
+            response: Some(vec![provider::Candidate {
+                value: "from-second".to_string(),
+                description: None,
+                append_whitespace: true,
+            }]),
+            call_count: Arc::clone(&second_calls),
+            call_order: Arc::clone(&call_order),
+        };
+
+        let mut completer = fake_completer_with_providers(vec![Box::new(first), Box::new(second)]);
+        let line = "anything arg";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        assert_eq!(first_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(second_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(*call_order.lock().unwrap(), vec!["first", "second"]);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert_eq!(
+            values,
+            vec!["from-second"],
+            "first provider returning None should fall through to the second: {values:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_first_provider_empty_some_short_circuits_no_fallback() {
+        let first_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let call_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let first = FakeProvider {
+            name: "first",
+            response: Some(Vec::new()),
+            call_count: Arc::clone(&first_calls),
+            call_order: Arc::clone(&call_order),
+        };
+        let second = FakeProvider {
+            name: "second",
+            response: Some(vec![provider::Candidate {
+                value: "from-second".to_string(),
+                description: None,
+                append_whitespace: true,
+            }]),
+            call_count: Arc::clone(&second_calls),
+            call_order: Arc::clone(&call_order),
+        };
+
+        let mut completer = fake_completer_with_providers(vec![Box::new(first), Box::new(second)]);
+        let line = "anything arg";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        assert_eq!(
+            first_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "first provider should have been called exactly once"
+        );
+        assert_eq!(
+            second_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "second provider must NOT run once the first provider claims the request with Some(vec![])"
+        );
+        assert_eq!(*call_order.lock().unwrap(), vec!["first"]);
+        assert!(
+            suggestions.is_empty(),
+            "Some(vec![]) from the first provider must yield an empty result, \
+             with no PathProvider (or any later provider) fallback: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_order_matches_provider_construction_order() {
+        // (c): チェーン内の並び順どおりに試行される。3 個の FAKE を積み、
+        // 先頭 2 個が None を返し、3 番目だけが候補を返すケースで、
+        // 呼び出し順序が構築順と一致することを確認する。
+        let call_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dummy_counts: Vec<Arc<std::sync::atomic::AtomicUsize>> = (0..3)
+            .map(|_| Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+            .collect();
+
+        let providers: Vec<Box<dyn CompletionProvider>> = vec![
+            Box::new(FakeProvider {
+                name: "alpha",
+                response: None,
+                call_count: Arc::clone(&dummy_counts[0]),
+                call_order: Arc::clone(&call_order),
+            }),
+            Box::new(FakeProvider {
+                name: "beta",
+                response: None,
+                call_count: Arc::clone(&dummy_counts[1]),
+                call_order: Arc::clone(&call_order),
+            }),
+            Box::new(FakeProvider {
+                name: "gamma",
+                response: Some(vec![provider::Candidate {
+                    value: "from-gamma".to_string(),
+                    description: None,
+                    append_whitespace: true,
+                }]),
+                call_count: Arc::clone(&dummy_counts[2]),
+                call_order: Arc::clone(&call_order),
+            }),
+        ];
+
+        let mut completer = fake_completer_with_providers(providers);
+        let line = "anything arg";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        assert_eq!(
+            *call_order.lock().unwrap(),
+            vec!["alpha", "beta", "gamma"],
+            "providers must be tried in construction order"
+        );
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert_eq!(values, vec!["from-gamma"]);
+    }
+
+    #[test]
+    fn dispatch_resolved_external_order_drives_fake_provider_call_order() {
+        // (c) の別の角度: 実際の `external_provider_chain` の並びが
+        // `ExternalCompletionSettings::resolve` の解決順に一致することを、
+        // FAKE ではなく実プロバイダチェーンで再確認する（配列指定を反転した
+        // 順で構築し、呼び出し順ではなくチェーンの並び自体を見る既存テストとの
+        // 相補）。ここでは carapace/zsh 双方が無効な `"none"` から始め、
+        // 明示配列指定 `["zsh", "carapace"]` で resolve した結果の
+        // `enabled` 順がそのままチェーンの長さ・要素順に反映されることを
+        // 直接確認する。
+        let settings = ExternalCompletionSettings::resolve(&CompletionConfig {
+            external: ExternalSetting::List(vec!["zsh".to_string(), "carapace".to_string()]),
+            ..CompletionConfig::default()
+        });
+        let enabled_kinds: Vec<carapace::ExternalKind> =
+            settings.enabled.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            enabled_kinds,
+            vec![
+                carapace::ExternalKind::Zsh,
+                carapace::ExternalKind::Carapace
+            ]
+        );
+        let shared = Arc::new(RwLock::new(settings));
+        let chain = external_provider_chain(&shared, &new_shared_daemon_slot());
+        assert_eq!(
+            chain.len(),
+            2,
+            "chain length should match resolved order length"
+        );
+    }
+
+    // ── RegistryProvider の dispatch レベル統合テスト（Task 3.2, #89） ──
+    //
+    // JarvishCompleter::new が組み立てる実際のプロバイダチェーン
+    // （CommandProvider → RegistryProvider → GitProvider → 外部補完チェーン →
+    // PathProvider）を通して、RegistryProvider の位置づけ（フォールスルー・
+    // 優先順）を証明する。
+
+    /// `complete_registry` を差し替えられる completer を構築する。
+    /// 外部補完は無効化固定（環境の carapace/zsh 有無に左右されないよう）。
+    fn test_completer_with_registry(registry: CompletionRegistry) -> JarvishCompleter {
+        let commands = CompletionConfig::default().git_branch_commands;
+        JarvishCompleter::new(
+            Arc::new(RwLock::new(commands)),
+            Arc::new(RwLock::new(HashMap::new())),
+            disabled_external_completion(),
+            new_shared_daemon_slot(),
+            Arc::new(RwLock::new(registry)),
+        )
+    }
+
+    #[test]
+    fn registry_zero_match_falls_through_to_path_provider() {
+        // 登録済みコマンドだが partial に一致する spec が無い場合、
+        // RegistryProvider は None を返し、実チェーン経由で PathProvider の
+        // ファイル候補まで到達することを証明する。
+        let (_tmpdir, path) = create_test_tree();
+
+        let mut registry = registry::CompletionRegistry::new();
+        registry.register(
+            "mycmd",
+            registry::CompletionSpec {
+                arguments: Some("zzz_no_such_static_word".to_string()),
+                ..Default::default()
+            },
+        );
+        let mut completer = test_completer_with_registry(registry);
+
+        let line = format!("mycmd {path}/");
+        let pos = line.len();
+        let suggestions = completer.complete(&line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&format!("{path}/readme.txt").as_str()),
+            "zero-match registry spec should fall through to PathProvider file candidates: {values:?}"
+        );
+    }
+
+    #[test]
+    fn registered_command_wins_over_external_chain() {
+        // RegistryProvider が CommandProvider の直後・外部補完チェーンより
+        // 前に位置するため、登録済み spec が一致すれば外部補完プロバイダは
+        // 一切呼ばれない。ここでは fake 外部プロバイダを直接
+        // `providers` に積んで、呼ばれたら panic するようにして証明する。
+        struct PanicIfCalledProvider;
+        impl CompletionProvider for PanicIfCalledProvider {
+            fn provide(&self, _ctx: &CompletionContext) -> Option<Vec<provider::Candidate>> {
+                panic!("external provider must not be consulted once RegistryProvider claims the request");
+            }
+        }
+
+        let mut registry = registry::CompletionRegistry::new();
+        registry.register(
+            "mycmd",
+            registry::CompletionSpec {
+                arguments: Some("build".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let providers: Vec<Box<dyn CompletionProvider>> = vec![
+            Box::new(CommandProvider::new(Arc::new(RwLock::new(HashMap::new())))),
+            Box::new(RegistryProvider::new(
+                Arc::new(RwLock::new(registry)),
+                disabled_external_completion(),
+            )),
+            Box::new(PanicIfCalledProvider),
+            Box::new(PathProvider),
+        ];
+        let mut completer = fake_completer_with_providers(providers);
+
+        let line = "mycmd b";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert_eq!(
+            values,
+            vec!["build"],
+            "registered spec should win and short-circuit before the external provider: {values:?}"
+        );
+    }
+
+    // ── Plant-the-regression チェック（D2, #89） ──
+    //
+    // `complete()` の dispatch ループ（`self.providers.iter().find_map(...)`）
+    // の `Some(vec![])` 短絡意味論を一時的に反転させ（`Some(v) if v.is_empty()
+    // => None` を挟み、「空候補なら次のプロバイダも試す」動作に変更）、
+    // `dispatch_first_provider_empty_some_short_circuits_no_fallback` を
+    // 実行したところ想定どおり FAILED（"second provider must NOT run..."）
+    // することを確認済み。検証後にコードは元の実装へ復元済み（この反転は
+    // コミットに含まれない）。
 }

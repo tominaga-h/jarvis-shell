@@ -2,28 +2,7 @@ use clap::Parser;
 
 use crate::engine::CommandResult;
 
-/// ビルトインコマンドの名前と説明の一覧（アルファベット順）。
-const BUILTIN_COMMANDS: &[(&str, &str)] = &[
-    ("alias", "Set or display aliases"),
-    ("cd", "Change the current directory"),
-    ("cdhist", "Print recently visited directories (LRU)"),
-    ("cdj", "Jump to a directory from cd history via fzf"),
-    ("cwd", "Print the current working directory"),
-    ("dirs", "Display directory stack"),
-    ("exit", "Exit the shell"),
-    ("export", "Set or display environment variables"),
-    ("help", "Display help for builtin commands"),
-    ("history", "Display or manage command history"),
-    ("popd", "Pop directory from stack and change to it"),
-    ("pushd", "Push directory onto stack and change to it"),
-    ("restart", "Restart the shell process"),
-    ("source", "Load a configuration file (TOML)"),
-    ("type", "Display information about command type"),
-    ("unalias", "Remove aliases"),
-    ("unset", "Remove environment variables"),
-    ("update", "Update jarvish to the latest version"),
-    ("which", "Locate a command (builtin, alias, or external)"),
-];
+use super::BUILTIN_COMMANDS;
 
 /// help: ビルトインコマンドのヘルプを表示する。
 #[derive(Parser)]
@@ -93,6 +72,8 @@ mod tests {
         assert!(result.stdout.contains("help"));
         assert!(result.stdout.contains("history"));
         assert!(result.stdout.contains("unset"));
+        // pwd は BUILTIN_COMMANDS 一元化により help 一覧にも表示される
+        assert!(result.stdout.contains("pwd"));
     }
 
     #[test]

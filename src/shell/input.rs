@@ -4,6 +4,7 @@
 //! 適切な実行パスに振り分ける。
 
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use tracing::{debug, info, warn};
@@ -12,10 +13,11 @@ use reedline::HistoryItem;
 
 use std::path::PathBuf;
 
+use crate::cli::completer::registry::CompletionRegistry;
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 
 use crate::cli::jarvis::{jarvis_ask_typo_correction, TypoAction};
-use crate::engine::builtins::{alias, cd, cdj, dirstack, source, unalias, which_type};
+use crate::engine::builtins::{alias, cd, cdj, complete, dirstack, source, unalias, which_type};
 use crate::engine::classifier::{is_ai_goodbye_response, InputType};
 use crate::engine::dispatch::{AiPipeMode, AiPipeRequest};
 use crate::engine::expand;
@@ -40,7 +42,14 @@ impl Shell {
         // 0. エイリアス展開（先頭トークンがエイリアスに一致すれば置換）
         // 履歴にはユーザーが実際に入力した文字列を記録するため、展開前の入力を保持する
         let original_line = line.clone();
-        let line = if let Some(expanded) = expand::expand_alias(&line, &self.aliases) {
+        // read ガードは短命スコープで取得し、await を跨いで保持しない
+        let expanded = {
+            match self.aliases.read() {
+                Ok(guard) => expand::expand_alias(&line, &guard),
+                Err(_) => None,
+            }
+        };
+        let line = if let Some(expanded) = expanded {
             debug!(original = %line, expanded = %expanded, "Alias expanded");
             expanded
         } else {
@@ -205,7 +214,7 @@ impl Shell {
 
     /// Shell 状態を操作するビルトインをインターセプトする。
     ///
-    /// 対象: alias / unalias / source / cd / pushd / popd / dirs
+    /// 対象: alias / unalias / source / cd / pushd / popd / dirs / complete
     ///
     /// 先頭ワードが対象コマンドであり、かつパイプ・リダイレクト等を
     /// 含まない単純なコマンドの場合に `Some(CommandResult)` を返す。
@@ -224,6 +233,7 @@ impl Shell {
                 | "dirs"
                 | "which"
                 | "type"
+                | "complete"
         ) {
             return None;
         }
@@ -282,8 +292,22 @@ impl Shell {
         let args: Vec<&str> = expanded[1..].iter().map(|s| s.as_str()).collect();
 
         let result = match first_word {
-            "alias" => alias::execute_with_aliases(&args, &mut self.aliases),
-            "unalias" => unalias::execute_with_aliases(&args, &mut self.aliases),
+            "alias" => {
+                let Ok(mut guard) = self.aliases.write() else {
+                    let msg = "jarvish: alias: internal error: lock poisoned\n".to_string();
+                    eprint!("{msg}");
+                    return Some(CommandResult::error(msg, 1));
+                };
+                alias::execute_with_aliases(&args, &mut guard)
+            }
+            "unalias" => {
+                let Ok(mut guard) = self.aliases.write() else {
+                    let msg = "jarvish: unalias: internal error: lock poisoned\n".to_string();
+                    eprint!("{msg}");
+                    return Some(CommandResult::error(msg, 1));
+                };
+                unalias::execute_with_aliases(&args, &mut guard)
+            }
             "source" => {
                 let path_str = match source::parse(&args) {
                     Ok(p) => p,
@@ -297,8 +321,23 @@ impl Shell {
             "pushd" => dirstack::execute_pushd(&args, &mut self.dir_stack),
             "popd" => dirstack::execute_popd(&args, &mut self.dir_stack),
             "dirs" => dirstack::execute_dirs(&args, &mut self.dir_stack),
-            "which" => which_type::execute_which(&args, &self.aliases),
-            "type" => which_type::execute_type(&args, &self.aliases),
+            "which" => {
+                let Ok(guard) = self.aliases.read() else {
+                    let msg = "jarvish: which: internal error: lock poisoned\n".to_string();
+                    eprint!("{msg}");
+                    return Some(CommandResult::error(msg, 1));
+                };
+                which_type::execute_which(&args, &guard)
+            }
+            "type" => {
+                let Ok(guard) = self.aliases.read() else {
+                    let msg = "jarvish: type: internal error: lock poisoned\n".to_string();
+                    eprint!("{msg}");
+                    return Some(CommandResult::error(msg, 1));
+                };
+                which_type::execute_type(&args, &guard)
+            }
+            "complete" => run_complete_builtin(&self.complete_registry, &args),
             _ => unreachable!(),
         };
 
@@ -371,6 +410,33 @@ impl Shell {
             }
         }
     }
+}
+
+// ── complete ビルトイン (try_shell_builtins の "complete" 分岐) ──
+
+/// `try_shell_builtins` の `"complete"` 分岐本体。
+///
+/// `Shell` が保持する実共有 `Arc<RwLock<CompletionRegistry>>`
+/// （`complete_registry`）を書き込みロックし、`complete::execute_with_registry`
+/// に委譲する。他の分岐（`alias`/`unalias`/`which`/`type`）と同じ
+/// poisoned-lock ガードパターンを踏襲する: 書き込みロック取得に失敗した
+/// 場合は共有レジストリには一切触れず、exit code 1 のエラーを返す。
+///
+/// `try_shell_builtins` はメソッド（`&mut Shell` 経由）のためフルの
+/// `Shell` を構築しないとテストできないが、この関数は `Arc<RwLock<_>>` と
+/// 引数配列だけで直接呼び出せるため、`Shell` 構築コストなしに「実共有
+/// registry を実際に mutate する」経路と「poisoned lock から復旧できる」
+/// 経路の両方をユニットテストできる（#89 C1）。
+fn run_complete_builtin(
+    registry: &Arc<RwLock<CompletionRegistry>>,
+    args: &[&str],
+) -> CommandResult {
+    let Ok(mut guard) = registry.write() else {
+        let msg = "jarvish: complete: internal error: lock poisoned\n".to_string();
+        eprint!("{msg}");
+        return CommandResult::error(msg, 1);
+    };
+    complete::execute_with_registry(args, &mut guard)
 }
 
 // ── Goodbye 判定 ──
@@ -492,5 +558,80 @@ mod tests {
             !should_exit_on_goodbye(false, false, GOODBYE_TEXT),
             "コマンドが goodbye 文を出力してもシェルを終了してはならない"
         );
+    }
+
+    // ── run_complete_builtin (try_shell_builtins の "complete" 分岐, #89 C1) ──
+
+    /// register 呼び出しが `Shell::complete_registry` と同じ実共有 Arc を
+    /// 実際に mutate することを証明する（#89 C1）。
+    #[test]
+    fn run_complete_builtin_register_mutates_shared_registry() {
+        let registry = Arc::new(RwLock::new(CompletionRegistry::new()));
+
+        let result = run_complete_builtin(&registry, &["-c", "mycmd", "-s", "v", "-l", "verbose"]);
+        assert_eq!(result.exit_code, 0);
+
+        // 同じ Arc を通して、呼び出し元スコープから直接見える変更である
+        // ことを確認する（使い捨てレジストリではなく共有状態であることの
+        // 直接証拠）。
+        let guard = registry.read().unwrap();
+        let specs = guard.specs_for("mycmd");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].short, vec!["v"]);
+        assert_eq!(specs[0].long, vec!["verbose"]);
+    }
+
+    /// erase 呼び出しも同じ共有 Arc を実際に mutate する。
+    #[test]
+    fn run_complete_builtin_erase_mutates_shared_registry() {
+        let registry = Arc::new(RwLock::new(CompletionRegistry::new()));
+        run_complete_builtin(&registry, &["-c", "mycmd", "-s", "v"]);
+        assert_eq!(registry.read().unwrap().specs_for("mycmd").len(), 1);
+
+        let result = run_complete_builtin(&registry, &["-e", "-c", "mycmd"]);
+        assert_eq!(result.exit_code, 0);
+        assert!(registry.read().unwrap().specs_for("mycmd").is_empty());
+    }
+
+    /// list（引数なし）も同じ共有 Arc を読み取り、register 済みの内容を
+    /// 反映する。
+    #[test]
+    fn run_complete_builtin_list_reflects_prior_registrations_on_shared_registry() {
+        let registry = Arc::new(RwLock::new(CompletionRegistry::new()));
+        run_complete_builtin(&registry, &["-c", "mycmd", "-s", "v", "-d", "verbose"]);
+
+        let result = run_complete_builtin(&registry, &[]);
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "complete -c mycmd -s v -d verbose");
+    }
+
+    /// poisoned-lock ガード経路: 書き込みロック取得中に別スレッドが panic
+    /// して Arc が poison した後でも、`run_complete_builtin` は panic
+    /// せず exit code 1 のエラーを返す（他の分岐: alias/unalias/which/type
+    /// と同じ復旧パターン）。かつ、poison 状態のレジストリには一切
+    /// 触れていないことも確認する。
+    #[test]
+    fn run_complete_builtin_recovers_from_poisoned_lock() {
+        let registry = Arc::new(RwLock::new(CompletionRegistry::new()));
+
+        // 別スレッドで write ロックを保持したまま panic させ、Arc を poison する。
+        let poison_registry = Arc::clone(&registry);
+        let handle = std::thread::spawn(move || {
+            let _guard = poison_registry.write().unwrap();
+            panic!("deliberately poisoning the lock for run_complete_builtin_recovers_from_poisoned_lock");
+        });
+        assert!(
+            handle.join().is_err(),
+            "spawned thread should have panicked"
+        );
+        assert!(
+            registry.is_poisoned(),
+            "Arc<RwLock<_>> should be poisoned after the writer thread panicked while holding the lock"
+        );
+
+        // poisoned 状態でも panic せず、exit code 1 のエラーとして復旧する。
+        let result = run_complete_builtin(&registry, &["-c", "mycmd", "-s", "v"]);
+        assert_eq!(result.exit_code, 1);
+        assert!(result.stderr.contains("lock poisoned"));
     }
 }
