@@ -263,7 +263,7 @@ complete            # list everything you've registered so far
 complete -e -c mycmd  # forget mycmd's completions
 ```
 
-Once registered, pressing Tab after `mycmd ` (or `mycmd -`) offers the matching flags or argument words alongside Jarvish's other completion sources.
+Once registered, pressing Tab after `mycmd ` (or `mycmd -`) offers the matching flags or argument words alongside Jarvish's other completion sources. Prefix matching (both for flags and for `-a` argument words) is **case-sensitive** — typing `mycmd B` will not match a candidate registered as `build`.
 
 **Dynamic candidates (`-a "$(...)"`)**: if `-a`'s value is (once trimmed) exactly of the form `$(command)`, Jarvish treats it as a *dynamic* source instead of a static word list — `command` is run through `/bin/sh -c` on every Tab press and its stdout supplies the candidates. Each line of output is parsed as `value<TAB>description` (the tab and description are optional — a bare `value` line is fine and falls back to the spec's `-d`); blank lines are skipped and a trailing `\r` is stripped. The command is capped by `[completion] external_timeout_ms` (floored at 200ms); a timeout, non-zero exit, or spawn failure is treated as "zero candidates from this spec" rather than an error — other specs for the same command still apply, and Jarvish falls through to its other completion sources if nothing matches overall. Mixing static words and `$(...)` in one `-a` string is **not** supported — a spec's `-a` is either a static word list or a single `$(...)`, never both.
 

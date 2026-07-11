@@ -1101,6 +1101,53 @@ mod tests {
         );
     }
 
+    // ── -n 条件: フラグ分岐（'-' 始まり）でも同じくゲートされる（#89 C2）──
+    //
+    // `condition_is_active` によるフィルタは `provide()` の冒頭で
+    // `active_specs` を求める際に一度だけ適用され、フラグ候補
+    // （`flag_candidates`）・引数候補（`static_candidates`）の両方の
+    // 候補源に共通して効く。上の `seen_subcommand_from_*` テストは
+    // 非ダッシュ分岐（引数候補）でのゲートしか検証していないため、
+    // ここでは `-s v` のみを持つ spec が '-' 分岐でも同じ条件でゲート
+    // されることを直接証明する。
+
+    #[test]
+    fn seen_subcommand_from_gates_flag_branch_when_condition_unmet() {
+        let spec = CompletionSpec {
+            condition: Some("__fish_seen_subcommand_from start".to_string()),
+            short: vec!["v".to_string()],
+            ..Default::default()
+        };
+        let provider = provider_for("cmd", spec);
+
+        // "start" をまだ見ていない状態で "cmd -<Tab>" — フラグ分岐でも
+        // 条件が満たされていないため何も出さない。
+        let ctx = extract_context("cmd -", "cmd -".len());
+        assert!(
+            provider.provide(&ctx).is_none(),
+            "-n unmet should gate flag-branch candidates too, not just argument candidates"
+        );
+    }
+
+    #[test]
+    fn seen_subcommand_from_gates_flag_branch_when_condition_met() {
+        let spec = CompletionSpec {
+            condition: Some("__fish_seen_subcommand_from start".to_string()),
+            short: vec!["v".to_string()],
+            ..Default::default()
+        };
+        let provider = provider_for("cmd", spec);
+
+        // "start" を見た後の "cmd start -<Tab>" — フラグ分岐が有効になり
+        // -v が候補に出る。
+        let ctx = extract_context("cmd start -", "cmd start -".len());
+        let candidates = provider
+            .provide(&ctx)
+            .expect("-n met should activate the flag-branch spec");
+        let values: Vec<&str> = candidates.iter().map(|c| c.value.as_str()).collect();
+        assert_eq!(values, vec!["-v"]);
+    }
+
     // ── -n 条件: 未知の条件式は常に非アクティブ ──
 
     #[test]
