@@ -13,7 +13,9 @@ use reedline::{
     MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu,
 };
 
-use crate::cli::completer::{ExternalCompletionSettings, JarvishCompleter, SharedDaemonSlot};
+use crate::cli::completer::{
+    registry::CompletionRegistry, ExternalCompletionSettings, JarvishCompleter, SharedDaemonSlot,
+};
 use crate::cli::highlighter::JarvisHighlighter;
 use crate::engine::classifier::InputClassifier;
 use crate::storage::BlackBoxHistory;
@@ -31,6 +33,10 @@ use crate::storage::BlackBoxHistory;
 /// # Returns
 /// `(Reedline, bool)` — `bool` はコマンド履歴の読み込みに成功したかどうか。
 /// `false` の場合、矢印キー履歴とオートサジェスト（ヒンター）は無効。
+// Shell::new から配管される共有状態（Arc）を素直に受け取っているだけで、
+// 個々のパラメータに強い結びつきはない（パラメータオブジェクト化するほどの
+// 複雑さではない）ため、警告を抑制する。
+#[allow(clippy::too_many_arguments)]
 pub fn build_editor(
     classifier: Arc<InputClassifier>,
     db_path: PathBuf,
@@ -39,12 +45,14 @@ pub fn build_editor(
     aliases: Arc<RwLock<HashMap<String, String>>>,
     external_completion: Arc<RwLock<ExternalCompletionSettings>>,
     zsh_daemon: SharedDaemonSlot,
+    complete_registry: Arc<RwLock<CompletionRegistry>>,
 ) -> (Reedline, bool) {
     let completer = Box::new(JarvishCompleter::new(
         git_branch_commands,
         aliases,
         external_completion,
         zsh_daemon,
+        complete_registry,
     ));
     let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
 

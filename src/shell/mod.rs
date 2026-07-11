@@ -26,8 +26,8 @@ static RESTART_FLAG: StaticAtomicBool = StaticAtomicBool::new(false);
 use crate::ai::{ConversationState, JarvisAI};
 use crate::cli::completer::{
     format_external_binaries_display, format_external_summary, new_shared_daemon_slot,
-    prewarm_zsh_daemon, shutdown_shared_daemon, shutdown_shared_daemon_blocking,
-    ExternalCompletionSettings, SharedDaemonSlot,
+    prewarm_zsh_daemon, registry::CompletionRegistry, shutdown_shared_daemon,
+    shutdown_shared_daemon_blocking, ExternalCompletionSettings, SharedDaemonSlot,
 };
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 use crate::cli::prompt::{ShellPrompt, EXIT_CODE_NONE};
@@ -72,6 +72,10 @@ pub struct Shell {
     /// （`Drop` にのみ依存すると `Command::exec` や `std::process::exit`
     /// では一切実行されないため）。
     zsh_daemon: SharedDaemonSlot,
+    /// `complete` ビルトインで登録されたユーザー定義補完（JarvishCompleter と共有、
+    /// issue #89 Phase 3）。エントリはセッション限りで、rc.jsh（Phase 4）が
+    /// 導入されるまでは再起動のたびに空から始まる。
+    complete_registry: Arc<RwLock<CompletionRegistry>>,
     /// SIGUSR1 受信時に再起動をリクエストするフラグ。
     /// コマンド実行中・PTY 使用中は即座に再起動せず、次の REPL idle 時に遅延実行する。
     restart_requested: Arc<AtomicBool>,
@@ -130,6 +134,10 @@ impl Shell {
             });
         }
 
+        // `complete` ビルトインで登録されるユーザー定義補完（issue #89 Phase 3）。
+        // JarvishCompleter と共有するため editor 構築前に確保する。
+        let complete_registry = Arc::new(RwLock::new(CompletionRegistry::new()));
+
         let db_path = data_dir.join("history.db");
         let (reedline, history_available) = editor::build_editor(
             Arc::clone(&classifier),
@@ -139,6 +147,7 @@ impl Shell {
             Arc::clone(&aliases),
             Arc::clone(&external_completion),
             Arc::clone(&zsh_daemon),
+            Arc::clone(&complete_registry),
         );
 
         // 直前コマンドの終了コードを共有するアトミック変数
@@ -198,6 +207,7 @@ impl Shell {
             git_branch_commands,
             external_completion,
             zsh_daemon,
+            complete_registry,
             restart_requested: Arc::new(AtomicBool::new(false)),
             startup_commands: config.startup.commands,
         }
@@ -1048,6 +1058,9 @@ mod tests {
             Arc::new(RwLock::new(HashMap::new())),
             Arc::clone(&settings),
             Arc::clone(&zsh_daemon),
+            Arc::new(RwLock::new(
+                crate::cli::completer::registry::CompletionRegistry::new(),
+            )),
         );
 
         // resolve_zsh は which::which("zsh") を都度引く本番経路のため、
@@ -1131,6 +1144,9 @@ mod tests {
             Arc::new(RwLock::new(HashMap::new())),
             Arc::clone(&settings),
             Arc::clone(&zsh_daemon),
+            Arc::new(RwLock::new(
+                crate::cli::completer::registry::CompletionRegistry::new(),
+            )),
         );
 
         let line = "jarvishtestcmd ";
@@ -1246,6 +1262,9 @@ mod tests {
             Arc::new(RwLock::new(HashMap::new())),
             Arc::clone(&settings),
             Arc::clone(&zsh_daemon),
+            Arc::new(RwLock::new(
+                crate::cli::completer::registry::CompletionRegistry::new(),
+            )),
         );
 
         let line = "jarvishtestcmd ";
@@ -1315,6 +1334,9 @@ mod tests {
             Arc::new(RwLock::new(HashMap::new())),
             Arc::clone(&settings),
             Arc::clone(&zsh_daemon),
+            Arc::new(RwLock::new(
+                crate::cli::completer::registry::CompletionRegistry::new(),
+            )),
         );
 
         let line = "jarvishtestcmd ";

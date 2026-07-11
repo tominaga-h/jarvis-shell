@@ -31,6 +31,7 @@ The days of copy-pasting errors into a browser to ask AI are over. Just ask Jarv
   - [Starship Prompt Integration](#starship-prompt-integration)
   - [External Completion (carapace)](#external-completion-carapace)
   - [zsh Completion Bridge](#zsh-completion-bridge)
+  - [Custom Completions (`complete` builtin)](#custom-completions-complete-builtin)
 - [Architecture](#️-architecture)
 - [Development](#-development)
 
@@ -243,6 +244,27 @@ If [carapace](#external-completion-carapace) doesn't have candidates for a comma
 - **Warm daemon (`external_zsh_daemon`)**: A one-shot zsh invocation (spawn a fresh `zsh`, run `compinit`, complete, exit) typically costs 700-1100ms per Tab press — mostly process/PTY startup, not the completion itself. When `external_zsh_daemon = true` (the default), Jarvish instead spawns a single `zsh -i` **as a plain child process of Jarvish** and keeps reusing it for every Tab press. This is not a system service and involves no `launchd`/`launchctl` — it is a per-session child process that lives only as long as your Jarvish shell does. Jarvish warms this daemon up **in the background as soon as the shell starts**, so your first Tab press is usually already warm; if the prewarm hasn't finished yet (or was skipped, e.g. `zsh` wasn't found at the time), the daemon is instead spawned lazily on whichever Tab press needs it first. Once warm, requests only pay for the completion computation itself — typically a couple of milliseconds. Completions that shell out to a slow interpreter (e.g. `tmuxinator`'s Ruby-based completion) are tolerated: the warm request timeout is floored at 2000ms, and a single slow/timed-out completion does **not** kill the daemon — Jarvish drains the late response on your next Tab press instead. Only two *consecutive* timeouts are treated as a real hang, at which point the daemon is killed in the background and the next Tab press lazily spawns a fresh one. Editing the bridge zshrc (see below) is detected automatically (by its file modification time) and transparently restarts the daemon on your next Tab press, so you never need to restart Jarvish after tweaking `fpath`/`compdef` entries. Set `external_zsh_daemon = false` to always use the one-shot invocation instead (this also serves as a manual escape hatch when troubleshooting the bridge); hot-reloadable via `source` — flipping it off shuts down any running daemon immediately, at `source` time, and flipping it back on spawns a new one lazily on the next zsh completion request. A running daemon is also always shut down before Jarvish exits or restarts (including via the `restart` builtin) — it never outlives the Jarvish session that spawned it.
 
 **Troubleshooting: bridge completions suddenly return nothing after editing `fpath`.** If you add a directory to `fpath` in the bridge zshrc (as in the example above) and the zsh bridge stops returning candidates for *every* command, the cause is almost always zsh's `compinit` security check. `compinit` runs `compaudit`, which inspects not just the directories you added to `fpath` but also their parent directories, and refuses to proceed if any of them are group-writable — instead it prints an interactive `Ignore insecure directories and continue [ny]?` prompt. Since the bridge zsh runs inside an invisible `zpty` session, nothing can answer that prompt, so `compinit` hangs and completions silently fail across the board. This is common on Intel Macs, where Homebrew's `/usr/local/share` is group-writable by default (Apple Silicon's `/opt/homebrew` is much less likely to hit this). Run `compaudit` to list the offending directories, then fix it the same way Homebrew recommends: `chmod g-w /usr/local/share`.
+
+### Custom Completions (`complete` builtin)
+
+For commands not covered by carapace or the zsh bridge (your own scripts, an internal CLI, etc.), Jarvish provides a fish-style `complete` builtin for defining ad-hoc completions directly at the prompt — no external tool required.
+
+- **Register**: `complete -c CMD [-s X]... [-l LONG]... [-a 'WORDS'] [-d DESC] [-n COND]` adds one completion spec for `CMD`. `-c/--command` is required. `-s` takes a single-character short flag (e.g. `-s v` for `-v`); `-l/--long-option` takes a long flag name (e.g. `-l verbose` for `--verbose`); both may be repeated to register several flags in one call, or accumulated by calling `complete` again for the same command. `-a/--arguments` supplies a space-separated (optionally quoted) list of static candidate words. `-d/--description` sets the text shown in the completion menu. `-n/--condition` stores a condition string for future use (not evaluated yet — see note below).
+- **List**: `complete` with no arguments prints every registered spec, one per line, in the same `complete -c ...` syntax you'd use to register it — so the output is directly re-runnable (round-trippable). Values containing spaces or special characters are automatically single-quoted.
+- **Erase**: `complete -e -c CMD` removes every spec registered for `CMD`. `-e` without `-c` is an error.
+
+Example:
+
+```sh
+complete -c mycmd -s v -l verbose -d 'Verbose output'
+complete -c mycmd -a 'start stop restart' -d 'Subcommand'
+complete            # list everything you've registered so far
+complete -e -c mycmd  # forget mycmd's completions
+```
+
+Once registered, pressing Tab after `mycmd ` (or `mycmd -`) offers the matching flags or argument words alongside Jarvish's other completion sources.
+
+**Session-only for now**: specs registered via `complete` live only in memory and are lost when Jarvish exits. A `rc.jsh` startup script (planned) will let you persist `complete` calls across restarts — until then, add them to a shell alias or re-run them manually each session.
 
 ## 🏗️ Architecture
 

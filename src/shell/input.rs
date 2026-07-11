@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 
 use crate::cli::jarvis::{jarvis_ask_typo_correction, TypoAction};
-use crate::engine::builtins::{alias, cd, cdj, dirstack, source, unalias, which_type};
+use crate::engine::builtins::{alias, cd, cdj, complete, dirstack, source, unalias, which_type};
 use crate::engine::classifier::{is_ai_goodbye_response, InputType};
 use crate::engine::dispatch::{AiPipeMode, AiPipeRequest};
 use crate::engine::expand;
@@ -212,7 +212,7 @@ impl Shell {
 
     /// Shell 状態を操作するビルトインをインターセプトする。
     ///
-    /// 対象: alias / unalias / source / cd / pushd / popd / dirs
+    /// 対象: alias / unalias / source / cd / pushd / popd / dirs / complete
     ///
     /// 先頭ワードが対象コマンドであり、かつパイプ・リダイレクト等を
     /// 含まない単純なコマンドの場合に `Some(CommandResult)` を返す。
@@ -231,6 +231,7 @@ impl Shell {
                 | "dirs"
                 | "which"
                 | "type"
+                | "complete"
         ) {
             return None;
         }
@@ -333,6 +334,14 @@ impl Shell {
                     return Some(CommandResult::error(msg, 1));
                 };
                 which_type::execute_type(&args, &guard)
+            }
+            "complete" => {
+                let Ok(mut guard) = self.complete_registry.write() else {
+                    let msg = "jarvish: complete: internal error: lock poisoned\n".to_string();
+                    eprint!("{msg}");
+                    return Some(CommandResult::error(msg, 1));
+                };
+                complete::execute_with_registry(&args, &mut guard)
             }
             _ => unreachable!(),
         };

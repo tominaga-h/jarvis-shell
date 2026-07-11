@@ -2,6 +2,7 @@ pub(crate) mod alias;
 pub(crate) mod cd;
 pub(crate) mod cdhist;
 pub(crate) mod cdj;
+pub(crate) mod complete;
 mod cwd;
 pub(crate) mod dirstack;
 mod exit;
@@ -27,6 +28,7 @@ pub(crate) const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("cd", "Change the current directory"),
     ("cdhist", "Print recently visited directories (LRU)"),
     ("cdj", "Jump to a directory from cd history via fzf"),
+    ("complete", "Define, list, or erase custom completions"),
     ("cwd", "Print the current working directory"),
     ("dirs", "Display directory stack"),
     ("exit", "Exit the shell"),
@@ -79,6 +81,10 @@ pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
         "cd" => Some(cd::execute(args, &mut Vec::new())),
         "cdhist" => Some(cdhist::execute(args)),
         "cdj" => Some(cdj::execute_stub(args)),
+        "complete" => Some(complete::execute_with_registry(
+            args,
+            &mut crate::cli::completer::registry::CompletionRegistry::new(),
+        )),
         "cwd" | "pwd" => Some(cwd::execute(args)),
         "dirs" => Some(dirstack::execute_dirs(args, &mut Vec::new())),
         "exit" => Some(exit::execute(args)),
@@ -227,6 +233,16 @@ mod tests {
         assert!(dispatch_builtin("history", &["--help"]).is_some());
     }
 
+    #[test]
+    fn complete_is_registered_and_dispatches() {
+        assert!(is_builtin("complete"));
+        // dispatch 経由ではスタブのレジストリを使うため引数なし（一覧表示）は
+        // 常に空で成功する。
+        let result = dispatch_builtin("complete", &[]).unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "");
+    }
+
     // ── cdhist / cdj 登録テスト ──
 
     #[test]
@@ -263,13 +279,13 @@ mod tests {
 
     #[test]
     fn is_builtin_accepts_exact_previous_name_list() {
-        // is_builtin が旧来受理していた20コマンドすべてを引き続き受理することを確認
+        // is_builtin が旧来受理していた21コマンドすべてを引き続き受理することを確認
         const EXPECTED: &[&str] = &[
-            "alias", "cd", "cdhist", "cdj", "cwd", "dirs", "exit", "export", "help", "history",
-            "popd", "pushd", "pwd", "restart", "source", "type", "unalias", "unset", "update",
-            "which",
+            "alias", "cd", "cdhist", "cdj", "complete", "cwd", "dirs", "exit", "export", "help",
+            "history", "popd", "pushd", "pwd", "restart", "source", "type", "unalias", "unset",
+            "update", "which",
         ];
-        assert_eq!(EXPECTED.len(), 20);
+        assert_eq!(EXPECTED.len(), 21);
         for cmd in EXPECTED {
             assert!(is_builtin(cmd), "{cmd} should be recognized as builtin");
         }
@@ -285,7 +301,7 @@ mod tests {
 
     #[test]
     fn builtin_commands_table_is_sorted_and_unique() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 20);
+        assert_eq!(BUILTIN_COMMANDS.len(), 21);
 
         let mut names: Vec<&str> = BUILTIN_COMMANDS.iter().map(|(name, _)| *name).collect();
         let sorted_names = {

@@ -59,6 +59,7 @@ mod external;
 mod git;
 mod path;
 mod provider;
+pub mod registry;
 mod zsh_bridge;
 mod zsh_daemon;
 
@@ -75,6 +76,7 @@ use context::{extract_context, CompletionContext};
 use git::GitProvider;
 use path::PathProvider;
 use provider::{escape_for_insert, CompletionProvider};
+use registry::CompletionRegistry;
 use zsh_bridge::ZshBridgeProvider;
 
 pub use carapace::{
@@ -101,6 +103,11 @@ pub struct JarvishCompleter {
     /// シェルエイリアス（Shell と共有。`alias` ビルトインによる更新が
     /// 次回の Tab に即座に反映される — reload 不要）
     aliases: Arc<RwLock<HashMap<String, String>>>,
+    /// `complete` ビルトインで登録されたユーザー定義補完（Shell と共有）。
+    /// Task 3.1 時点ではフィールドとして保持するのみで、実際の補完提供は
+    /// `RegistryProvider`（Task 3.2）が同じ `Arc` を介して行う。
+    #[allow(dead_code)]
+    complete_registry: Arc<RwLock<CompletionRegistry>>,
 }
 
 impl JarvishCompleter {
@@ -109,6 +116,7 @@ impl JarvishCompleter {
         aliases: Arc<RwLock<HashMap<String, String>>>,
         external_completion: Arc<RwLock<ExternalCompletionSettings>>,
         zsh_daemon: SharedDaemonSlot,
+        complete_registry: Arc<RwLock<CompletionRegistry>>,
     ) -> Self {
         let mut providers: Vec<Box<dyn CompletionProvider>> = vec![
             Box::new(CommandProvider::new(Arc::clone(&aliases))),
@@ -116,7 +124,11 @@ impl JarvishCompleter {
         ];
         providers.extend(external_provider_chain(&external_completion, &zsh_daemon));
         providers.push(Box::new(PathProvider));
-        Self { providers, aliases }
+        Self {
+            providers,
+            aliases,
+            complete_registry,
+        }
     }
 }
 
@@ -289,6 +301,7 @@ mod tests {
             Arc::new(RwLock::new(HashMap::new())),
             disabled_external_completion(),
             new_shared_daemon_slot(),
+            Arc::new(RwLock::new(CompletionRegistry::new())),
         )
     }
 
@@ -304,6 +317,7 @@ mod tests {
             Arc::clone(&aliases),
             disabled_external_completion(),
             new_shared_daemon_slot(),
+            Arc::new(RwLock::new(CompletionRegistry::new())),
         );
         (completer, aliases)
     }
@@ -1189,6 +1203,7 @@ mod tests {
             Arc::new(RwLock::new(HashMap::new())),
             settings,
             new_shared_daemon_slot(),
+            Arc::new(RwLock::new(CompletionRegistry::new())),
         );
 
         let (_tmpdir, path) = create_test_tree();
@@ -1240,6 +1255,7 @@ mod tests {
         JarvishCompleter {
             providers,
             aliases: Arc::new(RwLock::new(HashMap::new())),
+            complete_registry: Arc::new(RwLock::new(CompletionRegistry::new())),
         }
     }
 
