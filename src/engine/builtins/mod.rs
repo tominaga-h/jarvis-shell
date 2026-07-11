@@ -81,10 +81,7 @@ pub fn dispatch_builtin(cmd: &str, args: &[&str]) -> Option<CommandResult> {
         "cd" => Some(cd::execute(args, &mut Vec::new())),
         "cdhist" => Some(cdhist::execute(args)),
         "cdj" => Some(cdj::execute_stub(args)),
-        "complete" => Some(complete::execute_with_registry(
-            args,
-            &mut crate::cli::completer::registry::CompletionRegistry::new(),
-        )),
+        "complete" => Some(complete::execute_standalone_only(args)),
         "cwd" | "pwd" => Some(cwd::execute(args)),
         "dirs" => Some(dirstack::execute_dirs(args, &mut Vec::new())),
         "exit" => Some(exit::execute(args)),
@@ -236,11 +233,39 @@ mod tests {
     #[test]
     fn complete_is_registered_and_dispatches() {
         assert!(is_builtin("complete"));
-        // dispatch 経由ではスタブのレジストリを使うため引数なし（一覧表示）は
-        // 常に空で成功する。
+    }
+
+    #[test]
+    fn complete_dispatch_stub_rejects_list_with_error() {
+        // dispatch_builtin 経由（pipeline / command list / ai_pipe 等）では
+        // 実レジストリへのアクセスがないため、引数なし（一覧表示相当）は
+        // 使い捨てレジストリを黙って操作せず、明確なエラーを返す（#89 A1）。
         let result = dispatch_builtin("complete", &[]).unwrap();
-        assert_eq!(result.exit_code, 0);
+        assert_ne!(result.exit_code, 0);
+        assert!(result.stderr.contains("standalone command"));
         assert_eq!(result.stdout, "");
+    }
+
+    #[test]
+    fn complete_dispatch_stub_rejects_register() {
+        let result = dispatch_builtin("complete", &["-c", "mycmd", "-s", "v"]).unwrap();
+        assert_ne!(result.exit_code, 0);
+        assert!(result.stderr.contains("standalone command"));
+    }
+
+    #[test]
+    fn complete_dispatch_stub_rejects_erase() {
+        let result = dispatch_builtin("complete", &["-e", "-c", "mycmd"]).unwrap();
+        assert_ne!(result.exit_code, 0);
+        assert!(result.stderr.contains("standalone command"));
+    }
+
+    #[test]
+    fn complete_dispatch_stub_help_still_works() {
+        // help.rs の `dispatch_builtin(cmd, ["--help"])` 委譲が壊れないことを保証。
+        let result = dispatch_builtin("complete", &["--help"]).unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("complete"));
     }
 
     // ── cdhist / cdj 登録テスト ──

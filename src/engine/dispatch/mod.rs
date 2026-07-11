@@ -737,4 +737,62 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout.trim(), "foo");
     }
+
+    // ── complete ビルトイン: dispatch_builtin スタブ経由での data-loss 修正
+    // (#89 A1) ──
+    //
+    // `try_shell_builtins`（実レジストリ）を経由しないルート（`;` を含む
+    // コマンドリスト、パイプライン内の非先頭コマンド、ai_pipe 経由）では
+    // `complete` の register/list/erase は「使い捨てレジストリへ静かに
+    // 成功する」のではなく、明確なエラーとして観測可能でなければならない。
+
+    #[test]
+    fn complete_register_in_semicolon_list_surfaces_error_not_silent_noop() {
+        // `complete -c x -a y; ls` 形式: `;` を含むため
+        // try_shell_builtins が None を返し、execute() → dispatch_builtin
+        // スタブ経由になる。修正前はここで register が「成功」し
+        // データが消えるだけだった（観測不能な data loss）。
+        // 修正後は complete 呼び出し自体がエラー終了として観測できる。
+        let result = execute("complete -c x -a y ; echo after");
+        // 最終的な終了コードは最後のコマンド（echo）の結果で上書きされるが、
+        // complete 単体の失敗は stderr に必ず現れる（無音の成功ではない）。
+        assert!(
+            result.stderr.contains("standalone command"),
+            "expected complete's stub error to surface in stderr, got stdout={:?} stderr={:?}",
+            result.stdout,
+            result.stderr
+        );
+        // `; echo after` 自体は独立して実行されるため、続行はする。
+        assert!(result.stdout.contains("after"));
+    }
+
+    #[test]
+    fn complete_erase_in_and_list_surfaces_error() {
+        let result = execute("complete -e -c x && echo unreachable");
+        assert!(result.stderr.contains("standalone command"));
+        assert_ne!(result.exit_code, 0);
+        // -c 付き -e はスタブ経路でエラー終了するため && の後続は実行されない。
+        assert!(!result.stdout.contains("unreachable"));
+    }
+
+    #[test]
+    fn complete_list_as_pipeline_head_surfaces_error_not_silent_empty_success() {
+        // パイプライン内（複数コマンド）の先頭ビルトインとして complete が
+        // 呼ばれるケース。dispatch_builtin スタブ経由になるため、
+        // 一覧表示相当の「空文字列で成功」ではなくエラーになる。
+        let result = execute("complete | cat");
+        assert_ne!(
+            result.exit_code, 0,
+            "complete at pipeline head must not silently succeed with empty output"
+        );
+    }
+
+    #[test]
+    fn complete_help_still_works_through_command_list() {
+        // --help は standalone 経路を経由しない状況でも動き続ける必要がある
+        // （help.rs の `dispatch_builtin(cmd, ["--help"])` 委譲との整合）。
+        let result = execute("complete --help ; echo after");
+        assert!(result.stdout.contains("complete"));
+        assert!(result.stdout.contains("after"));
+    }
 }
