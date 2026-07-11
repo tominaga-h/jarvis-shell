@@ -117,7 +117,10 @@ impl JarvishCompleter {
     ) -> Self {
         let mut providers: Vec<Box<dyn CompletionProvider>> = vec![
             Box::new(CommandProvider::new(Arc::clone(&aliases))),
-            Box::new(RegistryProvider::new(complete_registry)),
+            Box::new(RegistryProvider::new(
+                complete_registry,
+                Arc::clone(&external_completion),
+            )),
             Box::new(GitProvider::new(git_branch_commands)),
         ];
         providers.extend(external_provider_chain(&external_completion, &zsh_daemon));
@@ -1491,7 +1494,10 @@ mod tests {
 
         let providers: Vec<Box<dyn CompletionProvider>> = vec![
             Box::new(CommandProvider::new(Arc::new(RwLock::new(HashMap::new())))),
-            Box::new(RegistryProvider::new(Arc::new(RwLock::new(registry)))),
+            Box::new(RegistryProvider::new(
+                Arc::new(RwLock::new(registry)),
+                disabled_external_completion(),
+            )),
             Box::new(PanicIfCalledProvider),
             Box::new(PathProvider),
         ];

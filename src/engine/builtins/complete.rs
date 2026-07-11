@@ -7,10 +7,14 @@
 //!   `complete -c cmd -s x -l long -a '...' -d '...'` 形式で 1 行 1 spec で列挙。
 //! - `complete -e -c CMD` → CMD の全 spec を消去（`-c` なしの `-e` はエラー）。
 //!
-//! 実際の Tab 補完への反映は `RegistryProvider`（Task 3.2, `src/cli/completer/`）
-//! が同じ `CompletionRegistry` を読み取ることで行う。このファイルは
+//! 実際の Tab 補完への反映は `RegistryProvider`（`src/cli/completer/`）が
+//! 同じ `CompletionRegistry` を読み取ることで行う。このファイルは
 //! 引数パースとレジストリへの変更（mutation）のみを担当する
-//! （単一責任: データ構造は `registry.rs` 側）。
+//! （単一責任: データ構造は `registry.rs` 側）。`-a "$(...)"` の動的候補
+//! 実行や `-n` の条件評価（`__fish_use_subcommand` /
+//! `__fish_seen_subcommand_from`、Task 3.3）もすべて `RegistryProvider`
+//! 側の責務であり、このファイルは受け取った文字列をそのまま
+//! [`CompletionSpec`] に格納するだけで解釈しない。
 
 use clap::Parser;
 
@@ -33,15 +37,18 @@ struct CompleteArgs {
     #[arg(short = 'l', long = "long-option", action = clap::ArgAction::Append)]
     long: Vec<String>,
 
-    /// Static candidate words (space-separated, quote to include spaces)
+    /// Static candidate words (space-separated, quote to include spaces),
+    /// or a single dynamic source "$(command)"
     #[arg(short = 'a', long = "arguments", allow_hyphen_values = true)]
     arguments: Option<String>,
 
-    /// Description shown alongside candidates
+    /// Fallback description shown alongside candidates
     #[arg(short = 'd', long = "description", allow_hyphen_values = true)]
     description: Option<String>,
 
-    /// Condition expression (stored but not evaluated in this phase)
+    /// Condition expression; only __fish_use_subcommand and
+    /// __fish_seen_subcommand_from are evaluated, others keep the spec
+    /// registered but inactive for completion
     #[arg(short = 'n', long = "condition", allow_hyphen_values = true)]
     condition: Option<String>,
 

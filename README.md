@@ -249,7 +249,7 @@ If [carapace](#external-completion-carapace) doesn't have candidates for a comma
 
 For commands not covered by carapace or the zsh bridge (your own scripts, an internal CLI, etc.), Jarvish provides a fish-style `complete` builtin for defining ad-hoc completions directly at the prompt — no external tool required.
 
-- **Register**: `complete -c CMD [-s X]... [-l LONG]... [-a 'WORDS'] [-d DESC] [-n COND]` adds one completion spec for `CMD`. `-c/--command` is required. `-s` takes a single-character short flag (e.g. `-s v` for `-v`); `-l/--long-option` takes a long flag name (e.g. `-l verbose` for `--verbose`); both may be repeated to register several flags in one call, or accumulated by calling `complete` again for the same command. `-a/--arguments` supplies a space-separated (optionally quoted) list of static candidate words. `-d/--description` sets the text shown in the completion menu. `-n/--condition` stores a condition string for future use (not evaluated yet — see note below).
+- **Register**: `complete -c CMD [-s X]... [-l LONG]... [-a 'WORDS'] [-d DESC] [-n COND]` adds one completion spec for `CMD`. `-c/--command` is required. `-s` takes a single-character short flag (e.g. `-s v` for `-v`); `-l/--long-option` takes a long flag name (e.g. `-l verbose` for `--verbose`); both may be repeated to register several flags in one call, or accumulated by calling `complete` again for the same command. `-a/--arguments` supplies either a space-separated (optionally quoted) list of static candidate words, or a single dynamic source `"$(command)"` (see below). `-d/--description` sets the fallback text shown in the completion menu. `-n/--condition` restricts the spec to a subset of built-in conditions (see below); specs with an unrecognized condition are still registered and listed, but never offer completions.
 - **List**: `complete` with no arguments prints every registered spec, one per line, in the same `complete -c ...` syntax you'd use to register it — so the output is directly re-runnable (round-trippable). Values containing spaces or special characters are automatically single-quoted.
 - **Erase**: `complete -e -c CMD` removes every spec registered for `CMD`. `-e` without `-c` is an error.
 
@@ -263,6 +263,23 @@ complete -e -c mycmd  # forget mycmd's completions
 ```
 
 Once registered, pressing Tab after `mycmd ` (or `mycmd -`) offers the matching flags or argument words alongside Jarvish's other completion sources.
+
+**Dynamic candidates (`-a "$(...)"`)**: if `-a`'s value is (once trimmed) exactly of the form `$(command)`, Jarvish treats it as a *dynamic* source instead of a static word list — `command` is run through `/bin/sh -c` on every Tab press and its stdout supplies the candidates. Each line of output is parsed as `value<TAB>description` (the tab and description are optional — a bare `value` line is fine and falls back to the spec's `-d`); blank lines are skipped and a trailing `\r` is stripped. The command is capped by `[completion] external_timeout_ms` (floored at 200ms); a timeout, non-zero exit, or spawn failure is treated as "zero candidates from this spec" rather than an error — other specs for the same command still apply, and Jarvish falls through to its other completion sources if nothing matches overall. Mixing static words and `$(...)` in one `-a` string is **not** supported — a spec's `-a` is either a static word list or a single `$(...)`, never both.
+
+**Conditions (`-n`)**: only two condition forms are evaluated, and both run without spawning a subprocess:
+- `__fish_use_subcommand` — true as long as no non-flag word has appeared yet after the command name (so `mycmd -v <Tab>` still counts as "no subcommand seen").
+- `__fish_seen_subcommand_from w1 w2 ...` — true once any of the listed words has appeared after the command name.
+
+A spec whose `-n` is anything else is **inactive for completion** (it never contributes candidates) but is still registered and shown by `complete`'s listing — this is a known limitation of this phase, not a bug.
+
+Worked example — a `mycmd` with two subcommands, the second of which takes a dynamically-listed argument:
+
+```sh
+complete -c mycmd -n '__fish_use_subcommand' -a 'start stop'
+complete -c mycmd -n '__fish_seen_subcommand_from start' -a "$(mycmd --list-targets)"
+```
+
+Pressing Tab right after `mycmd ` offers `start`/`stop`; after `mycmd start `, it instead runs `mycmd --list-targets` and offers its output as candidates.
 
 **Session-only for now**: specs registered via `complete` live only in memory and are lost when Jarvish exits. A `rc.jsh` startup script (planned) will let you persist `complete` calls across restarts — until then, add them to a shell alias or re-run them manually each session.
 
