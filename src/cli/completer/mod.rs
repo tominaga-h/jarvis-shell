@@ -60,6 +60,7 @@ mod git;
 mod path;
 mod provider;
 pub mod registry;
+mod registry_provider;
 mod zsh_bridge;
 mod zsh_daemon;
 
@@ -77,6 +78,7 @@ use git::GitProvider;
 use path::PathProvider;
 use provider::{escape_for_insert, CompletionProvider};
 use registry::CompletionRegistry;
+use registry_provider::RegistryProvider;
 use zsh_bridge::ZshBridgeProvider;
 
 pub use carapace::{
@@ -103,11 +105,6 @@ pub struct JarvishCompleter {
     /// シェルエイリアス（Shell と共有。`alias` ビルトインによる更新が
     /// 次回の Tab に即座に反映される — reload 不要）
     aliases: Arc<RwLock<HashMap<String, String>>>,
-    /// `complete` ビルトインで登録されたユーザー定義補完（Shell と共有）。
-    /// Task 3.1 時点ではフィールドとして保持するのみで、実際の補完提供は
-    /// `RegistryProvider`（Task 3.2）が同じ `Arc` を介して行う。
-    #[allow(dead_code)]
-    complete_registry: Arc<RwLock<CompletionRegistry>>,
 }
 
 impl JarvishCompleter {
@@ -120,15 +117,12 @@ impl JarvishCompleter {
     ) -> Self {
         let mut providers: Vec<Box<dyn CompletionProvider>> = vec![
             Box::new(CommandProvider::new(Arc::clone(&aliases))),
+            Box::new(RegistryProvider::new(complete_registry)),
             Box::new(GitProvider::new(git_branch_commands)),
         ];
         providers.extend(external_provider_chain(&external_completion, &zsh_daemon));
         providers.push(Box::new(PathProvider));
-        Self {
-            providers,
-            aliases,
-            complete_registry,
-        }
+        Self { providers, aliases }
     }
 }
 
@@ -1255,7 +1249,6 @@ mod tests {
         JarvishCompleter {
             providers,
             aliases: Arc::new(RwLock::new(HashMap::new())),
-            complete_registry: Arc::new(RwLock::new(CompletionRegistry::new())),
         }
     }
 
@@ -1423,6 +1416,96 @@ mod tests {
             chain.len(),
             2,
             "chain length should match resolved order length"
+        );
+    }
+
+    // ── RegistryProvider の dispatch レベル統合テスト（Task 3.2, #89） ──
+    //
+    // JarvishCompleter::new が組み立てる実際のプロバイダチェーン
+    // （CommandProvider → RegistryProvider → GitProvider → 外部補完チェーン →
+    // PathProvider）を通して、RegistryProvider の位置づけ（フォールスルー・
+    // 優先順）を証明する。
+
+    /// `complete_registry` を差し替えられる completer を構築する。
+    /// 外部補完は無効化固定（環境の carapace/zsh 有無に左右されないよう）。
+    fn test_completer_with_registry(registry: CompletionRegistry) -> JarvishCompleter {
+        let commands = CompletionConfig::default().git_branch_commands;
+        JarvishCompleter::new(
+            Arc::new(RwLock::new(commands)),
+            Arc::new(RwLock::new(HashMap::new())),
+            disabled_external_completion(),
+            new_shared_daemon_slot(),
+            Arc::new(RwLock::new(registry)),
+        )
+    }
+
+    #[test]
+    fn registry_zero_match_falls_through_to_path_provider() {
+        // 登録済みコマンドだが partial に一致する spec が無い場合、
+        // RegistryProvider は None を返し、実チェーン経由で PathProvider の
+        // ファイル候補まで到達することを証明する。
+        let (_tmpdir, path) = create_test_tree();
+
+        let mut registry = registry::CompletionRegistry::new();
+        registry.register(
+            "mycmd",
+            registry::CompletionSpec {
+                arguments: Some("zzz_no_such_static_word".to_string()),
+                ..Default::default()
+            },
+        );
+        let mut completer = test_completer_with_registry(registry);
+
+        let line = format!("mycmd {path}/");
+        let pos = line.len();
+        let suggestions = completer.complete(&line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert!(
+            values.contains(&format!("{path}/readme.txt").as_str()),
+            "zero-match registry spec should fall through to PathProvider file candidates: {values:?}"
+        );
+    }
+
+    #[test]
+    fn registered_command_wins_over_external_chain() {
+        // RegistryProvider が CommandProvider の直後・外部補完チェーンより
+        // 前に位置するため、登録済み spec が一致すれば外部補完プロバイダは
+        // 一切呼ばれない。ここでは fake 外部プロバイダを直接
+        // `providers` に積んで、呼ばれたら panic するようにして証明する。
+        struct PanicIfCalledProvider;
+        impl CompletionProvider for PanicIfCalledProvider {
+            fn provide(&self, _ctx: &CompletionContext) -> Option<Vec<provider::Candidate>> {
+                panic!("external provider must not be consulted once RegistryProvider claims the request");
+            }
+        }
+
+        let mut registry = registry::CompletionRegistry::new();
+        registry.register(
+            "mycmd",
+            registry::CompletionSpec {
+                arguments: Some("build".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let providers: Vec<Box<dyn CompletionProvider>> = vec![
+            Box::new(CommandProvider::new(Arc::new(RwLock::new(HashMap::new())))),
+            Box::new(RegistryProvider::new(Arc::new(RwLock::new(registry)))),
+            Box::new(PanicIfCalledProvider),
+            Box::new(PathProvider),
+        ];
+        let mut completer = fake_completer_with_providers(providers);
+
+        let line = "mycmd b";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert_eq!(
+            values,
+            vec!["build"],
+            "registered spec should win and short-circuit before the external provider: {values:?}"
         );
     }
 
