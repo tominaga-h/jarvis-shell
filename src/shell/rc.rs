@@ -6,8 +6,11 @@
 //! 永続化する受け皿になる。
 //!
 //! 実行される各行は **分類器（AI ルーティング）を一切経由しない**。
+//! 先頭トークンのエイリアス展開（`handle_input` ステップ0と同一）の後、
 //! `try_shell_builtins` → `try_builtin` → `execute` の順に試すだけの
 //! 純粋なコマンド実行パスであり、自然言語行が誤って AI に送られることはない。
+//! エイリアス展開があるため、スクリプトの早い行で定義した `alias` を
+//! 同じスクリプトの後の行から使うことができる（Fix B1）。
 //!
 //! この実行器（[`Shell::run_rc_script_sync`]）はファイルパス・表示名・
 //! ネスト深さをパラメータ化しているため、Phase 4.3 の `source` ビルトイン
@@ -35,6 +38,7 @@ use tracing::{debug, info, warn};
 
 use crate::cli::prompt::EXIT_CODE_NONE;
 use crate::engine::classifier::InputClassifier;
+use crate::engine::expand;
 use crate::engine::{execute, try_builtin, CommandResult, LoopAction};
 
 use super::Shell;
@@ -433,8 +437,12 @@ impl Shell {
     ///   （`try_shell_builtins` の `"source"` 分岐）が非 TOML ファイルを
     ///   検出した際、`self.source_depth + 1` を渡してこのメソッドを
     ///   再帰的に呼び出す。[`MAX_SOURCE_DEPTH`] を超えると
-    ///   `jarvish: {display_name}:{lineno}: source nesting too deep`
+    ///   `jarvish: {display_name}: source nesting too deep`
     ///   を出力して即座に停止する（自己 source の無限ループ防止）。
+    ///   このメッセージは深さ超過を検出したこの関数自身の呼び出しに
+    ///   ついてのものであり、まだどの行番号にも到達していない
+    ///   （行のパースより前の関門であるため）—— 行番号は含まれない。
+    ///   （`dispatch_source` 側の同種のガードも同じ理由で行番号を含まない）
     ///
     /// `try_shell_builtins` は同期メソッドのため、このメソッドは
     /// `.await` を一切含まない同期関数として実装している
@@ -485,7 +493,18 @@ impl Shell {
                 RcLineOutcome::Ran(result) => {
                     self.last_exit_code
                         .store(result.exit_code, Ordering::Relaxed);
-                    if result.exit_code != 0 {
+                    // exit-requested な行（`exit <n>` / goodbye / `restart`）は
+                    // 「失敗したコマンド」ではなく意図的なアクションなので、
+                    // 非ゼロ終了コードであっても
+                    // "command exited with status N" の失敗プレフィックスは
+                    // 出さない（Fix B3）。この判定は `result.exit_code != 0`
+                    // ではなく `result.action` を見て行う ——
+                    // `exit 3` は exit_code == 3 かつ action ==
+                    // LoopAction::Exit であり、値だけでは失敗コマンドと
+                    // 区別できないため。
+                    let is_exit_requested =
+                        matches!(result.action, LoopAction::Exit | LoopAction::Restart);
+                    if result.exit_code != 0 && !is_exit_requested {
                         had_failure = true;
                         eprintln!(
                             "jarvish: {display_name}:{}: command exited with status {}",
@@ -555,7 +574,13 @@ impl Shell {
 
     /// `source <path>` ビルトインの本体（Phase 4.3）。
     ///
-    /// 拡張子で分岐する:
+    /// **ディレクトリ判定が拡張子ディスパッチより先**（Fix B4）:
+    /// 拡張子で分岐する前に `fs::metadata` でディレクトリかどうかを見る。
+    /// これにより `foo.toml` という名前の**ディレクトリ**を source しても
+    /// `reload_config`（ひいては生の `read_to_string` の OS エラー）には
+    /// 到達せず、「is a directory」エラーで即座に打ち切られる。
+    ///
+    /// ディレクトリでなければ拡張子で分岐する:
     /// - `.toml`（大文字小文字を区別しない） → 既存の `reload_config`
     ///   （config.toml の再読み込み）を **そのまま** 呼ぶ。挙動は Phase 4.3
     ///   より前と完全に同一。
@@ -573,12 +598,15 @@ impl Shell {
     ///
     /// 戻り値の `exit_code`: ファイルが読めない場合は 1
     /// （`jarvish: source: no such file` を報告、`reload_config` 側は
-    /// 既存の `jarvish: source: {msg}` 形式を維持）。ファイルは存在するが
-    /// ディレクトリ・FIFO 等の非通常ファイルである場合や、サイズ上限
-    /// （[`MAX_RC_FILE_SIZE`]）を超える場合も、[`run_rc_script_sync`]
-    /// 内部の [`read_rc_file_guarded`] がエラーとして検出し、この経路と
-    /// 同じ「行エラーとして報告し継続」扱いになる（FIFO を `open` して
-    /// ハングすることはない）。スクリプト実行の
+    /// 既存の `jarvish: source: {msg}` 形式を維持）。パスがディレクトリ
+    /// である場合（拡張子が `.toml` かどうかに関わらず、Fix B4）は
+    /// 拡張子ディスパッチより前段の `fs::metadata` チェックで即座に
+    /// "is a directory" エラーとして検出される（`reload_config` /
+    /// `run_rc_script_sync` のどちらにも到達しない）。FIFO 等の非通常
+    /// ファイルである場合や、サイズ上限（[`MAX_RC_FILE_SIZE`]）を超える
+    /// 場合は、[`run_rc_script_sync`] 内部の [`read_rc_file_guarded`]
+    /// がエラーとして検出し、この経路と同じ「行エラーとして報告し継続」
+    /// 扱いになる（FIFO を `open` してハングすることはない）。スクリプト実行の
     /// 場合、全行成功なら 0、いずれかの行が失敗していれば 1。
     /// `exit`/goodbye 相当の行があった場合は `CommandResult::action` を
     /// `LoopAction::Exit` にして返し、`try_shell_builtins` →
@@ -589,6 +617,25 @@ impl Shell {
     /// おり、`source` 経由でも対話時の `exit` と全く同じ形でシェル終了が
     /// 伝播する。
     pub(super) fn dispatch_source(&mut self, path_str: &str) -> CommandResult {
+        // Fix B4: 拡張子ディスパッチ（`is_toml_source_path`）より前に、
+        // パスが「通常ファイルではないもの」（ディレクトリ等）でないかを
+        // 判定する。誤った順序（拡張子チェック → reload_config）だと、
+        // `.toml` という名前の**ディレクトリ**を source した場合に
+        // `reload_config` → `JarvishConfig::load_from` →
+        // `std::fs::read_to_string` まで進んでしまい、生の OS エラー
+        // （"Is a directory (os error 21)"）がそのまま `jarvish: source: ...`
+        // に漏れる上、`reload_config` 自体が（無駄に）呼ばれてしまう。
+        // 先に `fs::metadata` でディレクトリ判定し、この経路に入らせない
+        // ことで、非 TOML スクリプトパス（[`read_rc_file_guarded`]）と
+        // 同じ明確な "is a directory" エラーに揃える。
+        if let Ok(metadata) = std::fs::metadata(path_str) {
+            if metadata.is_dir() {
+                let msg = format!("jarvish: source: {path_str} is a directory\n");
+                eprint!("{msg}");
+                return CommandResult::error(msg, 1);
+            }
+        }
+
         if is_toml_source_path(path_str) {
             let path = PathBuf::from(path_str);
             return self.reload_config(&path);
@@ -652,10 +699,38 @@ impl Shell {
 
     /// 1行を分類器を経由せずに実行する決定コア。
     ///
-    /// 優先順位: goodbye パターン → `try_shell_builtins` →
-    /// `try_builtin` → `execute`。`handle_input` と違い
-    /// `InputClassifier::classify` は一切呼ばれない。
+    /// 優先順位: エイリアス展開 → goodbye パターン →
+    /// `try_shell_builtins` → `try_builtin` → `execute`。`handle_input`
+    /// と違い `InputClassifier::classify` は一切呼ばれない。
+    ///
+    /// エイリアス展開（Fix B1）: `handle_input`（`src/shell/input.rs`
+    /// ステップ0）と全く同じ `expand::expand_alias` を、同じ優先順位
+    /// （先頭トークンが一致すれば置換、それ以外は無変換）で先頭に適用する。
+    /// これを怠ると、rc.jsh / source されたスクリプトの中で早い行に定義
+    /// した `alias` が、同じスクリプトの後の行から見えない
+    /// （「command not found」になる）という非対称バグが生じる ——
+    /// 対話モードとスクリプトモードで alias 展開の有無が食い違ってはならない。
+    ///
+    /// ## DESIGN CONTRACT（Fix B5）: rc/source 行は Black Box に記録しない
+    /// `handle_input`（対話 / `-c` の通常経路）は各行の実行後に
+    /// `record_history`（`src/shell/input.rs`）を呼び、Black Box
+    /// （`history.db`）へ記録する。この `run_rc_line` は意図的に
+    /// `record_history` を一切呼ばない —— rc.jsh や `source` されたスクリプト
+    /// の各行は「設定の再生（config replay）」であり、ユーザーが対話的に
+    /// 打ったコマンドではない。もし記録すれば、Jarvish を起動するたびに
+    /// 同じ `alias`/`export`/`complete` 呼び出しが history に積み重なり、
+    /// 履歴が実質的にスパムで埋まってしまう（bash の `source`/`.` が
+    /// history に記録されないのと同じ方針）。この非対称は意図的な仕様で
+    /// あり、バグではない —— 「ある行がなぜ history に出ないのか」を
+    /// 調べる場合は、まずその行が rc/source 経由で実行されたものではないか
+    /// を確認すること。
     fn run_rc_line(&mut self, line: &str) -> RcLineOutcome {
+        let expanded = match self.aliases.read() {
+            Ok(guard) => expand::expand_alias(line, &guard),
+            Err(_) => None,
+        };
+        let line = expanded.as_deref().unwrap_or(line);
+
         if InputClassifier::is_goodbye_pattern(line) {
             return RcLineOutcome::Exit;
         }

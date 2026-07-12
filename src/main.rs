@@ -73,7 +73,17 @@ async fn main() {
     };
     let mut shell = shell::Shell::new(logging_ok, session_id, rc_options);
     let (exit_code, action) = if let Some(ref command) = args.command {
-        (shell.run_command(command).await, engine::LoopAction::Exit)
+        let exit_code = shell.run_command(command).await;
+        // Fix B2: `run()`（対話 REPL）は `restart_requested` を再チェックして
+        // LoopAction::Restart を選ぶが、`-c` 単体実行はこれまで
+        // `engine::LoopAction::Exit` を決め打ちしていたため、`--rcfile`
+        // スクリプト内や `-c` の引数内で `restart` を呼んでも
+        // "Restarting jarvish..." が出力されるだけで実際には exec()
+        // されずサイレントに終了していた。`run()` と同じ判定
+        // （`resolve_run_command_action`）に揃え、`restart_requested` が
+        // 立っていれば正直に `LoopAction::Restart` を返す。
+        let action = resolve_run_command_action(shell.restart_requested());
+        (exit_code, action)
     } else {
         shell.run().await
     };
@@ -106,9 +116,52 @@ async fn main() {
     std::process::exit(exit_code);
 }
 
+/// `-c`（`run_command`）実行後にどの `LoopAction` を選ぶべきかを決める
+/// 純粋な決定関数（Fix B2）。
+///
+/// `run()`（対話 REPL）は `restart_requested` フラグを見て
+/// `LoopAction::Restart` か `LoopAction::Exit` かを選んでいる
+/// （`src/shell/mod.rs` の `run()` 末尾のループを参照）。`-c` 単体実行
+/// もこれと同じ判定に揃える —— `restart` ビルトインは
+/// `--rcfile` スクリプト内・rc.jsh 内・`-c` の引数自体のいずれの経路
+/// からでも `Shell::restart_requested()`（同じ `AtomicBool`）を立てるため、
+/// 呼び出し元（`main`）は経路を区別せずこのフラグだけを見ればよい。
+///
+/// 実際の `exec()` 呼び出し（[`shell::Shell::exec_restart`]）は副作用が
+/// 大きい（プロセスイメージを置換する）ためユニットテストでは検証せず、
+/// この決定ロジックだけを切り出してテストする。
+fn resolve_run_command_action(restart_requested: bool) -> engine::LoopAction {
+    if restart_requested {
+        engine::LoopAction::Restart
+    } else {
+        engine::LoopAction::Exit
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── resolve_run_command_action（Fix B2 の決定ロジック）──
+
+    /// `restart_requested == true` のときは `LoopAction::Restart` を
+    /// 選ぶこと（`restart` ビルトインが `--rcfile` スクリプト内や `-c`
+    /// の引数内で呼ばれた場合に、`main` が黙って `LoopAction::Exit` を
+    /// 決め打ちしてサイレントに終了する退行を防ぐ）。
+    #[test]
+    fn resolve_run_command_action_restart_requested_returns_restart() {
+        assert_eq!(
+            resolve_run_command_action(true),
+            engine::LoopAction::Restart
+        );
+    }
+
+    /// `restart_requested == false`（通常終了）のときは従来どおり
+    /// `LoopAction::Exit` を選ぶこと（既存の `-c` 単体実行の回帰防止）。
+    #[test]
+    fn resolve_run_command_action_no_restart_returns_exit() {
+        assert_eq!(resolve_run_command_action(false), engine::LoopAction::Exit);
+    }
 
     /// `--rcfile` と `--no-rc` は clap の `conflicts_with` により
     /// 同時指定を拒否される（Phase 4.2 の DESIGN CONTRACT どおり）。

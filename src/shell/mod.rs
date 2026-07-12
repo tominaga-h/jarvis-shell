@@ -722,6 +722,23 @@ impl Shell {
         shutdown_shared_daemon_blocking(&self.zsh_daemon, Self::ZSH_DAEMON_EXIT_SHUTDOWN_DEADLINE);
     }
 
+    /// `restart` ビルトイン（または rc/source スクリプト内の `restart` 行、
+    /// SIGUSR1）によって再起動が要求されたかどうかを返す（Fix B2）。
+    ///
+    /// `run()`（対話 REPL）は既にこのフラグをループ内で直接
+    /// （`self.restart_requested.load(...)`）参照して `LoopAction::Restart`
+    /// を選択しているが、`run_command`（`-c` 単体実行、`main.rs` から
+    /// 呼ばれる）はこれまでこのフラグを一切見ておらず、`main.rs` 側が
+    /// `-c` の戻り値を常に `LoopAction::Exit` と決め打ちしていた。その
+    /// ため `--rcfile` スクリプト内 / `-c` の引数内で `restart` を呼んでも
+    /// "Restarting jarvish..." が出力されるだけで実際には exec()
+    /// されずプロセスが終了する（サイレントに死ぬ）という不整合があった。
+    /// `main.rs` はこのアクセサで `run_command` 実行後にフラグを読み、
+    /// `run()` と同じ判定に揃える。
+    pub fn restart_requested(&self) -> bool {
+        self.restart_requested.load(Ordering::Relaxed)
+    }
+
     /// exec() によるプロセス再起動を実行する。
     ///
     /// クリーンアップ後、現在のバイナリで exec() を呼び出しプロセスを置換する。

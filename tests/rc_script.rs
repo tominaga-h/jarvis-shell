@@ -790,3 +790,352 @@ fn write_and_close_stdin(child: &mut std::process::Child, data: &str) {
         let _ = stdin.write_all(data.as_bytes());
     }
 }
+
+// ── Fix B: 実行器のセマンティクス（レビュー確認済み4件 + 方針決定1件）──
+//
+// B1: rc/source スクリプト内で早い行に定義した alias が、同じスクリプトの
+//     後の行から使えること（`run_rc_line` に `handle_input` と同じ
+//     エイリアス展開を追加）。
+// B2: `--rcfile` スクリプト内 / `-c` 引数内の `restart` が `-c` モードでも
+//     実際に exec() による再起動を行うこと（サイレントに死なない）。
+// B3: `exit N`（N != 0）はスクリプトの「失敗行」として
+//     `command exited with status N` を出力してはならない。
+// B4: `foo.toml` という名前の**ディレクトリ**を source すると
+//     "is a directory" エラーになり、reload_config には到達しないこと。
+// B5: rc/source 行は Black Box（history.db）に記録されない
+//     （DESIGN CONTRACT: これは意図的な仕様であり、バグではない）。
+
+/// (B1-a) `--rcfile` スクリプト内の早い行で定義した alias を、
+/// 同じスクリプトの後の行から呼び出せること（rc.jsh 直接実行のケース）。
+#[test]
+#[serial]
+fn alias_defined_earlier_in_rcfile_is_usable_on_a_later_line_of_the_same_script() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let rc_path = home.join("rc_alias_reuse.jsh");
+    std::fs::write(
+        &rc_path,
+        "alias gs='echo alias-defined-earlier-works'\n\
+         gs\n",
+    )
+    .unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args(["--rcfile", rc_path.to_str().unwrap(), "-c", "true"])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("alias-defined-earlier-works"),
+        "an alias defined on an earlier line of the SAME rc script must be usable on a \
+         later line (Fix B1): stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("command not found") && !stderr.contains("command exited"),
+        "the later line must not fail as \"command not found\": stderr={stderr}"
+    );
+}
+
+/// (B1-b) 同じ確認を `source` 経由のスクリプトで行う
+/// （`--rcfile` 本体からネストして `source` した先のスクリプト内で、
+/// 早い行の alias を後の行から使えること）。
+#[test]
+#[serial]
+fn alias_defined_earlier_in_sourced_script_is_usable_on_a_later_line() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let sourced_path = home.join("sourced_alias_reuse.jsh");
+    std::fs::write(
+        &sourced_path,
+        "alias gs='echo alias-in-sourced-script-works'\n\
+         gs\n",
+    )
+    .unwrap();
+
+    let rc_path = home.join("top_rc.jsh");
+    std::fs::write(&rc_path, format!("source {}\n", sourced_path.display())).unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args(["--rcfile", rc_path.to_str().unwrap(), "-c", "true"])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("alias-in-sourced-script-works"),
+        "an alias defined earlier in a `source`d script must be usable on a later line of \
+         that same script (Fix B1): stdout={stdout}"
+    );
+}
+
+/// (B1-c) alias 定義がスクリプト境界をまたいで双方向に見えること:
+/// rc.jsh で定義した alias が後で `source` した別スクリプトの行から使え、
+/// かつその `source` されたスクリプトで定義した alias が rc.jsh 側の
+/// 後続行（source の後）からも使えること。
+#[test]
+#[serial]
+fn alias_is_usable_across_source_boundary_in_both_directions() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let sourced_path = home.join("nested_defines_alias.jsh");
+    std::fs::write(
+        &sourced_path,
+        "rc_alias\n\
+         alias nested_alias='echo nested-alias-works'\n",
+    )
+    .unwrap();
+
+    let rc_path = home.join("top_rc.jsh");
+    std::fs::write(
+        &rc_path,
+        format!(
+            "alias rc_alias='echo rc-alias-works'\n\
+             source {}\n\
+             nested_alias\n",
+            sourced_path.display()
+        ),
+    )
+    .unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args(["--rcfile", rc_path.to_str().unwrap(), "-c", "true"])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("rc-alias-works"),
+        "an alias defined in rc.jsh must be usable from a LATER `source`d script's line: \
+         stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("nested-alias-works"),
+        "an alias defined inside the `source`d script must be usable from rc.jsh's line \
+         after the `source` call: stdout={stdout}"
+    );
+}
+
+/// (B2) `--rcfile` スクリプト内の `restart` が `-c` モードでもサイレントに
+/// 死なず、実際に exec() による再起動を行うこと。
+///
+/// 無限再起動ループを避けるため、rc スクリプトは自分自身を `rm` した
+/// **直後**に `restart` する。1回目の起動: `rm` で rcfile 自体を消してから
+/// `restart` → `exec_restart()` が同じ引数（同じ `--rcfile <path>`）で
+/// 自己 exec する。2回目の起動: rcfile が既に存在しないため
+/// `jarvish: rcfile not found: ...` を出して rc 読み込みをスキップし、
+/// `-c` のコマンドを普通に実行して終了する —— したがって
+/// 「`-c` のコマンドの出力が観測できる」こと自体が、`restart` が
+/// 単に print-and-die したのではなく実際に exec() されたことの証拠になる
+/// （修正前は "Restarting jarvish..." の直後にプロセスが終了し、
+/// 2回目の起動が一切発生しないため `-c` の出力は絶対に現れない）。
+#[test]
+#[serial]
+fn restart_inside_rcfile_in_dash_c_mode_actually_re_execs_instead_of_dying_silently() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let rc_path = home.join("rc_with_restart.jsh");
+    std::fs::write(&rc_path, format!("rm {}\nrestart\n", rc_path.display())).unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let child = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args([
+            "--rcfile",
+            rc_path.to_str().unwrap(),
+            "-c",
+            "echo restart-actually-happened",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn jarvish");
+
+    // exec() による自己再起動を挟むため、通常の単発実行より僅かに時間が
+    // かかりうる。万一 fix 前の状態（サイレント終了）や予期しないハングに
+    // 戻っても、テストスイート全体を止めないようタイムアウトで有界にする。
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let output = child.wait_with_output();
+        let _ = tx.send(output);
+    });
+    let output = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("jarvish did not terminate within 20s after `restart` inside --rcfile in -c mode")
+        .expect("failed to collect child output");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("restart-actually-happened"),
+        "the -c command must run on the re-exec'd process, proving `restart` inside a \
+         --rcfile script in -c mode actually re-execs instead of silently dying \
+         (Fix B2): stdout={stdout} stderr={stderr}"
+    );
+    // 1回目の起動で必ず "Restarting jarvish..." が出ているはず
+    // （restart ビルトイン自体の既存メッセージ、B2 で変更していない）。
+    assert!(
+        stderr.contains("Restarting jarvish") || stdout.contains("Restarting jarvish"),
+        "the restart builtin's own message should still be printed on the first launch: \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        output.status.success(),
+        "the re-exec'd process must exit with the -c command's own (successful) status: \
+         status={:?}",
+        output.status
+    );
+}
+
+/// (B3) `exit 3` を含むスクリプト行は、それ自体が「失敗したコマンド」
+/// として `jarvish: <file>:<lineno>: command exited with status 3` の
+/// 失敗プレフィックスを stderr に出してはならない（exit は意図的な
+/// アクションであり、失敗したコマンドではない）。
+/// 一方で終了コード 3 自体はプロセスの終了コードとして保持されること。
+#[test]
+#[serial]
+fn exit_with_nonzero_code_does_not_print_spurious_failure_prefix() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let rc_path = home.join("rc_with_exit_code.jsh");
+    std::fs::write(&rc_path, "exit 3\n").unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args([
+            "--rcfile",
+            rc_path.to_str().unwrap(),
+            "-c",
+            "echo should-not-run",
+        ])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !stderr.contains("command exited with status"),
+        "`exit 3` must NOT be reported as a failing command (Fix B3): stderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("should-not-run"),
+        "the -c command must not run after the rc script's `exit`: stdout={stdout}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "the exit code from `exit 3` inside the rc script must be preserved as the \
+         process's own exit code: status={:?}",
+        output.status
+    );
+}
+
+/// (B4) `foo.toml` という名前の**ディレクトリ**を `source` すると
+/// "is a directory" エラーになり、`reload_config`（config.toml
+/// 再読み込みパス）には到達しないこと。到達していれば `JarvishConfig`
+/// の "Loaded ..." サマリーや `toml`固有のパースエラーメッセージが出る
+/// はずだが、それらは一切出ないことも合わせて確認する。
+#[test]
+#[serial]
+fn sourcing_a_directory_named_dot_toml_reports_is_a_directory_and_skips_reload_config() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let dir_as_toml = home.join("looks_like_config.toml");
+    std::fs::create_dir_all(&dir_as_toml).unwrap();
+
+    let rc_path = home.join("rc_sources_toml_dir.jsh");
+    std::fs::write(
+        &rc_path,
+        format!(
+            "source {}\nalias after_dir='echo after-toml-dir-source'\n",
+            dir_as_toml.display()
+        ),
+    )
+    .unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args(["--rcfile", rc_path.to_str().unwrap(), "-c", "after_dir"])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("is a directory"),
+        "sourcing a directory named *.toml must report \"is a directory\" (Fix B4): \
+         stderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Loaded"),
+        "reload_config must NOT be reached (no \"Loaded ...\" summary) when the .toml \
+         path is actually a directory: stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("after-toml-dir-source"),
+        "continue-on-error must still let the later alias line take effect: stdout={stdout}"
+    );
+}
+
+/// (B5) rc/source 経由で実行された行は Black Box（history.db）に
+/// **記録されない**こと。これは DESIGN CONTRACT（意図的な仕様）であり、
+/// スクリプト行は「設定の再生」であって対話的に打ったコマンドではない
+/// ため、起動のたびに history をスパムしない（bash の `source` と同じ
+/// 方針）。対照として、`-c` の引数自体として渡された行は通常どおり
+/// 記録されることも合わせて確認し、「rc 経由は記録されない」ことが
+/// 「history 機能そのものが働いていない」わけではないことを示す。
+#[test]
+#[serial]
+fn rc_script_lines_are_not_recorded_to_history_but_dash_c_lines_are() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let rc_path = home.join("rc_defines_marker_alias.jsh");
+    std::fs::write(&rc_path, "alias rc_marker_cmd='echo from-rc-marker'\n").unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    // rc.jsh 側では alias 定義だけ行い、実際にそれを「実行」するのは
+    // -c 側の1行目にする —— これにより、rc.jsh の行自体
+    // （alias 定義行）が記録されていないことと、-c 側の行
+    // （dash_c_marker_line、対話/非対話コマンド実行の通常経路）が
+    // 記録されていることの両方を、同一プロセスの起動で確認できる。
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args([
+            "--rcfile",
+            rc_path.to_str().unwrap(),
+            "-c",
+            "dash_c_marker_line\nhistory -n 50",
+        ])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // -c の1行目自体（"dash_c_marker_line"、存在しないコマンド）は
+    // 通常の -c 実行経路を通るため history に記録されるはず。
+    assert!(
+        stdout.contains("dash_c_marker_line"),
+        "a line passed via -c must be recorded to history (contrast case): \
+         stdout={stdout} stderr={stderr}"
+    );
+    // rc.jsh 側の行（"alias rc_marker_cmd=..."）は rc/source 経由なので
+    // 記録されてはならない。
+    assert!(
+        !stdout.contains("rc_marker_cmd"),
+        "a line executed via the rc script must NOT be recorded to history \
+         (Fix B5 / DESIGN CONTRACT): stdout={stdout}"
+    );
+}
