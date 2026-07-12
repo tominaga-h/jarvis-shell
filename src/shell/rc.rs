@@ -1347,9 +1347,19 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn try_builtin_normal_command_continues() {
-        let result = try_builtin("cd /tmp").expect("cd must be a recognized builtin");
+        // `cd` はプロセスのカレントディレクトリを実際に変更するビルトインのため、
+        // 他の cwd 依存テストと競合しないよう #[serial] を付与し、
+        // 専用の一時ディレクトリへ退避・復元する（共有 /tmp には触れない）。
+        let original = std::env::current_dir().expect("failed to get current dir");
+        let tmpdir = tempfile::tempdir().unwrap();
+
+        let result = try_builtin(&format!("cd {}", tmpdir.path().display()))
+            .expect("cd must be a recognized builtin");
         assert_eq!(result.action, LoopAction::Continue);
+
+        std::env::set_current_dir(&original).expect("failed to restore current dir");
     }
 
     #[test]
