@@ -689,13 +689,19 @@ fn prewarm_zsh_daemon_with(
     if slot_guard.is_some() {
         // レース: provide() 側が既に spawn 済み。このスレッドが今 spawn
         // したデーモンは不要なので破棄する（二重デーモン防止）。
-        // こちらは tombstone 経路ではなく通常の二重 spawn 防止のため、
-        // 従来どおり非ブロッキング shutdown（バックグラウンド委譲）で
-        // 十分 — provide() 側が別途生きたデーモンをスロットに残しており、
-        // プロセス終了時は最終的に `shutdown_zsh_daemon` がそちらを
-        // 有界同期で kill するため孤児化しない。
+        //
+        // tombstone 経路ではなく通常の二重 spawn 防止だが、こちらも
+        // shutdown_blocking を使う（S5 追加修正）: `shutdown_zsh_daemon`
+        // の完了待ちチャネルは `prewarm_zsh_daemon_with` 関数全体の
+        // return（= このスレッドの終了）をもって「prewarm 完了」と
+        // 判定するため、この破棄された方の子プロセスの kill/reap も
+        // このスレッドの終了前に完了させておかないと、直後の
+        // `std::process::exit` で道連れに強制終了され、init スクリプトの
+        // 一時ファイルが削除されないまま残ることが実機計測で確認できた
+        // （孤児プロセス自体は発生しない — スロットに残る方は provide()
+        // 側が持つ別インスタンスであり、こちらの捨てられる方だけが対象）。
         drop(slot_guard);
-        new_daemon.shutdown();
+        new_daemon.shutdown_blocking(Duration::from_secs(1));
         return;
     }
 
