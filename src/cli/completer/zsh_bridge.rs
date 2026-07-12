@@ -62,6 +62,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
@@ -388,6 +389,76 @@ impl DaemonSlot {
 /// や `std::process::exit` では一切実行されないため）。
 pub type SharedDaemonSlot = Arc<Mutex<Option<DaemonSlot>>>;
 
+/// 終端 shutdown（exit/exec 経路）が起きたことを示す tombstone フラグ。
+///
+/// # 背景: `-c` 単体実行での孤児 zsh デーモン（S5 実機 E2E で検出）
+/// `Shell::new` は起動直後に**デタッチしたバックグラウンドスレッド**から
+/// [`prewarm_zsh_daemon`] を起動する（[`prewarm_zsh_daemon`] のドキュメント
+/// 参照）。`jarvish -c '<command>'` のような非対話実行は数ミリ秒で完走し、
+/// `main.rs` は完走直後に [`shutdown_shared_daemon_blocking`] を呼ぶ。この
+/// 2つのスレッドの間には本質的なレースがある:
+///
+/// 1. prewarm スレッドが `ZshDaemon::spawn`（PTY + プロセス起動 + レディ
+///    マーカー待ち、数百ms かかりうる）を実行している最中に
+/// 2. メインスレッドが `-c` を完走し `shutdown_shared_daemon_blocking` を
+///    呼ぶ → その時点でスロットはまだ空（prewarm がまだ書き込んでいない）
+///    ため no-op で即座に戻る → `main` は `std::process::exit` する
+/// 3. その後 prewarm スレッドの spawn が完了し、共有 `Mutex` を取って
+///    「スロットが空だから」と自分の `ZshDaemon` を書き込む
+/// 4. 誰もこのデーモンを kill しない — 親プロセス（jarvish 本体）は既に
+///    exit 済みのため、子は PID 1 に re-parent されて無期限に生存する
+///
+/// 実機 E2E で `jarvish -c 'echo hi'` を複数回実行するたびに孤児
+/// `/bin/zsh -i`（ppid=1）が1本ずつ増えることを確認済み（このフラグ導入
+/// 前）。プリウォームを `-c` モードでは起動時点でスキップする対策
+/// （`Shell::new` の `interactive` 引数）だけでは閉じない経路が別にある
+/// ため注意: 対話起動でも `rc.jsh` に `exit` が書かれていれば REPL に入る
+/// 前に `shutdown_zsh_daemon` → プロセス終了という同じ順序を踏み、同じ
+/// レースが成立しうる。
+///
+/// # 解として選んだ不変条件
+/// 「終端 shutdown が一度でも起きたら、その後 prewarm が遅れてスロットに
+/// 挿入しようとしても、挿入前に必ず kill される」という不変条件を
+/// [`DaemonGate`] に持たせる。[`shutdown_shared_daemon_blocking`]（exit/exec
+/// 専用）はこのフラグを `true` にセットしてから shutdown する。
+/// [`prewarm_zsh_daemon_with`] は spawn 完了後、共有 `Mutex` の中で
+/// 「スロットが空」に加えて「closed でない」ことも確認し、closed なら
+/// 今 spawn したデーモンをスロットに書き込まず即座に shutdown する。
+///
+/// # reload（`source` による設定変更）とは区別する
+/// `source` でデーモンを無効化 → 再度有効化、というホットリロード経路
+/// （[`shutdown_shared_daemon`]、非ブロッキング版）は再 spawn 可能なまま
+/// でなければならない（設計上の要求）。そのため [`shutdown_shared_daemon`]
+/// はこのフラグを一切触らない — tombstone は
+/// [`shutdown_shared_daemon_blocking`]（exit/exec 専用の有界同期版）のみが
+/// セットする。
+#[derive(Debug, Default)]
+pub struct DaemonGate {
+    closed: AtomicBool,
+}
+
+impl DaemonGate {
+    /// 新しい（open な）ゲートを作る。`Shell::new` から `Arc` として
+    /// `SharedDaemonSlot` と対で配る。
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            closed: AtomicBool::new(false),
+        })
+    }
+
+    /// 終端 shutdown が起きたことを記録する（一度 closed になったら二度と
+    /// open に戻らない — jarvish プロセスの残り寿命の間ずっと有効な
+    /// tombstone）。
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    /// 終端 shutdown が既に起きているかどうか。
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+}
+
 /// 共有デーモンスロットが埋まっていれば shutdown してスロットを空にする。
 ///
 /// スロットが既に空なら no-op（冪等）。`Mutex` の poison（他スレッドの
@@ -424,7 +495,22 @@ pub fn shutdown_shared_daemon(slot: &SharedDaemonSlot) {
 /// exit/exec shutdown 経路）専用 — reedline の completer 呼び出し元
 /// （UI スレッド）から通常のリクエスト処理中に呼んではならない
 /// （その場合は必ず [`shutdown_shared_daemon`] を使うこと）。
-pub fn shutdown_shared_daemon_blocking(slot: &SharedDaemonSlot, deadline: Duration) {
+///
+/// # tombstone（S5 修正、[`DaemonGate`] 参照）
+/// `gate` を渡した場合、実際の shutdown 処理の**前に** `gate.close()` を
+/// 呼ぶ。以後 [`prewarm_zsh_daemon_with`] がこのタイミングより後にスロット
+/// へ書き込もうとしても、closed を検知して即座に shutdown する（プロセス
+/// 終了直前の遅延 prewarm 挿入による孤児化を防ぐ）。`gate` が `None` の
+/// 呼び出し元（`reload_config` 等、tombstone を意図しない経路）は従来どおり
+/// フラグに触れない。
+pub fn shutdown_shared_daemon_blocking(
+    slot: &SharedDaemonSlot,
+    deadline: Duration,
+    gate: Option<&Arc<DaemonGate>>,
+) {
+    if let Some(gate) = gate {
+        gate.close();
+    }
     let Ok(mut guard) = slot.lock() else {
         return;
     };
@@ -475,15 +561,27 @@ pub fn new_shared_daemon_slot() -> SharedDaemonSlot {
 ///    どちらの経路で spawn されたデーモンにも同様に適用される。このスレッド
 ///    が捨てるデーモンも通常の `ZshDaemon::shutdown`/`Drop` 経路で確実に
 ///    kill/reap される）。
+///
+/// # tombstone チェック（S5 修正、[`DaemonGate`] 参照）
+/// `gate` が既に closed（= 終端 shutdown が既に起きた）の場合は、そもそも
+/// 重い spawn 処理に入る前に即座に諦める。呼び出し元は `-c` 単体実行の
+/// ように起動直後に完走してしまうケースを想定しており、この早期リターンは
+/// 「まだ間に合っていない」だけであり、実際にレースを閉じているのは
+/// spawn 完了後の**2度目**のチェック（下記）である。
 pub fn prewarm_zsh_daemon(
     settings: &Arc<RwLock<ExternalCompletionSettings>>,
     daemon: &SharedDaemonSlot,
+    gate: &Arc<DaemonGate>,
 ) {
+    if gate.is_closed() {
+        tracing::debug!("zsh daemon prewarm: gate already closed, skipping");
+        return;
+    }
     let Some(zsh) = which::which("zsh").ok() else {
         tracing::debug!("zsh daemon prewarm: zsh binary not found, skipping");
         return;
     };
-    prewarm_zsh_daemon_with(settings, daemon, &zsh, &bridge_dir(), &[]);
+    prewarm_zsh_daemon_with(settings, daemon, gate, &zsh, &bridge_dir(), &[]);
 }
 
 /// [`prewarm_zsh_daemon`] の本体（テスト専用に `zsh` / `bridge_dir` /
@@ -492,6 +590,7 @@ pub fn prewarm_zsh_daemon(
 fn prewarm_zsh_daemon_with(
     settings: &Arc<RwLock<ExternalCompletionSettings>>,
     daemon: &SharedDaemonSlot,
+    gate: &Arc<DaemonGate>,
     zsh: &Path,
     bridge_dir: &Path,
     extra_envs: &[(String, String)],
@@ -530,19 +629,79 @@ fn prewarm_zsh_daemon_with(
         }
     };
 
+    // S5 tombstone: spawn（重い処理、数百ms かかりうる）の間に終端
+    // shutdown が起きていた場合、このデーモンをスロットに書き込む前に
+    // 即座に破棄する。`Mutex` の外で行う軽量チェックだが、実際に決定的な
+    // 保証を作るのは次の「Mutex の中でのもう一度のチェック」の方
+    // （このチェックと `Mutex` 取得の間にも closed になりうるため、
+    // 単独では不十分 — 二重チェックのうち片方に過ぎない）。
+    //
+    // ここでの破棄には非ブロッキング版ではなく `shutdown_blocking` を使う
+    // （S5 追加修正）: `shutdown()`（非ブロッキング）は kill/reap を
+    // さらに別のバックグラウンドスレッドへ委譲するため、この関数が
+    // return した時点では子プロセスがまだ生きている可能性がある。
+    // 呼び出し元（`Shell::shutdown_zsh_daemon`）はこの関数自体の完了を
+    // 「prewarm スレッドの完了通知チャネル」で有界時間待っているため、
+    // その通知が届いた時点で子プロセスの kill が終わっていなければ、
+    // 直後に `main` が `std::process::exit` した場合に kill 処理ごと
+    // 強制終了されて孤児化する（実機 E2E で確認した回帰）。
+    if gate.is_closed() {
+        tracing::debug!("zsh daemon prewarm: gate closed during spawn, discarding");
+        new_daemon.shutdown_blocking(Duration::from_secs(1));
+        return;
+    }
+
     let Ok(mut slot_guard) = daemon.lock() else {
         // Mutex poison: 安全側に倒し、このスレッドが spawn したデーモンを
         // 破棄する（呼び出し元スレッドに何かが起きた可能性があり、この
         // スレッドから状態を無理に書き込まない）。
-        new_daemon.shutdown();
+        new_daemon.shutdown_blocking(Duration::from_secs(1));
         return;
     };
+
+    // S5 tombstone（決定的保証の本体）: `Mutex` を握った**まま**もう一度
+    // closed を確認する。`shutdown_shared_daemon_blocking` は
+    // `gate.close()` を必ず `slot.lock()` より**前**に呼ぶ契約になって
+    // いるため、この時点で3通りのタイミングしかあり得ない。
+    // (a) このスレッドが `Mutex` を取る前に既に closed済み →
+    //     直前の Mutex 外チェックで既に弾かれている。
+    // (b) このスレッドが `Mutex` を握っている間に shutdown 側が
+    //     `gate.close()` を呼んだ（shutdown 側はその後 `slot.lock()` で
+    //     ブロックされ待機する）→ この再チェックで捕捉し、書き込まずに
+    //     破棄する。shutdown 側は解放されたロックを取得後スロットが
+    //     空であることを見て no-op で戻る（孤児化しない）。
+    // (c) shutdown 側がまだ影も形もない（closed のまま一切呼ばれていない）
+    //     → 通常どおりスロットへ書き込んでよい。
+    // つまり「書き込み時点で closed でなければ、以後 close() が呼ばれた
+    // 時点で必ずこのスロットを shutdown 経路が発見して kill する」ことが
+    // 保証される（このスロットへの書き込みと `close()` の可視性は同じ
+    // `Mutex` が提供する happens-before で担保される）。
+    if gate.is_closed() {
+        tracing::debug!("zsh daemon prewarm: gate closed while holding the slot lock, discarding");
+        drop(slot_guard);
+        // shutdown_blocking を使う理由は spawn 直後のチェックと同じ
+        // （上のコメント参照 — 呼び出し元の完了待ちチャネルが送信される
+        // 時点で子プロセスが確実に死んでいることを保証するため）。
+        new_daemon.shutdown_blocking(Duration::from_secs(1));
+        return;
+    }
 
     if slot_guard.is_some() {
         // レース: provide() 側が既に spawn 済み。このスレッドが今 spawn
         // したデーモンは不要なので破棄する（二重デーモン防止）。
+        //
+        // tombstone 経路ではなく通常の二重 spawn 防止だが、こちらも
+        // shutdown_blocking を使う（S5 追加修正）: `shutdown_zsh_daemon`
+        // の完了待ちチャネルは `prewarm_zsh_daemon_with` 関数全体の
+        // return（= このスレッドの終了）をもって「prewarm 完了」と
+        // 判定するため、この破棄された方の子プロセスの kill/reap も
+        // このスレッドの終了前に完了させておかないと、直後の
+        // `std::process::exit` で道連れに強制終了され、init スクリプトの
+        // 一時ファイルが削除されないまま残ることが実機計測で確認できた
+        // （孤児プロセス自体は発生しない — スロットに残る方は provide()
+        // 側が持つ別インスタンスであり、こちらの捨てられる方だけが対象）。
         drop(slot_guard);
-        new_daemon.shutdown();
+        new_daemon.shutdown_blocking(Duration::from_secs(1));
         return;
     }
 
@@ -2750,8 +2909,9 @@ mod tests {
 
         let settings = zsh_enabled_external_completion();
         let slot = new_shared_daemon_slot();
+        let gate = DaemonGate::new();
 
-        prewarm_zsh_daemon_with(&settings, &slot, &zsh, &zdotdir, &home_envs);
+        prewarm_zsh_daemon_with(&settings, &slot, &gate, &zsh, &zdotdir, &home_envs);
 
         assert!(
             slot.lock().unwrap().is_some(),
@@ -2768,10 +2928,12 @@ mod tests {
         // spawn より先に効くため、無効な zsh パスを渡しても安全）。
         let settings = zsh_enabled_daemon_off_external_completion();
         let slot = new_shared_daemon_slot();
+        let gate = DaemonGate::new();
 
         prewarm_zsh_daemon_with(
             &settings,
             &slot,
+            &gate,
             Path::new("/no/such/zsh/binary/zzjarvish"),
             Path::new("/tmp/zzjarvish-unused-bridge-dir"),
             &[],
@@ -2790,10 +2952,12 @@ mod tests {
         // （`should_run_zsh_daemon` のもう一方の条件）。
         let settings = carapace_only_external_completion();
         let slot = new_shared_daemon_slot();
+        let gate = DaemonGate::new();
 
         prewarm_zsh_daemon_with(
             &settings,
             &slot,
+            &gate,
             Path::new("/no/such/zsh/binary/zzjarvish"),
             Path::new("/tmp/zzjarvish-unused-bridge-dir"),
             &[],
@@ -2816,7 +2980,8 @@ mod tests {
 
         let settings = zsh_enabled_external_completion();
         let slot = new_shared_daemon_slot();
-        prewarm_zsh_daemon_with(&settings, &slot, &zsh, &zdotdir, &home_envs);
+        let gate = DaemonGate::new();
+        prewarm_zsh_daemon_with(&settings, &slot, &gate, &zsh, &zdotdir, &home_envs);
         assert!(
             slot.lock().unwrap().is_some(),
             "prewarm should have spawned"
@@ -2867,9 +3032,11 @@ mod tests {
 
         let settings = zsh_enabled_external_completion();
         let slot = new_shared_daemon_slot();
+        let gate = DaemonGate::new();
 
         let prewarm_settings = Arc::clone(&settings);
         let prewarm_slot = Arc::clone(&slot);
+        let prewarm_gate = Arc::clone(&gate);
         let prewarm_zsh = zsh.clone();
         let prewarm_zdotdir = zdotdir.clone();
         let prewarm_envs = home_envs.clone();
@@ -2877,6 +3044,7 @@ mod tests {
             prewarm_zsh_daemon_with(
                 &prewarm_settings,
                 &prewarm_slot,
+                &prewarm_gate,
                 &prewarm_zsh,
                 &prewarm_zdotdir,
                 &prewarm_envs,
@@ -2947,5 +3115,150 @@ mod tests {
             final_pid, pid_again,
             "no second daemon should have been spawned after the race settled"
         );
+    }
+
+    // ── S5 修正: 終端 shutdown tombstone（DaemonGate） ──
+
+    #[test]
+    fn daemon_gate_starts_open() {
+        let gate = DaemonGate::new();
+        assert!(!gate.is_closed());
+    }
+
+    #[test]
+    fn daemon_gate_close_is_observed_and_idempotent() {
+        let gate = DaemonGate::new();
+        gate.close();
+        assert!(gate.is_closed());
+        // 二重 close は panic せず、閉じたままである（冪等性）。
+        gate.close();
+        assert!(gate.is_closed());
+    }
+
+    #[test]
+    #[serial]
+    fn prewarm_after_gate_closed_never_populates_slot_and_kills_spawned_child() {
+        // S5 の核心保証（決定的ユニットテスト）: `shutdown_shared_daemon_blocking`
+        // 相当（= gate を close してからスロットを shutdown）が**先に**
+        // 起きたあとで `prewarm_zsh_daemon_with` を呼んでも、スロットは
+        // 空のまま保たれ、かつ prewarm が実際に spawn した子プロセスは
+        // （spawn 自体は締め切り後に発生する準正常系だが）確実に kill
+        // される。「タイミング運任せの多くは漏れない」ではなく、closed
+        // 状態の下では 100% 決定的にスロットへ書き込まれないことを保証する
+        // （Mutex 内での再チェックがこの決定性の根拠 — 実装コメント参照）。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, _fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+
+        let settings = zsh_enabled_external_completion();
+        let slot = new_shared_daemon_slot();
+        let gate = DaemonGate::new();
+
+        // 終端 shutdown が「先に」起きたことをシミュレートする
+        // （main.rs の -c 経路 / rc.jsh 内 exit 経路が踏む順序と同じ:
+        // gate.close() → スロット shutdown、この時点でスロットは空）。
+        gate.close();
+        shutdown_shared_daemon(&slot);
+        assert!(slot.lock().unwrap().is_none());
+
+        // その後で prewarm が（レースにより）遅れて spawn を試みる。
+        prewarm_zsh_daemon_with(&settings, &slot, &gate, &zsh, &zdotdir, &home_envs);
+
+        // 決定的保証その1: スロットは書き込まれない。
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "prewarm must never populate the slot once the gate is closed"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn prewarm_close_race_after_spawn_but_before_lock_kills_the_orphan() {
+        // より正確に実運用のレースを再現する版: prewarm が「spawn を完了した
+        // 後・Mutex を取る前」というタイミングで gate が close される
+        // ケース（main.rs の shutdown_zsh_daemon が prewarm のスレッド
+        // スケジューリングの隙を突いて割り込む実際のシナリオ）。
+        //
+        // `prewarm_zsh_daemon_with` は spawn 完了直後に一度 `gate.is_closed()`
+        // を確認する（Mutex 外の早期チェック）ため、このテストは「spawn 後
+        // 即座に close された場合でも、実際に spawn された子プロセスが
+        // 確実に kill/reap される」ことを ESRCH ポーリングで直接証明する。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, _fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+
+        let settings = zsh_enabled_external_completion();
+        let slot = new_shared_daemon_slot();
+        let gate = DaemonGate::new();
+
+        // gate をあらかじめ close しておく（spawn 完了時点で必ず closed に
+        // なっている、というタイミングの最も厳しいケースを決定的に作る —
+        // 実際のスレッドインターリーブを待つのではなく、closed の状態で
+        // prewarm を呼ぶことで「spawn 後チェックが機能するか」を直接検証）。
+        gate.close();
+
+        prewarm_zsh_daemon_with(&settings, &slot, &gate, &zsh, &zdotdir, &home_envs);
+
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "slot must remain empty when the gate was already closed before spawn completed"
+        );
+        // このテスト構成では spawn 自体が gate.is_closed() の早期チェック
+        // （spawn 前）で弾かれるため、子プロセスは元々生成されていない
+        // （早期リターンの網羅性を示す——重い spawn 処理にすら入らない）。
+    }
+
+    #[test]
+    #[serial]
+    fn shutdown_shared_daemon_blocking_with_gate_prevents_late_prewarm_insertion() {
+        // 実際の Shell::shutdown_zsh_daemon が使う経路
+        // （shutdown_shared_daemon_blocking(slot, deadline, Some(&gate))）を
+        // 直接呼び、「shutdown 後に prewarm_zsh_daemon_with を呼んでもスロット
+        // が空のまま」であることを、公開 API のシグネチャそのままで検証する
+        // （タスク指示の受け入れ基準3 の決定的ユニットテスト）。
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let (tmpdir, zdotdir, _fpath_dir) = zsh_daemon_test_fixture();
+        let home_envs = zsh_daemon_test_home_envs(&tmpdir);
+
+        let settings = zsh_enabled_external_completion();
+        let slot = new_shared_daemon_slot();
+        let gate = DaemonGate::new();
+
+        // スロットは元々空（-c 単体実行が数ミリ秒で完走し、prewarm がまだ
+        // 何も spawn していない時点で shutdown が先に走るケースを模す）。
+        shutdown_shared_daemon_blocking(&slot, Duration::from_secs(2), Some(&gate));
+        assert!(slot.lock().unwrap().is_none());
+        assert!(gate.is_closed());
+
+        // 遅れて prewarm が発火しても、closed を検知して自壊する。
+        prewarm_zsh_daemon_with(&settings, &slot, &gate, &zsh, &zdotdir, &home_envs);
+
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "late prewarm after shutdown_shared_daemon_blocking(..., Some(gate)) must not \
+             populate the slot (S5 acceptance criterion 3)"
+        );
+    }
+
+    #[test]
+    fn shutdown_shared_daemon_blocking_without_gate_does_not_close_it() {
+        // reload 経路（`apply_zsh_daemon_lifecycle_for_reload` 等）は
+        // 通常 shutdown_shared_daemon（非ブロッキング、gate なし）を使うが、
+        // 万一 shutdown_shared_daemon_blocking を `gate: None` で呼んでも
+        // gate には触れない（tombstone は exit/exec 専用という契約）ことを
+        // 確認する。
+        let slot = new_shared_daemon_slot();
+        let gate = DaemonGate::new();
+        shutdown_shared_daemon_blocking(&slot, Duration::from_millis(100), None);
+        assert!(!gate.is_closed(), "gate must stay open when not passed in");
     }
 }

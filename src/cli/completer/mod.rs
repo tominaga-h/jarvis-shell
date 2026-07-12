@@ -86,7 +86,7 @@ pub use carapace::{
 };
 pub use zsh_bridge::{
     new_shared_daemon_slot, prewarm_zsh_daemon, shutdown_shared_daemon,
-    shutdown_shared_daemon_blocking, SharedDaemonSlot,
+    shutdown_shared_daemon_blocking, DaemonGate, SharedDaemonSlot,
 };
 
 /// ColumnarMenu は description を持つ候補が 1 件でもあると全幅 1 カラムに

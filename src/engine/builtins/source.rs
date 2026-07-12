@@ -2,11 +2,23 @@ use clap::Parser;
 
 use crate::engine::CommandResult;
 
-/// source: 設定ファイル(TOML)を読み込む。
+/// source: 設定ファイル(TOML)、または rc スクリプトを読み込む。
+///
+/// この struct はコマンドラインの引数パースのみを担当する。実際の
+/// ディスパッチ（`.toml` → config 再読み込み / それ以外 → rc スクリプト
+/// 実行）は `Shell::dispatch_source`（`src/shell/rc.rs`, Phase 4.3）が
+/// 行う — `try_shell_builtins` の `"source"` 分岐がこの `parse` で得た
+/// パス文字列を渡す。
 #[derive(Parser)]
-#[command(name = "source", about = "Load a configuration file (TOML)")]
+#[command(
+    name = "source",
+    about = "Load a configuration file (.toml) or run a script (any other/no extension)"
+)]
 struct SourceArgs {
-    /// Path to the TOML file to load
+    /// Path to the file to load. A `.toml` path (case-insensitive) reloads
+    /// the configuration; any other extension (or none) is executed as an
+    /// rc-style script — same semantics as `rc.jsh` (classifier bypass,
+    /// line-numbered errors, continue-on-error, max nesting depth 8).
     #[arg(required = true)]
     path: String,
 }
