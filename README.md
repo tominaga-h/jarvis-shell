@@ -32,6 +32,7 @@ The days of copy-pasting errors into a browser to ask AI are over. Just ask Jarv
   - [External Completion (carapace)](#external-completion-carapace)
   - [zsh Completion Bridge](#zsh-completion-bridge)
   - [Custom Completions (`complete` builtin)](#custom-completions-complete-builtin)
+  - [Startup script (`rc.jsh`)](#-startup-script-rcjsh)
 - [Architecture](#️-architecture)
 - [Development](#-development)
 
@@ -282,7 +283,32 @@ complete -c mycmd -n '__fish_seen_subcommand_from start' -a "$(mycmd --list-targ
 
 Pressing Tab right after `mycmd ` offers `start`/`stop`; after `mycmd start `, it instead runs `mycmd --list-targets` and offers its output as candidates.
 
-**Session-only for now**: specs registered via `complete` live only in memory and are lost when Jarvish exits. A `rc.jsh` startup script (planned) will let you persist `complete` calls across restarts — until then, add them to a shell alias or re-run them manually each session.
+**Persisting across restarts**: specs registered via `complete` at the prompt live only in memory and are lost when Jarvish exits. To make them (and other setup) survive restarts, put the same commands in [`rc.jsh`](#-startup-script-rcjsh) below.
+
+### 🏁 Startup script (`rc.jsh`)
+
+`~/.config/jarvish/rc.jsh` is a plain-text startup script that Jarvish runs once, every time it starts **interactively** — before the `[startup].commands` section of `config.toml`, and before the first prompt is shown. It exists to solve exactly the "session-only" problem above: put your `alias`/`export`/`complete` calls (or any other builtin) in `rc.jsh` and they persist across every restart, no shell alias or copy-paste required.
+
+- **Location**: `~/.config/jarvish/rc.jsh` (mirrors `config.toml`'s location convention). A commented-only template is auto-generated here on first interactive launch if the file doesn't already exist — it is never overwritten afterward, so your edits are safe. (An explicit `--rcfile` path, see CLI options, is never auto-generated.)
+- **Format**: one command per line. Blank lines are skipped. A line whose first non-whitespace character is `#` is treated as a full-line comment and skipped — `#` appearing mid-line (e.g. inside a quoted string) does **not** start a comment. There is no line-continuation syntax; keep each command on a single line.
+- **Classifier bypass guarantee**: every line runs through the same builtin dispatch path as typing it at the prompt (`alias`, `export`, `complete`, `cd`, `source`, and ordinary commands all work exactly as they do interactively) — but it **never** goes through the AI natural-language classifier. A line that looks like a question or a request to the AI assistant is not routed anywhere special; it's simply run as a command and fails as "not found" if it isn't one. `rc.jsh` is for deterministic setup, not conversation.
+- **Execution order**: `rc.jsh` → `[startup].commands` (`config.toml`) → first prompt.
+- **Error handling**: a failing line prints its own error (from the command itself) plus a summary line `jarvish: rc.jsh:<lineno>: command exited with status <code>` — then execution continues with the next line. `rc.jsh` never aborts partway through because of one bad line.
+- **Exiting from a script**: an `exit` line (or a goodbye phrase such as `bye`/`さようなら`) stops the script and exits Jarvish immediately, the same way it would at the interactive prompt.
+
+Example:
+
+```sh
+# ~/.config/jarvish/rc.jsh
+
+# Persist a couple of aliases
+alias gs="git status"
+alias ll="eza --icons -la"
+
+# Register a completion for an internal tool (see "Custom Completions" above)
+complete -c mycmd -s v -l verbose -d 'Verbose output'
+complete -c mycmd -a 'start stop restart' -d 'Subcommand'
+```
 
 ## 🏗️ Architecture
 

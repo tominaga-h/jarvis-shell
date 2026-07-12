@@ -219,7 +219,7 @@ impl Shell {
     /// 先頭ワードが対象コマンドであり、かつパイプ・リダイレクト等を
     /// 含まない単純なコマンドの場合に `Some(CommandResult)` を返す。
     /// それ以外は `None` を返し、通常の実行パスに委ねる。
-    fn try_shell_builtins(&mut self, input: &str) -> Option<CommandResult> {
+    pub(super) fn try_shell_builtins(&mut self, input: &str) -> Option<CommandResult> {
         let first_word = input.split_whitespace().next().unwrap_or("");
         if !matches!(
             first_word,

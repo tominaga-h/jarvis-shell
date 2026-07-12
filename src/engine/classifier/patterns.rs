@@ -5,7 +5,7 @@ impl super::InputClassifier {
     ///
     /// 英語・日本語の別れの挨拶を検出する。
     /// 誤検出を防ぐため、入力が短い（概ね3語以下）場合に限定する。
-    pub(super) fn is_goodbye_pattern(input: &str) -> bool {
+    pub(crate) fn is_goodbye_pattern(input: &str) -> bool {
         let lower = input.to_lowercase();
         let body = Self::strip_jarvis_prefix(&lower);
 

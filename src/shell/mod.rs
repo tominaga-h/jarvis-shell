@@ -7,6 +7,7 @@ mod ai_router;
 mod editor;
 mod input;
 mod investigate;
+mod rc;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -484,6 +485,33 @@ impl Shell {
             println!("{notification}");
             println!();
         }
+
+        // rc.jsh の実行（[startup].commands より前、対話モード限定）。
+        // デフォルトパスが存在しなければコメントのみのテンプレートを生成する
+        // （明示的な --rcfile は Phase 4.2 で追加、ここでは自動生成しない）。
+        let default_rc_path = rc::rc_path();
+        rc::ensure_default_rc(&default_rc_path);
+        info!(path = %default_rc_path.display(), "Executing rc.jsh");
+        if rc::RcOutcome::ExitRequested == self.run_rc_script(&default_rc_path, "rc.jsh", 0).await {
+            info!("rc.jsh triggered shell exit");
+            if let Some(ref bb) = self.black_box {
+                bb.release_session();
+            }
+            let exit_code = self.last_exit_code.load(Ordering::Relaxed);
+            return (
+                if exit_code == EXIT_CODE_NONE {
+                    0
+                } else {
+                    exit_code
+                },
+                if self.restart_requested.load(Ordering::Relaxed) {
+                    LoopAction::Restart
+                } else {
+                    LoopAction::Exit
+                },
+            );
+        }
+        self.prompt.refresh_git_status();
 
         // 起動時コマンドの実行（config.toml [startup] commands）
         if !self.startup_commands.is_empty() {
