@@ -303,7 +303,8 @@ impl Shell {
     /// 指定されたパスから設定ファイルを再読み込みし、Shell の状態に反映する。
     ///
     /// `source` ビルトインコマンドから呼び出される。
-    /// `[alias]`、`[export]`、`[ai]` セクションを反映する。
+    /// `[ai]`、`[alias]`、`[export]`、`[prompt]`、`[completion]`、`[startup]`
+    /// の各セクションを反映する（`[startup]` は値の更新のみで再実行はしない）。
     pub(super) fn reload_config(&mut self, path: &std::path::Path) -> crate::engine::CommandResult {
         use crate::engine::CommandResult;
 
