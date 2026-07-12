@@ -1673,7 +1673,13 @@ mod tests {
             "interactive=true must still spawn the prewarm thread and populate the slot"
         );
 
-        shutdown_shared_daemon(&zsh_daemon);
+        // テストフィクスチャ teardown（S5 修正）: `shutdown_shared_daemon`
+        // （非ブロッキング、kill/reap をバックグラウンドスレッドへ委譲）は
+        // テスト関数を抜けた直後にテストバイナリが終了するとバックグラウンド
+        // スレッドが道連れで強制終了されうる（`zsh_daemon.rs` の
+        // `spawn_reaches_ready_marker` テストで実測した孤児の根本原因と
+        // 同じパターン）。有界同期版で確実に reap してから終える。
+        shutdown_shared_daemon_blocking(&zsh_daemon, std::time::Duration::from_secs(2), None);
 
         if let Some(home) = original_home {
             unsafe {
