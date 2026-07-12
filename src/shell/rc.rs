@@ -24,6 +24,50 @@ use crate::engine::{execute, try_builtin, CommandResult, LoopAction};
 
 use super::Shell;
 
+/// CLI から渡される rc スクリプトの読み込みオプション（Phase 4.2）。
+///
+/// `--rcfile <PATH>` と `--no-rc` は clap 側で `conflicts_with` により
+/// 同時指定を拒否されるため、ここでは両方 unset（デフォルト）/
+/// `rcfile` のみ / `no_rc` のみ、の3状態のみを想定する。
+#[derive(Debug, Clone, Default)]
+pub struct RcOptions {
+    /// 明示的に指定された rc スクリプトのパス。デフォルトパス
+    /// （[`rc_path`]）の代わりに使用し、存在しなくても自動生成しない。
+    pub rcfile: Option<PathBuf>,
+    /// rc スクリプトの読み込みを完全に無効化する（テンプレート生成も含む）。
+    pub no_rc: bool,
+}
+
+/// 実行すべき rc スクリプトの解決結果。
+#[derive(Debug)]
+pub(super) enum ResolvedRc {
+    /// デフォルトパス。存在しなければテンプレートを自動生成してよい。
+    Default(PathBuf),
+    /// `--rcfile` で明示指定されたパス。自動生成は行わない。
+    Explicit(PathBuf),
+    /// `--no-rc` 指定、または明示パスが見つからず読み込むものがない。
+    None,
+}
+
+impl RcOptions {
+    /// CLI オプションから実行すべき rc スクリプトを解決する。
+    ///
+    /// - `no_rc` が真なら常に [`ResolvedRc::None`]（`rcfile` が同時指定されて
+    ///   いてもここには来ない — clap の `conflicts_with` が先に弾く）。
+    /// - `rcfile` が `Some` ならそれを [`ResolvedRc::Explicit`] として返す
+    ///   （存在確認は呼び出し側が行う）。
+    /// - どちらも未指定ならデフォルトパスを [`ResolvedRc::Default`] として返す。
+    pub(super) fn resolve(&self) -> ResolvedRc {
+        if self.no_rc {
+            return ResolvedRc::None;
+        }
+        if let Some(ref path) = self.rcfile {
+            return ResolvedRc::Explicit(path.clone());
+        }
+        ResolvedRc::Default(rc_path())
+    }
+}
+
 /// rc スクリプト中の実行対象1行（コメント・空行を除去済み）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RcLine {
@@ -210,6 +254,40 @@ impl Shell {
         RcOutcome::Continue
     }
 
+    /// `self.rc_options`（`--rcfile` / `--no-rc`）を解決して rc スクリプトを
+    /// 実行する、`run()` / `run_command()` 共通のエントリポイント。
+    ///
+    /// - [`ResolvedRc::None`][]（`--no-rc`）: 何もせず `RcOutcome::Continue` を返す。
+    ///   デフォルトパスのテンプレート自動生成も行わない。
+    /// - [`ResolvedRc::Default`][]: デフォルトパスが存在しなければテンプレートを
+    ///   自動生成してから実行する（[`ensure_default_rc`]）。
+    /// - [`ResolvedRc::Explicit`][]: 指定パスをそのまま実行する。自動生成は
+    ///   行わない。ファイルが存在しない場合は
+    ///   `jarvish: rcfile not found: {path}` を stderr に出して
+    ///   `RcOutcome::Continue` を返す（rc なしで後続処理を継続させる）。
+    pub(super) async fn run_configured_rc(&mut self) -> RcOutcome {
+        match self.rc_options.resolve() {
+            ResolvedRc::None => RcOutcome::Continue,
+            ResolvedRc::Default(path) => {
+                ensure_default_rc(&path);
+                info!(path = %path.display(), "Executing rc.jsh");
+                self.run_rc_script(&path, "rc.jsh", 0).await
+            }
+            ResolvedRc::Explicit(path) => {
+                if !path.exists() {
+                    eprintln!("jarvish: rcfile not found: {}", path.display());
+                    return RcOutcome::Continue;
+                }
+                let display_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                info!(path = %path.display(), "Executing explicit --rcfile");
+                self.run_rc_script(&path, &display_name, 0).await
+            }
+        }
+    }
+
     /// 1行を分類器を経由せずに実行する決定コア。
     ///
     /// 優先順位: goodbye パターン → `try_shell_builtins` →
@@ -348,6 +426,62 @@ mod tests {
             path,
             PathBuf::from("/tmp/jarvish-rc-path-test-home/.config/jarvish/rc.jsh")
         );
+        unsafe {
+            match original {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    // ── RcOptions::resolve (Phase 4.2) ──
+
+    #[test]
+    fn resolve_no_rc_wins_regardless_of_rcfile() {
+        // clap の conflicts_with で通常同時指定はできないが、resolve() 自体は
+        // no_rc を最優先でチェックする防御的な順序になっていることを確認する。
+        let opts = RcOptions {
+            rcfile: Some(PathBuf::from("/tmp/should-be-ignored.jsh")),
+            no_rc: true,
+        };
+        assert!(matches!(opts.resolve(), ResolvedRc::None));
+    }
+
+    #[test]
+    fn resolve_no_rc_alone() {
+        let opts = RcOptions {
+            rcfile: None,
+            no_rc: true,
+        };
+        assert!(matches!(opts.resolve(), ResolvedRc::None));
+    }
+
+    #[test]
+    fn resolve_explicit_rcfile_returns_the_given_path() {
+        let opts = RcOptions {
+            rcfile: Some(PathBuf::from("/tmp/custom.jsh")),
+            no_rc: false,
+        };
+        match opts.resolve() {
+            ResolvedRc::Explicit(path) => assert_eq!(path, PathBuf::from("/tmp/custom.jsh")),
+            other => panic!("expected ResolvedRc::Explicit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_default_when_both_unset() {
+        let original = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", "/tmp/jarvish-rc-resolve-test-home");
+        }
+        let opts = RcOptions::default();
+        match opts.resolve() {
+            ResolvedRc::Default(path) => assert_eq!(
+                path,
+                PathBuf::from("/tmp/jarvish-rc-resolve-test-home/.config/jarvish/rc.jsh")
+            ),
+            other => panic!("expected ResolvedRc::Default, got {other:?}"),
+        }
         unsafe {
             match original {
                 Some(home) => std::env::set_var("HOME", home),

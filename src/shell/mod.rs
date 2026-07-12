@@ -9,6 +9,8 @@ mod input;
 mod investigate;
 mod rc;
 
+pub use rc::RcOptions;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
@@ -82,13 +84,16 @@ pub struct Shell {
     restart_requested: Arc<AtomicBool>,
     /// 起動時に実行するコマンドのリスト（config.toml の `[startup]` セクション）
     startup_commands: Vec<String>,
+    /// `--rcfile` / `--no-rc` CLI オプション（Phase 4.2）。rc.jsh の
+    /// 読み込みを `run()` / `run_command()` の両方から解決するために保持する。
+    rc_options: RcOptions,
 }
 
 impl Shell {
     /// 新しい Shell インスタンスを作成する。
     ///
     /// 設定ファイル、入力分類器、エディタ、プロンプト、BlackBox、AI クライアントを初期化する。
-    pub fn new(logging_operational: bool, session_id: i64) -> Self {
+    pub fn new(logging_operational: bool, session_id: i64, rc_options: RcOptions) -> Self {
         // 設定ファイルの読み込み
         let config = JarvishConfig::load();
 
@@ -211,6 +216,7 @@ impl Shell {
             complete_registry,
             restart_requested: Arc::new(AtomicBool::new(false)),
             startup_commands: config.startup.commands,
+            rc_options,
         }
     }
 
@@ -424,8 +430,24 @@ impl Shell {
     /// REPL ループには入らず、文字列を行ごとに `handle_input()` で処理して終了する。
     /// ウェルカムバナー・Farewell メッセージは表示しない。
     ///
+    /// `--rcfile` が明示的に指定されている場合のみ、`-c` のコマンドを実行する
+    /// 前に rc スクリプトを読み込む（デフォルトパス・`--no-rc` では
+    /// `-c` 単体では rc は一切読み込まれない、既存の Phase 4.1 の挙動を維持）。
+    /// rc スクリプト側で `exit`/goodbye が要求された場合は `-c` のコマンドを
+    /// 実行せず、rc の終了コードをそのまま返す。
+    ///
     /// 戻り値: 最後に実行したコマンドの終了コード。
     pub async fn run_command(&mut self, command: &str) -> i32 {
+        if self.rc_options.rcfile.is_some()
+            && rc::RcOutcome::ExitRequested == self.run_configured_rc().await
+        {
+            if let Some(ref bb) = self.black_box {
+                bb.release_session();
+            }
+            let code = self.last_exit_code.load(Ordering::Relaxed);
+            return if code == EXIT_CODE_NONE { 0 } else { code };
+        }
+
         for line in command.lines() {
             if !self.handle_input(line).await {
                 break;
@@ -487,12 +509,10 @@ impl Shell {
         }
 
         // rc.jsh の実行（[startup].commands より前、対話モード限定）。
-        // デフォルトパスが存在しなければコメントのみのテンプレートを生成する
-        // （明示的な --rcfile は Phase 4.2 で追加、ここでは自動生成しない）。
-        let default_rc_path = rc::rc_path();
-        rc::ensure_default_rc(&default_rc_path);
-        info!(path = %default_rc_path.display(), "Executing rc.jsh");
-        if rc::RcOutcome::ExitRequested == self.run_rc_script(&default_rc_path, "rc.jsh", 0).await {
+        // `--rcfile` / `--no-rc` に応じてデフォルトパス／明示パス／スキップを
+        // 解決する（Phase 4.2, `RcOptions::resolve`）。デフォルトパスのみ
+        // 初回起動時にコメントのみのテンプレートを自動生成する。
+        if rc::RcOutcome::ExitRequested == self.run_configured_rc().await {
             info!("rc.jsh triggered shell exit");
             if let Some(ref bb) = self.black_box {
                 bb.release_session();
