@@ -1626,10 +1626,20 @@ mod tests {
     // ── 統合テスト（実行時 skip: which carapace が失敗する環境では skip） ──
 
     /// `[completion] external = "auto"` 相当の実 detect で settings を構築する。
-    fn auto_detected_settings() -> Arc<RwLock<ExternalCompletionSettings>> {
-        Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
-            &CompletionConfig::default(),
-        )))
+    /// carapace を実 spawn する統合テスト専用の設定。
+    ///
+    /// 本番既定は 400ms タイムアウトだが、`cargo test --all-targets`（1000+
+    /// テストの並列実行、host が飽和して 1 回の run が 130s 超になる）では
+    /// carapace のコールドスタート子プロセスが 400ms を超えて `provide()` が
+    /// `None` を返し、統合テストが稀に fail する（純粋な負荷起因のフレークで
+    /// あり、製品・テストロジックのバグではない）。統合テストでは carapace が
+    /// 候補を返せることの検証が本質であり、応答速度そのものは対象外なので、
+    /// 負荷に強い余裕あるタイムアウト（5s）を明示して起動時間のばらつきを
+    /// 吸収する。
+    fn integration_settings() -> Arc<RwLock<ExternalCompletionSettings>> {
+        let mut settings = ExternalCompletionSettings::resolve(&CompletionConfig::default());
+        settings.timeout = Duration::from_secs(5);
+        Arc::new(RwLock::new(settings))
     }
 
     fn create_test_git_repo() -> tempfile::TempDir {
@@ -1677,7 +1687,7 @@ mod tests {
         let original_dir = env::current_dir().unwrap();
         env::set_current_dir(tmpdir.path()).unwrap();
 
-        let provider = CarapaceProvider::new(auto_detected_settings());
+        let provider = CarapaceProvider::new(integration_settings());
         let ctx = extract_context("git checkout test-", "git checkout test-".len());
         let result = provider.provide(&ctx);
 
@@ -1699,7 +1709,7 @@ mod tests {
             return;
         };
 
-        let provider = CarapaceProvider::new(auto_detected_settings());
+        let provider = CarapaceProvider::new(integration_settings());
         let ctx = extract_context("git log --one", "git log --one".len());
         let result = provider.provide(&ctx);
 
