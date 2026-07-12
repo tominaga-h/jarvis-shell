@@ -58,7 +58,9 @@ src/
 ## Configuration
 
 User config: `~/.config/jarvish/config.toml` (auto-generated on first launch).
-Sections: `[ai]`, `[alias]`, `[export]`, `[prompt]`, `[completion]`.
+Sections: `[ai]`, `[alias]`, `[export]`, `[prompt]`, `[completion]`, `[startup]`.
+
+Startup script: `~/.config/jarvish/rc.jsh` (commented template auto-generated on first interactive launch; runs before `[startup].commands`).
 
 Debug mode: `jarvish --debug` writes logs to `./var/logs/`.
 
@@ -67,6 +69,8 @@ Debug mode: `jarvish --debug` writes logs to `./var/logs/`.
 - `jarvish --debug` — enable tracing logs to `./var/logs/`
 - `jarvish -c "<command>"` — run a single command and exit
 - `jarvish -v` / `--version` — print version
+- `jarvish --rcfile <path>` — load `<path>` instead of the default `~/.config/jarvish/rc.jsh`
+- `jarvish --no-rc` — skip loading the rc.jsh startup script entirely
 
 ## Rules
 

@@ -7,6 +7,9 @@ mod ai_router;
 mod editor;
 mod input;
 mod investigate;
+mod rc;
+
+pub use rc::RcOptions;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,7 +30,7 @@ use crate::ai::{ConversationState, JarvisAI};
 use crate::cli::completer::{
     format_external_binaries_display, format_external_summary, new_shared_daemon_slot,
     prewarm_zsh_daemon, registry::CompletionRegistry, shutdown_shared_daemon,
-    shutdown_shared_daemon_blocking, ExternalCompletionSettings, SharedDaemonSlot,
+    shutdown_shared_daemon_blocking, DaemonGate, ExternalCompletionSettings, SharedDaemonSlot,
 };
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 use crate::cli::prompt::{ShellPrompt, EXIT_CODE_NONE};
@@ -72,6 +75,38 @@ pub struct Shell {
     /// （`Drop` にのみ依存すると `Command::exec` や `std::process::exit`
     /// では一切実行されないため）。
     zsh_daemon: SharedDaemonSlot,
+    /// 終端 shutdown（exit/exec 経路）の tombstone ゲート（S5 修正）。
+    /// `Shell::new` が起動時バックグラウンドスレッドの prewarm と共有する。
+    /// `shutdown_zsh_daemon`（exit/exec 直前の有界同期 shutdown）が一度
+    /// closed にすると、以後 prewarm が遅延してスロットに書き込もうとしても
+    /// 挿入前に必ず kill される（`zsh_bridge::DaemonGate` のドキュメント
+    /// 参照 — `-c` 単体実行や `rc.jsh` 内 `exit` での孤児デーモン化を防ぐ）。
+    zsh_daemon_gate: Arc<DaemonGate>,
+    /// prewarm スレッドの完了通知チャネル受信側（S5 追加修正）。
+    ///
+    /// `gate.close()` だけでは閉じないレースが実際に存在する: `main` が
+    /// `shutdown_zsh_daemon`（deadline 1200ms）から戻った直後に
+    /// `std::process::exit` を呼ぶと、detached な prewarm スレッドは
+    /// **実行中であっても道連れで強制終了される**。もし prewarm が
+    /// `ZshDaemon::spawn` 内の `Command::spawn()`（実際の子 zsh プロセス
+    /// 生成、OS レベルの操作）を既に終えていて、かつ Mutex 内の tombstone
+    /// 再チェック（コードレベルの判定）にまだ到達していないタイミングで
+    /// プロセスごと消えると、その子プロセスは Rust コードが一切実行され
+    /// ないまま孤児化する（`gate.close()` は「以後 Rust コードが判定に
+    /// 使う値」を変えるだけで、既に他スレッドで実行中の OS 操作を中断
+    /// させる力はない）。
+    ///
+    /// そのため `shutdown_zsh_daemon` は `gate.close()` の後、
+    /// このチャネルから「prewarm スレッドが実際に完了通知を送るまで」を
+    /// 有界時間で待つ（`JoinHandle::join()` は無界ブロッキングのため
+    /// 使わず、`recv_timeout` で待つ）。間に合わなかった場合でも、
+    /// closed 後にスロットへ書き込む経路は Mutex 内チェックで塞がれて
+    /// いる（`DaemonGate` のドキュメント参照）ため、prewarm が
+    /// `Command::spawn()` の**後**で強制終了された最悪ケースだけが残る
+    /// リスクとなる — 有界待ちの猶予（`PREWARM_JOIN_DEADLINE`）を
+    /// prewarm の spawn 上限（`MIN_TIMEOUT_MS`）より長く取ることで、
+    /// この残存リスクを実務上ゼロに近づける。
+    zsh_daemon_prewarm_done: Option<std::sync::mpsc::Receiver<()>>,
     /// `complete` ビルトインで登録されたユーザー定義補完（JarvishCompleter と共有、
     /// issue #89 Phase 3）。エントリはセッション限りで、rc.jsh（Phase 4）が
     /// 導入されるまでは再起動のたびに空から始まる。
@@ -81,13 +116,34 @@ pub struct Shell {
     restart_requested: Arc<AtomicBool>,
     /// 起動時に実行するコマンドのリスト（config.toml の `[startup]` セクション）
     startup_commands: Vec<String>,
+    /// `--rcfile` / `--no-rc` CLI オプション（Phase 4.2）。rc.jsh の
+    /// 読み込みを `run()` / `run_command()` の両方から解決するために保持する。
+    rc_options: RcOptions,
+    /// 現在実行中の rc/source スクリプトのネスト深さ（Phase 4.3）。
+    /// トップレベルの rc スクリプト実行では 0。`source <script>` 行が
+    /// `try_shell_builtins` 経由で再帰的にスクリプトを実行するたびに
+    /// `run_rc_script_sync` が加算・復元する。`MAX_SOURCE_DEPTH` を
+    /// 超えるネストを検出して無限ループ（自己 source 等）を防ぐために使う。
+    source_depth: usize,
 }
 
 impl Shell {
     /// 新しい Shell インスタンスを作成する。
     ///
     /// 設定ファイル、入力分類器、エディタ、プロンプト、BlackBox、AI クライアントを初期化する。
-    pub fn new(logging_operational: bool, session_id: i64) -> Self {
+    ///
+    /// `interactive` は `main.rs` が `args.command.is_none()`（`-c` 未指定）
+    /// かどうかから決める。`false`（`-c` 単体実行）の場合、Tab 補完が
+    /// 一切発生しないウォーム zsh 補完デーモンの事前 spawn は純粋な無駄な
+    /// うえ、起動〜終了が数ミリ秒で完走することが多く S5 のレース
+    /// （孤児 `/bin/zsh -i`）を踏みやすいため、prewarm 自体を丸ごとスキップ
+    /// する（S5 修正 — tombstone ゲートと合わせた二段構えの対策の1つ目）。
+    pub fn new(
+        logging_operational: bool,
+        session_id: i64,
+        rc_options: RcOptions,
+        interactive: bool,
+    ) -> Self {
         // 設定ファイルの読み込み
         let config = JarvishConfig::load();
 
@@ -117,6 +173,10 @@ impl Shell {
         // `Shell` 側からライフサイクルイベント（reload/exit/restart）で
         // 直接 shutdown できるようにする（Task A, #89）。
         let zsh_daemon = new_shared_daemon_slot();
+        // S5 修正: 終端 shutdown の tombstone ゲート。prewarm スレッドと
+        // `shutdown_zsh_daemon` の両方に配る（`DaemonGate` のドキュメント
+        // 参照）。
+        let zsh_daemon_gate = DaemonGate::new();
 
         // Fix D4: 起動時のバックグラウンド事前ウォームアップ。設定でデーモン
         // が有効（フラグ on + zsh が enabled-kinds に含まれる + zsh バイナリ
@@ -126,13 +186,23 @@ impl Shell {
         // `prewarm_zsh_daemon` 内部で即座に no-op として戻る。`provide()`
         // とのレースは `prewarm_zsh_daemon` 側の Mutex 二重チェックで防止
         // 済み（同モジュールのドキュメント参照）。
-        {
-            let settings_for_prewarm = Arc::clone(&external_completion);
-            let daemon_for_prewarm = Arc::clone(&zsh_daemon);
-            std::thread::spawn(move || {
-                prewarm_zsh_daemon(&settings_for_prewarm, &daemon_for_prewarm);
-            });
-        }
+        //
+        // S5 修正: `interactive == false`（`-c` 単体実行）では Tab 補完が
+        // 一切発生しないため、prewarm スレッド自体を起動しない（spawn は
+        // 純粋な無駄なうえ、起動直後に完走するプロセスでは孤児化レースを
+        // 踏みやすい）。判定ロジックは `spawn_prewarm_thread_if_interactive`
+        // に切り出し、`Shell` 全体を構築せずに単体テストできるようにする。
+        //
+        // 戻り値の `Receiver` は `zsh_daemon_prewarm_done` に保持し、
+        // `shutdown_zsh_daemon` が「prewarm スレッドの完了」を有界時間で
+        // 待つのに使う（`zsh_daemon_prewarm_done` フィールドのドキュメント
+        // 参照）。
+        let zsh_daemon_prewarm_done = spawn_prewarm_thread_if_interactive(
+            interactive,
+            &external_completion,
+            &zsh_daemon,
+            &zsh_daemon_gate,
+        );
 
         // `complete` ビルトインで登録されるユーザー定義補完（issue #89 Phase 3）。
         // JarvishCompleter と共有するため editor 構築前に確保する。
@@ -207,9 +277,13 @@ impl Shell {
             git_branch_commands,
             external_completion,
             zsh_daemon,
+            zsh_daemon_gate,
+            zsh_daemon_prewarm_done,
             complete_registry,
             restart_requested: Arc::new(AtomicBool::new(false)),
             startup_commands: config.startup.commands,
+            rc_options,
+            source_depth: 0,
         }
     }
 
@@ -289,7 +363,8 @@ impl Shell {
     /// 指定されたパスから設定ファイルを再読み込みし、Shell の状態に反映する。
     ///
     /// `source` ビルトインコマンドから呼び出される。
-    /// `[alias]`、`[export]`、`[ai]` セクションを反映する。
+    /// `[ai]`、`[alias]`、`[export]`、`[prompt]`、`[completion]`、`[startup]`
+    /// の各セクションを反映する（`[startup]` は値の更新のみで再実行はしない）。
     pub(super) fn reload_config(&mut self, path: &std::path::Path) -> crate::engine::CommandResult {
         use crate::engine::CommandResult;
 
@@ -423,8 +498,24 @@ impl Shell {
     /// REPL ループには入らず、文字列を行ごとに `handle_input()` で処理して終了する。
     /// ウェルカムバナー・Farewell メッセージは表示しない。
     ///
+    /// `--rcfile` が明示的に指定されている場合のみ、`-c` のコマンドを実行する
+    /// 前に rc スクリプトを読み込む（デフォルトパス・`--no-rc` では
+    /// `-c` 単体では rc は一切読み込まれない、既存の Phase 4.1 の挙動を維持）。
+    /// rc スクリプト側で `exit`/goodbye が要求された場合は `-c` のコマンドを
+    /// 実行せず、rc の終了コードをそのまま返す。
+    ///
     /// 戻り値: 最後に実行したコマンドの終了コード。
     pub async fn run_command(&mut self, command: &str) -> i32 {
+        if self.rc_options.rcfile.is_some()
+            && rc::RcOutcome::ExitRequested == self.run_configured_rc().await
+        {
+            if let Some(ref bb) = self.black_box {
+                bb.release_session();
+            }
+            let code = self.last_exit_code.load(Ordering::Relaxed);
+            return if code == EXIT_CODE_NONE { 0 } else { code };
+        }
+
         for line in command.lines() {
             if !self.handle_input(line).await {
                 break;
@@ -484,6 +575,31 @@ impl Shell {
             println!("{notification}");
             println!();
         }
+
+        // rc.jsh の実行（[startup].commands より前、対話モード限定）。
+        // `--rcfile` / `--no-rc` に応じてデフォルトパス／明示パス／スキップを
+        // 解決する（Phase 4.2, `RcOptions::resolve`）。デフォルトパスのみ
+        // 初回起動時にコメントのみのテンプレートを自動生成する。
+        if rc::RcOutcome::ExitRequested == self.run_configured_rc().await {
+            info!("rc.jsh triggered shell exit");
+            if let Some(ref bb) = self.black_box {
+                bb.release_session();
+            }
+            let exit_code = self.last_exit_code.load(Ordering::Relaxed);
+            return (
+                if exit_code == EXIT_CODE_NONE {
+                    0
+                } else {
+                    exit_code
+                },
+                if self.restart_requested.load(Ordering::Relaxed) {
+                    LoopAction::Restart
+                } else {
+                    LoopAction::Exit
+                },
+            );
+        }
+        self.prompt.refresh_git_status();
 
         // 起動時コマンドの実行（config.toml [startup] commands）
         if !self.startup_commands.is_empty() {
@@ -663,8 +779,80 @@ impl Shell {
     /// [`shutdown_shared_daemon_blocking`] で `deadline` 以内の完了を
     /// 呼び出し元スレッド上で待つ。デーモンが元々稼働していなければ
     /// no-op（冪等）。
-    pub fn shutdown_zsh_daemon(&self) {
-        shutdown_shared_daemon_blocking(&self.zsh_daemon, Self::ZSH_DAEMON_EXIT_SHUTDOWN_DEADLINE);
+    ///
+    /// # tombstone（S5 修正）
+    /// `self.zsh_daemon_gate` を渡すため、この呼び出しは同時に「以後
+    /// prewarm がこのスロットへ書き込むことを二度と許さない」という
+    /// tombstone をセットする。`-c` 単体実行やここに到達する前に
+    /// prewarm がまだ spawn 中だった場合でも、prewarm が完了して
+    /// スロットへ書き込もうとした瞬間に closed を検知して自壊する
+    /// （`zsh_bridge::DaemonGate` のドキュメント参照）。
+    ///
+    /// # prewarm スレッド完了の有界待ち（S5 追加修正）
+    /// `gate.close()` だけでは閉じないレースが実際に存在する
+    /// （`zsh_daemon_prewarm_done` フィールドのドキュメント参照）: この
+    /// 呼び出しの直後に呼び出し元（`main`）が `std::process::exit` する
+    /// と、detached な prewarm スレッドは実行中でも強制終了され、
+    /// tombstone チェックのコードが一度も走らないまま子プロセスだけが
+    /// 残りうる。これを防ぐため、スロット shutdown の後に prewarm
+    /// スレッドの完了通知を [`Self::PREWARM_JOIN_DEADLINE`] まで待つ
+    /// （`recv_timeout` — `JoinHandle::join()` の無界ブロッキングは
+    /// 受け入れ基準4「`-c` の終了レイテンシを悪化させない」に反するため
+    /// 使わない）。prewarm が既に完了していれば（通常の対話 REPL 終了、
+    /// または prewarm 自体が無効/未検出だった場合）このチャネルは
+    /// 即座に受信できるため、この待ちはほぼ常に no-op に等しい。
+    pub fn shutdown_zsh_daemon(&mut self) {
+        shutdown_shared_daemon_blocking(
+            &self.zsh_daemon,
+            Self::ZSH_DAEMON_EXIT_SHUTDOWN_DEADLINE,
+            Some(&self.zsh_daemon_gate),
+        );
+
+        if let Some(rx) = self.zsh_daemon_prewarm_done.take() {
+            if rx.recv_timeout(Self::PREWARM_JOIN_DEADLINE).is_err() {
+                tracing::debug!(
+                    "zsh daemon shutdown: prewarm thread did not finish within the join \
+                     deadline; falling back to a final slot re-check"
+                );
+            }
+            // prewarm が実際に間に合わずスロットへ書き込んでいた場合の
+            // 最終防衛線: closed 後の書き込みは Mutex 内チェックで
+            // 通常は防がれるが（`DaemonGate` のドキュメント参照）、万一
+            // タイムアウトで recv を諦めた直後に prewarm がスロットへ
+            // 書き込みを完了させていた場合に備え、もう一度だけ shutdown
+            // を試みる（スロットが空なら no-op、埋まっていれば確実に
+            // kill する）。
+            shutdown_shared_daemon_blocking(
+                &self.zsh_daemon,
+                Self::ZSH_DAEMON_EXIT_SHUTDOWN_DEADLINE,
+                None,
+            );
+        }
+    }
+
+    /// [`Self::shutdown_zsh_daemon`] が prewarm スレッドの完了通知を待つ
+    /// 上限（S5 追加修正）。prewarm の spawn 自体の上限
+    /// （`zsh_bridge::MIN_TIMEOUT_MS` = 2000ms）に軽い余裕を足した値 ──
+    /// この値より短いと「prewarm がまだ正常に spawn 中なだけ」のケースで
+    /// 待ちきれず、tombstone チェック未実行のまま強制終了されるレースが
+    /// 再発する。
+    const PREWARM_JOIN_DEADLINE: std::time::Duration = std::time::Duration::from_millis(2500);
+
+    /// `restart` ビルトイン（または rc/source スクリプト内の `restart` 行、
+    /// SIGUSR1）によって再起動が要求されたかどうかを返す（Fix B2）。
+    ///
+    /// `run()`（対話 REPL）は既にこのフラグをループ内で直接
+    /// （`self.restart_requested.load(...)`）参照して `LoopAction::Restart`
+    /// を選択しているが、`run_command`（`-c` 単体実行、`main.rs` から
+    /// 呼ばれる）はこれまでこのフラグを一切見ておらず、`main.rs` 側が
+    /// `-c` の戻り値を常に `LoopAction::Exit` と決め打ちしていた。その
+    /// ため `--rcfile` スクリプト内 / `-c` の引数内で `restart` を呼んでも
+    /// "Restarting jarvish..." が出力されるだけで実際には exec()
+    /// されずプロセスが終了する（サイレントに死ぬ）という不整合があった。
+    /// `main.rs` はこのアクセサで `run_command` 実行後にフラグを読み、
+    /// `run()` と同じ判定に揃える。
+    pub fn restart_requested(&self) -> bool {
+        self.restart_requested.load(Ordering::Relaxed)
     }
 
     /// exec() によるプロセス再起動を実行する。
@@ -693,6 +881,52 @@ impl Shell {
         // exec() — 成功時はこの行に到達しない
         std::process::Command::new(exe).args(&args).exec()
     }
+}
+
+/// 起動時のバックグラウンド事前ウォームアップスレッドを、対話モードの
+/// ときだけ起動する（S5 修正、`Shell::new` から切り出し）。
+///
+/// `interactive == false`（`-c` 単体実行）では、そもそも Tab 補完が発生
+/// しない短命プロセスなので、スレッドを起動すること自体が無駄なうえ、
+/// プロセスが数ミリ秒で完走してしまうと prewarm の spawn（PTY + プロセス
+/// 起動 + レディマーカー待ち、数百ms かかりうる）がプロセス終了後まで
+/// 完了せず、孤児 `/bin/zsh -i` 化のレースを踏みやすい（`DaemonGate` の
+/// ドキュメント参照）。`Shell` 全体を構築せずに「スレッドを1本も起動しない」
+/// ことを直接観測できるよう、`Shell::new` 本体から切り出している。
+///
+/// 戻り値は `interactive == true` の場合のみ `Some(Receiver<()>)`
+/// （prewarm スレッドが実行を終えた瞬間に送信される完了通知チャネル）を
+/// 返す。`Shell::zsh_daemon_prewarm_done` のドキュメント参照 — `main` が
+/// `std::process::exit` する前に `shutdown_zsh_daemon` がこのチャネルを
+/// 有界時間で待つことで、「gate.close() 後に prewarm がまだ実行中の
+/// まま強制終了され、tombstone チェックが一度も走らない」レースを閉じる。
+fn spawn_prewarm_thread_if_interactive(
+    interactive: bool,
+    external_completion: &Arc<RwLock<ExternalCompletionSettings>>,
+    zsh_daemon: &SharedDaemonSlot,
+    zsh_daemon_gate: &Arc<DaemonGate>,
+) -> Option<std::sync::mpsc::Receiver<()>> {
+    if !interactive {
+        return None;
+    }
+    let settings_for_prewarm = Arc::clone(external_completion);
+    let daemon_for_prewarm = Arc::clone(zsh_daemon);
+    let gate_for_prewarm = Arc::clone(zsh_daemon_gate);
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        prewarm_zsh_daemon(
+            &settings_for_prewarm,
+            &daemon_for_prewarm,
+            &gate_for_prewarm,
+        );
+        // prewarm が（スロットへの書き込みの成否に関わらず）完全に終了
+        // したことを通知する。送信失敗（受信側が既に drop 済み）は
+        // 無視してよい — `shutdown_zsh_daemon` が呼ばれずプロセスが
+        // 対話 REPL のまま動き続けているケース（`Receiver` は `Shell` に
+        // 保持されたまま）を含め、通知を誰も待っていない状況は正常。
+        let _ = done_tx.send(());
+    });
+    Some(done_rx)
 }
 
 /// `[completion]` の外部補完設定を再解決し、共有 `Arc<RwLock<_>>` へ
@@ -1363,7 +1597,7 @@ mod tests {
         // ここでは十分な独自の deadline を渡す — 主張したいのは「関数が
         // 戻った時点で既に reap されている」という決定性であり、具体的な
         // deadline 値の一致ではない）。
-        shutdown_shared_daemon_blocking(&zsh_daemon, std::time::Duration::from_secs(2));
+        shutdown_shared_daemon_blocking(&zsh_daemon, std::time::Duration::from_secs(2), None);
 
         assert!(zsh_daemon.lock().unwrap().is_none());
         // ポーリングなしで即座に ESRCH を確認できることが非同期版との
@@ -1375,6 +1609,124 @@ mod tests {
         assert!(
             is_dead,
             "child pid {child_pid} should already be reaped when shutdown_shared_daemon_blocking returns"
+        );
+
+        if let Some(home) = original_home {
+            unsafe {
+                std::env::set_var("HOME", home);
+            }
+        }
+    }
+
+    // ── S5 修正: spawn_prewarm_thread_if_interactive / DaemonGate 配線 ──
+
+    #[test]
+    fn spawn_prewarm_thread_if_interactive_false_never_spawns_and_slot_stays_empty() {
+        // -c 単体実行相当（interactive = false）では prewarm スレッド自体を
+        // 一切起動しない。デーモン有効設定を渡しても、寛容な猶予時間を
+        // 置いてもスロットが埋まらないことで「スレッドが起動していない」
+        // ことを間接的に、しかし決定的に証明する（zsh バイナリの実機有無に
+        // 関わらず: スレッドが起動していれば eventually 埋まるはずの
+        // スロットが、猶予時間内に一切変化しないことが主張の核）。
+        let settings = zsh_enabled_daemon_settings();
+        let zsh_daemon = new_shared_daemon_slot();
+        let gate = DaemonGate::new();
+
+        spawn_prewarm_thread_if_interactive(false, &settings, &zsh_daemon, &gate);
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            zsh_daemon.lock().unwrap().is_none(),
+            "interactive=false must not spawn any prewarm thread, slot must stay empty"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn spawn_prewarm_thread_if_interactive_true_eventually_populates_slot() {
+        // 対照実験: interactive = true では従来どおりスレッドが起動し、
+        // 猶予時間内にスロットが埋まる（対話モードの既存挙動が不変で
+        // あることの確認、受け入れ基準5）。
+        let Some(_zsh) = zsh_binary_for_test() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let original_home = std::env::var("HOME").ok();
+        let _fixture = setup_daemon_fixture();
+
+        let settings = zsh_enabled_daemon_settings();
+        let zsh_daemon = new_shared_daemon_slot();
+        let gate = DaemonGate::new();
+
+        spawn_prewarm_thread_if_interactive(true, &settings, &zsh_daemon, &gate);
+
+        let mut populated = false;
+        for _ in 0..100 {
+            if zsh_daemon.lock().unwrap().is_some() {
+                populated = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            populated,
+            "interactive=true must still spawn the prewarm thread and populate the slot"
+        );
+
+        // テストフィクスチャ teardown（S5 修正）: `shutdown_shared_daemon`
+        // （非ブロッキング、kill/reap をバックグラウンドスレッドへ委譲）は
+        // テスト関数を抜けた直後にテストバイナリが終了するとバックグラウンド
+        // スレッドが道連れで強制終了されうる（`zsh_daemon.rs` の
+        // `spawn_reaches_ready_marker` テストで実測した孤児の根本原因と
+        // 同じパターン）。有界同期版で確実に reap してから終える。
+        shutdown_shared_daemon_blocking(&zsh_daemon, std::time::Duration::from_secs(2), None);
+
+        if let Some(home) = original_home {
+            unsafe {
+                std::env::set_var("HOME", home);
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn shutdown_zsh_daemon_gate_blocks_late_prewarm_insertion_end_to_end() {
+        // S5 受け入れ基準1〜3 の統合的な決定的検証: `Shell::shutdown_zsh_daemon`
+        // が実際に呼ぶのと同じ2つの公開関数（`shutdown_shared_daemon_blocking`
+        // に `Some(&gate)` を渡す版と `prewarm_zsh_daemon`）を、実際の
+        // レース順序（shutdown が先に完了 → prewarm が後から遅れて発火）で
+        // 直接呼び、最終的にスロットが空のままであることを検証する。
+        // `Shell` 全体は構築しない（`zsh_daemon` + `zsh_daemon_gate` +
+        // `external_completion` の3つの共有状態だけで再現できる）。
+        let Some(zsh) = zsh_binary_for_test() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let original_home = std::env::var("HOME").ok();
+        let _fixture = setup_daemon_fixture();
+        let _ = zsh;
+
+        let settings = zsh_enabled_daemon_settings();
+        let zsh_daemon = new_shared_daemon_slot();
+        let gate = DaemonGate::new();
+
+        // 1. 終端 shutdown が先に完了する（-c が数ミリ秒で完走するケースを
+        //    模す。スロットはまだ空。この呼び出しが gate を close する）。
+        shutdown_shared_daemon_blocking(
+            &zsh_daemon,
+            std::time::Duration::from_secs(1),
+            Some(&gate),
+        );
+        assert!(zsh_daemon.lock().unwrap().is_none());
+
+        // 2. その後で prewarm が遅れて発火する。
+        prewarm_zsh_daemon(&settings, &zsh_daemon, &gate);
+
+        // 3. 決定的保証: closed 後の prewarm はスロットに何も残さない。
+        assert!(
+            zsh_daemon.lock().unwrap().is_none(),
+            "prewarm firing after shutdown_zsh_daemon's gate closed must never leave a \
+             daemon in the slot (S5 acceptance criteria 1-3)"
         );
 
         if let Some(home) = original_home {

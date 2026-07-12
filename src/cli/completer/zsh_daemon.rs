@@ -910,6 +910,29 @@ mod tests {
         which::which("zsh").ok()
     }
 
+    /// pid が実際に ESRCH になる（プロセスが死んでいる）まで短時間・有界
+    /// 回数ポーリングする（S5 修正: テストフィクスチャ teardown 用共通
+    /// ヘルパー、`zsh_bridge.rs` / `shell/mod.rs` の同名パターンと同じ
+    /// 考え方）。
+    ///
+    /// `mark_dead_and_kill`（バッファ超過・サーキットブレーカー等の内部
+    /// 経路）や `shutdown()`（非ブロッキング）は kill/reap をバックグラウンド
+    /// スレッドへ委譲するため、テスト関数がこれらを呼んだ直後に単に
+    /// スコープを抜けると、まだ子プロセスが生きたまま `cargo test` の
+    /// テストバイナリプロセスが終了しうる（単体実行で観測される孤児
+    /// `/bin/zsh -i` の根本原因）。テストは必ずこのヘルパーで実際の死亡を
+    /// 確認してから終わること。
+    fn wait_for_pid_death_for_test(pid: u32) -> bool {
+        for _ in 0..80 {
+            let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+            if ret == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
     /// テスト用の隔離された ZDOTDIR + fpath ディレクトリ + カスタム補完
     /// フィクスチャ（固定ワードリスト）+ 隔離 HOME を作る。
     ///
@@ -975,7 +998,16 @@ mod tests {
         );
         let mut daemon = daemon.expect("daemon should spawn and reach ready marker");
         assert!(daemon.is_alive());
-        daemon.shutdown();
+        // テストフィクスチャ teardown（S5 修正）: `shutdown()`（非ブロッキング、
+        // kill/reap をバックグラウンドスレッドへ委譲）はテストプロセスの
+        // 終了と競合しうる ── 単体テスト実行（1テストのみ）だとテスト
+        // 関数を抜けた直後にテストバイナリごと終了し、バックグラウンド
+        // スレッドの `kill_tree` が実行される前にプロセスが道連れで消える
+        // ことがある（実機計測で確認: `cargo test --lib` 1回の実行で
+        // ppid=1 の孤児 `/bin/zsh -i` が複数残った根本原因）。テストでは
+        // 常に有界同期版 `shutdown_blocking` を使い、関数が戻った時点で
+        // 子プロセスの kill/reap が完了していることを保証する。
+        daemon.shutdown_blocking(Duration::from_secs(2));
         assert!(!daemon.is_alive());
     }
 
@@ -1041,6 +1073,11 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "warm second request should be well under 500ms (compute-only), took {elapsed:?}"
         );
+
+        // テストフィクスチャ teardown（S5 修正）: Drop に任せず明示的に
+        // 有界同期 shutdown する（`spawn_reaches_ready_marker` のコメント
+        // 参照）。
+        daemon.shutdown_blocking(Duration::from_secs(2));
     }
 
     #[test]
@@ -1088,6 +1125,10 @@ mod tests {
             !values_b.iter().any(|v| v.starts_with("alpha")),
             "request B must not bleed candidates from request A: {values_b:?}"
         );
+
+        // テストフィクスチャ teardown（S5 修正、`spawn_reaches_ready_marker`
+        // のコメント参照）。
+        daemon.shutdown_blocking(Duration::from_secs(2));
     }
 
     #[test]
@@ -1256,6 +1297,10 @@ mod tests {
             pid_before,
             "the same daemon process must still be serving requests (no respawn)"
         );
+
+        // テストフィクスチャ teardown（S5 修正、`spawn_reaches_ready_marker`
+        // のコメント参照）。
+        daemon.shutdown_blocking(Duration::from_secs(2));
     }
 
     #[test]
@@ -1326,6 +1371,11 @@ mod tests {
             pid_before,
             "no respawn should have happened throughout"
         );
+
+        // テストフィクスチャ teardown（S5 修正、`spawn_reaches_ready_marker`
+        // のコメント参照）。デーモンはまだ生存中（pending_frame が残った
+        // 状態）のため、明示的な有界同期 shutdown が必須。
+        daemon.shutdown_blocking(Duration::from_secs(2));
     }
 
     #[test]
@@ -1432,7 +1482,12 @@ mod tests {
         )
         .expect("daemon should spawn");
 
-        daemon.shutdown();
+        // テストフィクスチャ teardown（S5 修正）: このテストの主張（shutdown
+        // 後の request() が即座に None を返すこと）自体は shutdown の
+        // ブロッキング/非ブロッキングに依存しないため、有界同期版に置き換えて
+        // 子プロセスの確実な reap を保証する（`spawn_reaches_ready_marker`
+        // のコメント参照）。
+        daemon.shutdown_blocking(Duration::from_secs(2));
         assert!(!daemon.is_alive());
 
         let start = Instant::now();
@@ -1546,6 +1601,7 @@ mod tests {
             Duration::from_secs(10),
         )
         .expect("daemon should spawn");
+        let child_pid = daemon.child_pid_for_test();
 
         let start = Instant::now();
         // 上限判定はタイムアウトより先に効くはずなので、タイムアウト自体は
@@ -1564,6 +1620,17 @@ mod tests {
         assert!(
             !daemon.is_alive(),
             "daemon must be marked dead after exceeding the response buffer cap"
+        );
+
+        // テストフィクスチャ teardown（S5 修正）: バッファ上限超過は
+        // `request()` 内部で `mark_dead_and_kill`（非ブロッキング、kill/reap
+        // をバックグラウンドスレッドへ委譲）を経由するため、テスト関数を
+        // 抜けた時点では reap が完了している保証がない（`spawn_reaches_
+        // ready_marker` のコメント参照）。有界ポーリングで実際に子プロセスが
+        // 死ぬまで待ってからテストを終える。
+        assert!(
+            wait_for_pid_death_for_test(child_pid),
+            "child pid {child_pid} should eventually be reaped by the background thread"
         );
     }
 
@@ -1618,7 +1685,9 @@ mod tests {
         .expect("daemon should spawn");
         let result = daemon.request("jarvishtestcmd ", Duration::from_secs(3));
         assert!(result.is_some(), "daemon should still serve completions");
-        daemon.shutdown();
+        // テストフィクスチャ teardown（S5 修正、`spawn_reaches_ready_marker`
+        // のコメント参照）。
+        daemon.shutdown_blocking(Duration::from_secs(2));
     }
 
     #[test]

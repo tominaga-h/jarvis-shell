@@ -11,8 +11,6 @@ use tracing::{debug, info, warn};
 
 use reedline::HistoryItem;
 
-use std::path::PathBuf;
-
 use crate::cli::completer::registry::CompletionRegistry;
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 
@@ -219,7 +217,7 @@ impl Shell {
     /// 先頭ワードが対象コマンドであり、かつパイプ・リダイレクト等を
     /// 含まない単純なコマンドの場合に `Some(CommandResult)` を返す。
     /// それ以外は `None` を返し、通常の実行パスに委ねる。
-    fn try_shell_builtins(&mut self, input: &str) -> Option<CommandResult> {
+    pub(super) fn try_shell_builtins(&mut self, input: &str) -> Option<CommandResult> {
         let first_word = input.split_whitespace().next().unwrap_or("");
         if !matches!(
             first_word,
@@ -313,8 +311,7 @@ impl Shell {
                     Ok(p) => p,
                     Err(cmd_result) => return Some(cmd_result),
                 };
-                let path = PathBuf::from(&path_str);
-                self.reload_config(&path)
+                self.dispatch_source(&path_str)
             }
             "cd" => cd::execute(&args, &mut self.dir_stack),
             "cdj" => cdj::execute(&args, &mut self.dir_stack),

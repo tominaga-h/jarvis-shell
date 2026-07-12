@@ -32,6 +32,7 @@ The days of copy-pasting errors into a browser to ask AI are over. Just ask Jarv
   - [External Completion (carapace)](#external-completion-carapace)
   - [zsh Completion Bridge](#zsh-completion-bridge)
   - [Custom Completions (`complete` builtin)](#custom-completions-complete-builtin)
+  - [Startup script (`rc.jsh`)](#-startup-script-rcjsh)
 - [Architecture](#️-architecture)
 - [Development](#-development)
 
@@ -282,7 +283,48 @@ complete -c mycmd -n '__fish_seen_subcommand_from start' -a "$(mycmd --list-targ
 
 Pressing Tab right after `mycmd ` offers `start`/`stop`; after `mycmd start `, it instead runs `mycmd --list-targets` and offers its output as candidates.
 
-**Session-only for now**: specs registered via `complete` live only in memory and are lost when Jarvish exits. A `rc.jsh` startup script (planned) will let you persist `complete` calls across restarts — until then, add them to a shell alias or re-run them manually each session.
+**Persisting across restarts**: specs registered via `complete` at the prompt live only in memory and are lost when Jarvish exits. To make them (and other setup) survive restarts, put the same commands in [`rc.jsh`](#-startup-script-rcjsh) below.
+
+### 🏁 Startup script (`rc.jsh`)
+
+`~/.config/jarvish/rc.jsh` is a plain-text startup script that Jarvish runs once, every time it starts **interactively** — before the `[startup].commands` section of `config.toml`, and before the first prompt is shown. It exists to solve exactly the "session-only" problem above: put your `alias`/`export`/`complete` calls (or any other builtin) in `rc.jsh` and they persist across every restart, no shell alias or copy-paste required.
+
+- **Location**: `~/.config/jarvish/rc.jsh` (mirrors `config.toml`'s location convention). A commented-only template is auto-generated here on first interactive launch if the file doesn't already exist — it is never overwritten afterward, so your edits are safe. (An explicit `--rcfile` path, below, is never auto-generated.)
+- **CLI options**:
+  - `--rcfile <PATH>` — load `<PATH>` instead of the default `~/.config/jarvish/rc.jsh`. Never auto-generated, even if missing: a missing explicit path prints `jarvish: rcfile not found: <PATH>` on stderr and Jarvish continues without an rc script. Unlike the default path, an explicit `--rcfile` is also honored in `-c` mode — it loads (and can run/`exit`) before the `-c` command executes; plain `-c` alone never touches rc.jsh at all.
+  - `--no-rc` — skip rc script loading entirely, including the default-path template auto-generation.
+  - `--rcfile` and `--no-rc` conflict and cannot be combined.
+- **Format**: one command per line. Blank lines are skipped. A line whose first non-whitespace character is `#` is treated as a full-line comment and skipped — `#` appearing mid-line (e.g. inside a quoted string) does **not** start a comment. There is no line-continuation syntax; keep each command on a single line.
+- **Classifier bypass guarantee**: every line runs through the same builtin dispatch path as typing it at the prompt (alias expansion first, then `alias`, `export`, `complete`, `cd`, `source`, and ordinary commands all work exactly as they do interactively) — but it **never** goes through the AI natural-language classifier. A line that looks like a question or a request to the AI assistant is not routed anywhere special; it's simply run as a command and fails as "not found" if it isn't one. `rc.jsh` is for deterministic setup, not conversation. Because alias expansion runs on every line, an `alias` defined earlier in the script is usable by any later line of that same script (or a script it `source`s, and vice versa).
+- **Execution order**: `rc.jsh` → `[startup].commands` (`config.toml`) → first prompt.
+- **Error handling**: a failing line prints its own error (from the command itself) plus a summary line `jarvish: rc.jsh:<lineno>: command exited with status <code>` — then execution continues with the next line. `rc.jsh` never aborts partway through because of one bad line. An `exit <code>` (or `restart`) line is a deliberate action, not a failing command, so it never prints this summary line, even when `<code>` is non-zero.
+- **Exiting from a script**: an `exit` line (or a goodbye phrase such as `bye`/`さようなら`) stops the script and exits Jarvish immediately, the same way it would at the interactive prompt. A `restart` line behaves the same way in every mode, including `-c`: Jarvish re-execs itself instead of just printing "Restarting jarvish..." and quitting.
+- **Not recorded to history**: lines executed via `rc.jsh` or `source` are never written to the Black Box (`history` builtin / `history.db`), even though every interactive or `-c` line is. This is intentional, not an oversight — script lines are configuration replay, not something a user typed, and recording them would spam `history` with the same `alias`/`export`/`complete` calls on every single launch (this mirrors how bash's `source`/`.` doesn't add to `history` either).
+
+Example:
+
+```sh
+# ~/.config/jarvish/rc.jsh
+
+# Persist a couple of aliases
+alias gs="git status"
+alias ll="eza --icons -la"
+
+# Register a completion for an internal tool (see "Custom Completions" above)
+complete -c mycmd -s v -l verbose -d 'Verbose output'
+complete -c mycmd -a 'start stop restart' -d 'Subcommand'
+```
+
+#### `source`: reload config, or run a script
+
+`source <path>` dispatches on the file's extension:
+
+- **`.toml`** (case-insensitive) — reloads `config.toml` and re-applies `[ai]`/`[alias]`/`[export]`/`[prompt]`/`[completion]` in place, exactly as before. This is unchanged: `source ~/.config/jarvish/config.toml` still prints the familiar `Loaded ...` summary (see the Tip in "Configuration File" above).
+- **any other extension, or none** — runs the file as an rc-style script, using the exact same executor as `rc.jsh` itself: classifier bypass, `#`-comment/blank-line handling, line-numbered `jarvish: <file>:<lineno>: ...` errors, continue-on-error, and `exit`/goodbye propagation all apply identically. This lets you factor a large `rc.jsh` into smaller files and `source` them, or load an ad-hoc script from the prompt (`source ./setup.jsh`).
+- **Nesting**: a sourced script can itself `source` another script, up to a maximum depth of 8. Exceeding it (including a script that sources itself) stops with `jarvish: <file>: source nesting too deep` instead of hanging. This depth guard only bounds how deeply scripts can nest via `source` — it does **not** bound the total amount of work a script (or its whole `source` tree) can do at any single depth level. A script with a large number of `source` calls at the same level, or one that runs thousands of commands per line, is not stopped by this guard; keeping wide-fan-out or expensive scripts reasonable is the user's own responsibility.
+- **Exit code**: a scripted `source` returns 0 if every line succeeded, 1 if any line failed, or exits the shell if the script itself contained an `exit`/goodbye line.
+- **Missing file**: the exact wording differs by branch (they go through different code paths — the `.toml` branch delegates to the same config loader `source ~/.config/jarvish/config.toml` has always used, which reports the raw I/O error verbatim), but both branches exit 1: a missing **script** path (any extension other than `.toml`, or none) reports `jarvish: source: no such file: <path>`; a missing **`.toml`** path reports `jarvish: source: failed to read <path>: <os error>` (e.g. `No such file or directory (os error 2)`).
+- **A directory named `*.toml`**: sourcing a path that merely looks like a config file by extension but is actually a directory reports `jarvish: source: <path> is a directory` and exits 1 — it never reaches the config-reload code path.
 
 ## 🏗️ Architecture
 

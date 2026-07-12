@@ -52,7 +52,21 @@
 
 ## Phase 4: rc.jsh スクリプト設定（branch: `feature/rc-script`）
 
-- [ ] 4.1 rc ファイルローダ（`~/.config/jarvish/rc.jsh`、分類器バイパス、-c では読まない）
-- [ ] 4.2 `--rcfile <path>` / `--no-rc` CLI オプション
-- [ ] 4.3 `source` ビルトインのスクリプト対応（拡張子分岐）
-- [ ] **Checkpoint 4**: 全フェーズ E2E + ドキュメント総点検
+- [x] 4.1 rc ファイルローダ（`595c5ed`。src/shell/rc.rs 新設: 純パーサ+分類器バイパス実行（classify 不使用をトレースで確認）+コメントのみテンプレ初回自動生成+[startup] より前に実行）
+- [x] 4.2 `--rcfile <path>` / `--no-rc` CLI オプション（`2db6885`。conflicts_with、--rcfile 明示時は -c でも読む、欠損は警告して続行）
+- [x] 4.3 `source` ビルトインのスクリプト対応（`d87f80b`。.toml=config reload / それ以外=rc 実行系、ネスト上限8、exit は bash 準拠でシェル終了）
+- [ ] **Checkpoint 4**: 進行中
+  - [x] 実装後 make check 全緑（1045+5+14+6）+ 検証エージェントの実バイナリ E2E pass（rc→alias/complete/ネスト source/失敗行継続/--no-rc 遮断）
+  - [x] 7レンズレビュー+反証検証: 確定19・却下0
+    - critical: FIFO を --rcfile/source すると起動が永久ブロック+サイズ無制限読込 / restart が -c モードの rc 内で「Restarting...」表示後に黙死（main.rs が LoopAction::Exit 固定） / rc/source 行が Black Box 非記録（→意図仕様として文書化する設計判断） / #[serial] 欠落3テスト（rc.rs×2+ai/client×1、系統的 flake の根因）
+    - major: rc ブートストラップの symlink 書き抜け（dangling symlink で exists()=false → write が貫通。zsh-bridge の対策と非対称） / **同一スクリプト内で先に定義した alias が後続行で使えない**（run_rc_line に alias 展開がない） / exit N が偽の失敗行を出す / 分類器バイパスの回帰テストゼロ / 深さ上限の実テストなし ほか
+  - [x] 修正ラウンド完了: Fix A `8a567df`（ガード付きリーダ regular-file+1MiB / symlink 強化）/ Fix B `9a96fd5`（同一スクリプト内 alias 展開・restart の -c 伝播・exit 偽エラー除去・Black Box 非記録の意図文書化）/ Fix C `32d83de`（#[serial]3件・分類器バイパス/深さ境界/no-rc テスト・docs・CLAUDE.md フラグ）+ 検証 pass（報告文字数超過で1回 fail → キャッシュ再開で解決）
+  - [x] **数日来の間欠 flake 根治**（`dfbcaa0`）: 真犯人は rc.rs の新テストが `try_builtin("cd /tmp")` で cwd を放置（grep 不可視、実測で特定）→ #[serial]+tempdir+cwd復元。再現→10連続緑で実証。/tmp のゴミ45個はカナリアとして温存
+  - [x] 最終 make check 全緑（1059+7+29+6 = 1101）※PTY枯渇はユーザーが孤児484件掃除で解消
+  - [x] ドキュメント総点検 pass（`a92de24`）: CLAUDE.md の [startup]/rc.jsh 欠落と reload_config doc コメント陳腐化の2件修正。README EN/JA は377行構造ミラー完全・claims-vs-code 全一致でゼロ修正
+  - [x] 全フェーズ横断 E2E: S1 計画書最終受け入れ（rc.jsh→alias/export/complete静的+動的/ネストsource→全反映）pass / S2 complete 一覧を rc に転写→バイト一致 round-trip pass / S3 テンプレ自動生成・非生成条件・実行可能性 pass / S4 レジストリ+git 共存 pass
+  - [x] **S5 欠陥検出→修正完了**: `jarvish -c` のたびにウォーム zsh デーモンが孤児化（prewarm 背景スレッド vs main.rs 終端 shutdown のレース — shutdown 時点でスロット未挿入→no-op→遅れて spawn。**「デーモン zsh が溜まる」現象の root cause**）+ `cargo test --lib` 1回で孤児 ~56 本（フィクスチャ teardown 欠落）
+    - 修正 `7498b38`（DaemonGate tombstone + -c は prewarm スレッド不起動 + 対話 exit は prewarm 完了を mpsc で有界待ち 2500ms）/ `e198bd4`+`76b46ff`（テスト teardown 3件）/ `6a3dadf`（二重spawn破棄経路も同期 shutdown 化）
+    - 実装中に**第二のレース**も発見修正: tombstone があっても非ブロッキング shutdown の kill スレッドを process::exit が道連れにする経路 → tombstone 検知・二重spawn破棄とも同期 shutdown_blocking に統一。reload 経路（再spawn可）は非対象のまま維持
+  - [x] 修正後の独立検証: make check 全緑（1068+9+29+6 = 1112）/ `jarvish -c` 10連発で孤児 0→0・.daemon_init 残骸 0 / cargo test --lib 前後も孤児増加ゼロ → **Checkpoint 4 クローズ（2026-07-12）**
+  - [ ] develop マージ（ユーザー判断）。保留: make reap-orphans ターゲット追加の提案（S5 根治により新規蓄積は止まるため必要性低下 — ユーザー判断）
