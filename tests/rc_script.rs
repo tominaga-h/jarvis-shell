@@ -556,6 +556,231 @@ fn source_script_with_failing_middle_line_still_runs_later_lines() {
     );
 }
 
+// ── Fix A: --rcfile / source のファイル安全性ガード ─────────────────
+//
+// A1: FIFO・巨大ファイル・ディレクトリを --rcfile / source に渡した場合、
+//     ハング・OOM・分かりにくいエラーにならず、行番号付きの明確なエラーで
+//     即座に継続すること。
+// A2: デフォルト rc.jsh のブートストラップ（ensure_default_rc）が
+//     ダングリングシンボリックリンク・シンボリックリンクされた親ディレクトリを
+//     突破口にした書き込みを拒否すること。
+
+/// (f) `--rcfile` にディレクトリを渡すと "is a directory" エラーを報告し、
+/// `-c` のコマンドは実行を継続すること。
+#[test]
+#[serial]
+fn rcfile_directory_reports_is_a_directory_and_continues() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let dir_as_rcfile = home.join("a_directory");
+    std::fs::create_dir_all(&dir_as_rcfile).unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args([
+            "--rcfile",
+            dir_as_rcfile.to_str().unwrap(),
+            "-c",
+            "echo still-alive",
+        ])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("is a directory"),
+        "a directory passed as --rcfile must be reported as such: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("still-alive"),
+        "the -c command must still run after the rcfile guard rejects the directory: \
+         stdout={stdout}"
+    );
+}
+
+/// (g) `--rcfile` に 1MiB を超えるファイルを渡すと "too large" エラーを
+/// 報告し、`-c` のコマンドは実行を継続すること（OOM ガード）。
+#[test]
+#[serial]
+fn rcfile_oversized_file_reports_too_large_and_continues() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let huge_rc = home.join("huge.jsh");
+    // 1 MiB + 1 バイトのファイル（内容は全てコメント文字で埋める—— パース
+    // されるかどうかの前にサイズガードで弾かれるはずなので内容は無関係）。
+    let oversized = vec![b'#'; 1024 * 1024 + 1];
+    std::fs::write(&huge_rc, &oversized).unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args([
+            "--rcfile",
+            huge_rc.to_str().unwrap(),
+            "-c",
+            "echo still-alive",
+        ])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("too large"),
+        "an oversized --rcfile must be reported as too large: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("still-alive"),
+        "the -c command must still run after the rcfile guard rejects the oversized file: \
+         stdout={stdout}"
+    );
+}
+
+/// (h) `--rcfile` に FIFO（名前付きパイプ）を渡しても、ライタが現れるのを
+/// 待ってハングすることなく、"not a regular file" エラーで即座に継続する
+/// こと（A1 の中核リグレッション: FIFO は決して `open` しない）。
+///
+/// タイムアウトを設けて、万一ハングする実装に戻ってもテストスイート全体を
+/// 止めないようにする。
+#[test]
+#[serial]
+#[cfg(unix)]
+fn rcfile_fifo_does_not_hang_and_reports_not_a_regular_file() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let fifo_path = home.join("a_fifo.jsh");
+    nix::unistd::mkfifo(&fifo_path, nix::sys::stat::Mode::S_IRWXU)
+        .expect("failed to create test FIFO");
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let child = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args([
+            "--rcfile",
+            fifo_path.to_str().unwrap(),
+            "-c",
+            "echo still-alive",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn jarvish");
+
+    // このテストの本来の目的は「ハングしない」ことの証明そのもの ——
+    // 別スレッドで待ちつつタイムアウトを設け、万一リグレッションで
+    // ハングする実装に戻ってもテストスイート全体を止めない。
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let output = child.wait_with_output();
+        let _ = tx.send(output);
+    });
+    let output = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect(
+            "jarvish did not terminate within 10s — a FIFO passed as --rcfile must not \
+             block shell startup (A1 regression)",
+        )
+        .expect("failed to collect child output");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("not a regular file"),
+        "a FIFO passed as --rcfile must be reported as not a regular file: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("still-alive"),
+        "the -c command must still run after the rcfile guard rejects the FIFO: stdout={stdout}"
+    );
+}
+
+/// (i) `source` ビルトインで FIFO を指定しても、ハングせずエラー行を報告し
+/// 後続処理を継続すること（`dispatch_source` → `run_rc_script_sync` →
+/// `read_rc_file_guarded` の経路でも A1 の保護が効くことの確認、`--rcfile`
+/// 経路とは独立に検証する）。
+#[test]
+#[serial]
+#[cfg(unix)]
+fn source_fifo_does_not_hang_and_reports_error_line() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let fifo_path = home.join("sourced_fifo");
+    nix::unistd::mkfifo(&fifo_path, nix::sys::stat::Mode::S_IRWXU)
+        .expect("failed to create test FIFO");
+
+    let rc_path = home.join("rc_sources_fifo.jsh");
+    std::fs::write(
+        &rc_path,
+        format!(
+            "source {}\nalias after_fifo='echo after-fifo-source'\n",
+            fifo_path.display()
+        ),
+    )
+    .unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let child = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args(["--rcfile", rc_path.to_str().unwrap(), "-c", "after_fifo"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn jarvish");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let output = child.wait_with_output();
+        let _ = tx.send(output);
+    });
+    let output = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect(
+            "jarvish did not terminate within 10s — `source`ing a FIFO must not block \
+             the shell (A1 regression)",
+        )
+        .expect("failed to collect child output");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("not a regular file"),
+        "sourcing a FIFO must report a not-a-regular-file error line: stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("rc_sources_fifo.jsh:1"),
+        "the failing `source` line should be reported with its line number: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("after-fifo-source"),
+        "the alias registered after the failing `source` line must still take effect \
+         (continue-on-error): stdout={stdout}"
+    );
+}
+
+// (j)/(k) デフォルト rc.jsh パス（ダングリングシンボリックリンク防御・
+// 既存ファイルのバイト不変性）は `ensure_default_rc` 経由でしか到達
+// しない。この関数は `Shell::run()`（対話モード）からのみ呼ばれ、
+// `run_command`（`-c`）は `rc_options.rcfile.is_some()` の場合のみ
+// rc を読み込む（`ResolvedRc::Explicit` は自動生成しない —— 本ファイル
+// 冒頭のドキュメント参照）ため、`-c` 経由の実バイナリ spawn では
+// `ensure_default_rc` に到達できない。対話モードは reedline が実端末を
+// 要求するためテストランナーから素朴に spawn できない（同上）。
+// したがってこの2ケース（ダングリングシンボリックリンクの拒否・既存
+// ファイルの不変性）は `src/shell/rc.rs` 側の `ensure_default_rc` 直接
+// 呼び出しユニットテスト
+// （`ensure_default_rc_dangling_symlink_is_not_followed`,
+// `ensure_default_rc_refuses_symlinked_parent_dir`,
+// `ensure_default_rc_never_overwrites_existing_file`,
+// `ensure_default_rc_is_idempotent_create_once`）が担う —— 対象関数を
+// `Shell` の構築なしに直接呼べるため、こちらの方が対話モードを模擬する
+// より確実な検証になる。
+
 /// stdin を消費させず即座に落ちないためのヘルパー（将来 PTY 駆動テストを
 /// 足す場合の下地）。現状は未使用だが、対話モードの child プロセスへ
 /// 書き込む際の参考として残す。
