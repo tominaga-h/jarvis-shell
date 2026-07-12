@@ -71,7 +71,12 @@ async fn main() {
         rcfile: args.rcfile,
         no_rc: args.no_rc,
     };
-    let mut shell = shell::Shell::new(logging_ok, session_id, rc_options);
+    // `-c` 指定時（非対話単体実行）は Tab 補完が一切発生しないため、
+    // 起動時のウォーム zsh 補完デーモン事前ウォームアップをスキップする
+    // （S5 修正 — 孤児 `/bin/zsh -i` 対策の1つ目、`Shell::new` のドキュメント
+    // 参照）。
+    let interactive = resolve_interactive(args.command.is_some());
+    let mut shell = shell::Shell::new(logging_ok, session_id, rc_options, interactive);
     let (exit_code, action) = if let Some(ref command) = args.command {
         let exit_code = shell.run_command(command).await;
         // Fix B2: `run()`（対話 REPL）は `restart_requested` を再チェックして
@@ -116,6 +121,17 @@ async fn main() {
     std::process::exit(exit_code);
 }
 
+/// CLI 引数から `Shell::new` へ渡す `interactive` フラグを決める純粋な
+/// 決定関数（S5 修正）。
+///
+/// `has_command` は `args.command.is_some()`（`-c '<command>'` が指定
+/// されたか）。`-c` 指定時は Tab 補完が一切発生しない非対話単体実行のため
+/// `false`（= 起動時のウォーム zsh 補完デーモン事前ウォームアップを
+/// スキップする）を返す。
+fn resolve_interactive(has_command: bool) -> bool {
+    !has_command
+}
+
 /// `-c`（`run_command`）実行後にどの `LoopAction` を選ぶべきかを決める
 /// 純粋な決定関数（Fix B2）。
 ///
@@ -141,6 +157,23 @@ fn resolve_run_command_action(restart_requested: bool) -> engine::LoopAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── resolve_interactive（S5 修正: -c 単体実行時の prewarm スキップ判定）──
+
+    /// `-c` 未指定（対話 REPL 起動）では `interactive == true` を返し、
+    /// 従来どおり起動時の zsh 補完デーモン事前ウォームアップが走ること。
+    #[test]
+    fn resolve_interactive_without_command_is_true() {
+        assert!(resolve_interactive(false));
+    }
+
+    /// `-c '<command>'` 指定（非対話単体実行）では `interactive == false`
+    /// を返し、`Shell::new` が prewarm スレッド自体を起動しないこと
+    /// （S5 の孤児 `/bin/zsh -i` 対策その1）。
+    #[test]
+    fn resolve_interactive_with_command_is_false() {
+        assert!(!resolve_interactive(true));
+    }
 
     // ── resolve_run_command_action（Fix B2 の決定ロジック）──
 
