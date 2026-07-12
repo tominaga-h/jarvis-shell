@@ -11,8 +11,6 @@ use tracing::{debug, info, warn};
 
 use reedline::HistoryItem;
 
-use std::path::PathBuf;
-
 use crate::cli::completer::registry::CompletionRegistry;
 use crate::cli::prompt::starship::CMD_DURATION_NONE;
 
@@ -313,8 +311,7 @@ impl Shell {
                     Ok(p) => p,
                     Err(cmd_result) => return Some(cmd_result),
                 };
-                let path = PathBuf::from(&path_str);
-                self.reload_config(&path)
+                self.dispatch_source(&path_str)
             }
             "cd" => cd::execute(&args, &mut self.dir_stack),
             "cdj" => cdj::execute(&args, &mut self.dir_stack),

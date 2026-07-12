@@ -314,6 +314,16 @@ complete -c mycmd -s v -l verbose -d 'Verbose output'
 complete -c mycmd -a 'start stop restart' -d 'Subcommand'
 ```
 
+#### `source`: 設定の再読み込み、またはスクリプトの実行
+
+`source <path>` はファイルの拡張子で挙動が分岐します:
+
+- **`.toml`**（大文字小文字を区別しない） — `config.toml` を再読み込みし、`[ai]`/`[alias]`/`[export]`/`[prompt]`/`[completion]` をその場で反映します。従来と完全に同一の挙動です: `source ~/.config/jarvish/config.toml` は今までどおり `Loaded ...` サマリーを出力します（上記「設定ファイル」の Tip 参照）。
+- **それ以外の拡張子、または拡張子なし** — ファイルを rc スクリプトとして実行します。実行器は `rc.jsh` 本体と全く同じものを使います: 分類器バイパス、`#` コメント/空行の扱い、行番号付きの `jarvish: <file>:<lineno>: ...` エラー、continue-on-error、`exit`/goodbye の伝播、すべて同一の意味論です。大きな `rc.jsh` を複数ファイルに分割して `source` したり、プロンプトからその場限りのスクリプト（`source ./setup.jsh`）を読み込んだりできます。
+- **ネスト**: source したスクリプトの中からさらに `source` することもできますが、最大深さは 8 です。これを超える（自分自身を source するケースを含む）と、ハングせずに `jarvish: <file>: source nesting too deep` で停止します。
+- **終了コード**: スクリプトとしての `source` は、全行成功なら 0、いずれかの行が失敗していれば 1 を返します。スクリプト自体に `exit`/goodbye 行が含まれていた場合はシェルそのものを終了します。
+- **ファイルが存在しない場合**: `source <path>` の対象が存在しないパスの場合、`jarvish: source: no such file: <path>` を報告し終了コード 1 を返します（`.toml` 側・スクリプト側の両方に共通です）。
+
 ## 🏗️ アーキテクチャ
 
 Jarvish は、高度にモジュール化された4つのコアコンポーネントで構成されています。

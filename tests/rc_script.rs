@@ -332,6 +332,230 @@ fn exit_inside_rcfile_aborts_before_running_dash_c_command() {
     );
 }
 
+// ── Phase 4.3: source ビルトインのスクリプト実行統合 ──
+//
+// `source <path>` は拡張子で分岐する: `.toml`（大文字小文字を区別しない）は
+// 既存の config reload、それ以外（拡張子なし含む）は rc スクリプトとして
+// 実行される（分類器バイパス・行番号付きエラー・continue-on-error・
+// ネスト深さ上限8・exit 伝播は rc.jsh と同一の意味論）。
+
+/// (a) `--rcfile` 経由で読み込んだトップレベルスクリプトが
+/// `source other.jsh` で別のスクリプトをネストして実行し、その中で
+/// 登録された alias が `-c` のコマンドから見えること
+/// （nested script execution のエンドツーエンド確認）。
+#[test]
+#[serial]
+fn source_builtin_runs_nested_script_and_alias_is_visible() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let other_path = home.join("other.jsh");
+    std::fs::write(
+        &other_path,
+        "alias nested_greet='echo hello-from-nested-script'\n",
+    )
+    .unwrap();
+
+    let rc_path = home.join("top_rc.jsh");
+    std::fs::write(&rc_path, format!("source {}\n", other_path.display())).unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args(["--rcfile", rc_path.to_str().unwrap(), "-c", "nested_greet"])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("hello-from-nested-script"),
+        "alias registered by the nested `source`d script should be usable from -c: stdout={stdout}"
+    );
+}
+
+/// (b) 自己 source（`self_source.jsh` が自分自身を `source` する）は
+/// 無限ループに陥らず、ネスト深さ上限（8）に達した時点で
+/// "source nesting too deep" エラーを出して速やかに停止すること。
+/// プロセスがハングしないことを `wait_timeout` 相当の実装
+/// （出力取得付き spawn + 明示的な待機）で保証する。
+#[test]
+#[serial]
+fn self_sourcing_script_terminates_quickly_with_depth_error() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let script_path = home.join("self_source.jsh");
+    // 自分自身を source する1行だけのスクリプト。
+    std::fs::write(&script_path, format!("source {}\n", script_path.display())).unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let child = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args([
+            "--rcfile",
+            script_path.to_str().unwrap(),
+            "-c",
+            "echo after-self-source",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn jarvish");
+
+    // ハングした場合にテストスイート全体を止めないよう、別スレッドで
+    // 待機しつつタイムアウトを設ける。
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let output = child.wait_with_output();
+        let _ = tx.send(output);
+    });
+    let output = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("jarvish did not terminate within 30s — self-sourcing must not hang")
+        .expect("failed to collect child output");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("source nesting too deep"),
+        "self-sourcing must be stopped with a nesting-too-deep error: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("after-self-source"),
+        "the -c command must still run after the nested source chain is cut off: stdout={stdout}"
+    );
+}
+
+/// (c) `source <path>.toml`（大文字小文字を問わず）は従来どおり
+/// config.toml の再読み込みパスを通り、"Loaded ..." サマリーが出力される
+/// こと（Phase 4.3 で拡張子ディスパッチを追加した後も .toml の挙動が
+/// 変わっていないことの確認）。
+#[test]
+#[serial]
+fn source_toml_extension_still_reloads_config() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let config_dir = home.join(".config/jarvish");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_path = config_dir.join("custom_config.TOML");
+    std::fs::write(
+        &config_path,
+        "[alias]\nfromtoml = \"echo from-toml-reload\"\n",
+    )
+    .unwrap();
+
+    let rc_path = home.join("rc_sources_toml.jsh");
+    std::fs::write(&rc_path, format!("source {}\n", config_path.display())).unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args(["--rcfile", rc_path.to_str().unwrap(), "-c", "fromtoml"])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Loaded"),
+        "a .toml source (even uppercase extension) must go through the config-reload \
+         summary path: stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("from-toml-reload"),
+        "the alias defined in the reloaded .toml must be usable from -c: stdout={stdout}"
+    );
+}
+
+/// (d) 存在しないファイルを `source` すると exit code 1 になり、
+/// "no such file" を含むエラーが stderr に出ること。
+#[test]
+#[serial]
+fn source_missing_file_errors_with_no_such_file() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let missing = home.join("does-not-exist.jsh");
+    assert!(!missing.exists());
+
+    let rc_path = home.join("rc_sources_missing.jsh");
+    std::fs::write(&rc_path, format!("source {}\n", missing.display())).unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args(["--rcfile", rc_path.to_str().unwrap(), "-c", "true"])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no such file"),
+        "sourcing a missing file must report \"no such file\": stderr={stderr}"
+    );
+    // rc.jsh の continue-on-error により、このエラー行の後で
+    // "command exited with status 1" のサマリーも rc_sources_missing.jsh
+    // 側から報告される（source 自体が exit code 1 を返すため）。
+    assert!(
+        stderr.contains("rc_sources_missing.jsh:1"),
+        "the failing `source` line inside the rc script should be reported with its \
+         line number: stderr={stderr}"
+    );
+}
+
+/// (e) スクリプトの途中行が失敗しても、そのスクリプトを `source` した
+/// 側でも後続行が実行されること（ネストした source 経由の
+/// continue-on-error を、通常の rc.jsh 直接実行とは別に確認する）。
+#[test]
+#[serial]
+fn source_script_with_failing_middle_line_still_runs_later_lines() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let inner_path = home.join("inner_with_bad_line.jsh");
+    std::fs::write(
+        &inner_path,
+        "alias before_bad='echo before-bad-line'\n\
+         this_command_does_not_exist_zzz\n\
+         alias after_bad='echo after-bad-line-in-nested-script'\n",
+    )
+    .unwrap();
+
+    let rc_path = home.join("outer_rc.jsh");
+    std::fs::write(&rc_path, format!("source {}\n", inner_path.display())).unwrap();
+
+    // `-c` の本体は改行区切りで複数コマンドを実行できる（`Shell::run_command`
+    // が `command.lines()` でループする）。`;` はこのシェルではコマンド区切り
+    // として解釈されない（外部コマンドへの1トークンとして渡ってしまう）ため、
+    // 改行区切りを使う。
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args([
+            "--rcfile",
+            rc_path.to_str().unwrap(),
+            "-c",
+            "before_bad\nafter_bad",
+        ])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("before-bad-line"),
+        "the alias registered before the failing line must take effect: stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("after-bad-line-in-nested-script"),
+        "the alias registered after the failing line inside the nested script must \
+         still take effect (continue-on-error survives across the source boundary): \
+         stdout={stdout}"
+    );
+    assert!(
+        stderr.contains("inner_with_bad_line.jsh:2"),
+        "the failing line inside the nested script should be reported with the \
+         nested script's own display name and line number: stderr={stderr}"
+    );
+}
+
 /// stdin を消費させず即座に落ちないためのヘルパー（将来 PTY 駆動テストを
 /// 足す場合の下地）。現状は未使用だが、対話モードの child プロセスへ
 /// 書き込む際の参考として残す。

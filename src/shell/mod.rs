@@ -87,6 +87,12 @@ pub struct Shell {
     /// `--rcfile` / `--no-rc` CLI オプション（Phase 4.2）。rc.jsh の
     /// 読み込みを `run()` / `run_command()` の両方から解決するために保持する。
     rc_options: RcOptions,
+    /// 現在実行中の rc/source スクリプトのネスト深さ（Phase 4.3）。
+    /// トップレベルの rc スクリプト実行では 0。`source <script>` 行が
+    /// `try_shell_builtins` 経由で再帰的にスクリプトを実行するたびに
+    /// `run_rc_script_sync` が加算・復元する。`MAX_SOURCE_DEPTH` を
+    /// 超えるネストを検出して無限ループ（自己 source 等）を防ぐために使う。
+    source_depth: usize,
 }
 
 impl Shell {
@@ -217,6 +223,7 @@ impl Shell {
             restart_requested: Arc::new(AtomicBool::new(false)),
             startup_commands: config.startup.commands,
             rc_options,
+            source_depth: 0,
         }
     }
 

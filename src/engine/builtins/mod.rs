@@ -39,7 +39,10 @@ pub(crate) const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("pushd", "Push directory onto stack and change to it"),
     ("pwd", "Print the current working directory (alias of cwd)"),
     ("restart", "Restart the shell process"),
-    ("source", "Load a configuration file (TOML)"),
+    (
+        "source",
+        "Reload a config file (.toml) or run a script (rc-style, any other extension)",
+    ),
     ("type", "Display information about command type"),
     ("unalias", "Remove aliases"),
     ("unset", "Remove environment variables"),

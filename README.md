@@ -314,6 +314,16 @@ complete -c mycmd -s v -l verbose -d 'Verbose output'
 complete -c mycmd -a 'start stop restart' -d 'Subcommand'
 ```
 
+#### `source`: reload config, or run a script
+
+`source <path>` dispatches on the file's extension:
+
+- **`.toml`** (case-insensitive) — reloads `config.toml` and re-applies `[ai]`/`[alias]`/`[export]`/`[prompt]`/`[completion]` in place, exactly as before. This is unchanged: `source ~/.config/jarvish/config.toml` still prints the familiar `Loaded ...` summary (see the Tip in "Configuration File" above).
+- **any other extension, or none** — runs the file as an rc-style script, using the exact same executor as `rc.jsh` itself: classifier bypass, `#`-comment/blank-line handling, line-numbered `jarvish: <file>:<lineno>: ...` errors, continue-on-error, and `exit`/goodbye propagation all apply identically. This lets you factor a large `rc.jsh` into smaller files and `source` them, or load an ad-hoc script from the prompt (`source ./setup.jsh`).
+- **Nesting**: a sourced script can itself `source` another script, up to a maximum depth of 8. Exceeding it (including a script that sources itself) stops with `jarvish: <file>: source nesting too deep` instead of hanging.
+- **Exit code**: a scripted `source` returns 0 if every line succeeded, 1 if any line failed, or exits the shell if the script itself contained an `exit`/goodbye line.
+- **Missing file**: `source <path>` on a path that doesn't exist reports `jarvish: source: no such file: <path>` and exits 1 (this applies to both the `.toml` and script branches).
+
 ## 🏗️ Architecture
 
 Jarvish is composed of four highly modular core components:

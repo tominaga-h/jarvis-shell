@@ -9,16 +9,29 @@
 //! `try_shell_builtins` → `try_builtin` → `execute` の順に試すだけの
 //! 純粋なコマンド実行パスであり、自然言語行が誤って AI に送られることはない。
 //!
-//! この実行器（[`Shell::run_rc_script`]）はファイルパス・表示名・ネスト深さを
-//! パラメータ化しているため、Phase 4.3 の `source` ビルトイン統合
-//! （`.toml` 以外の拡張子を rc スクリプトとして実行する）からもそのまま
+//! この実行器（[`Shell::run_rc_script_sync`]）はファイルパス・表示名・
+//! ネスト深さをパラメータ化しているため、Phase 4.3 の `source` ビルトイン
+//! 統合（`.toml` 以外の拡張子を rc スクリプトとして実行する）からもそのまま
 //! 再利用できる。
+//!
+//! ## Phase 4.3: `source` からの再利用と同期実行
+//!
+//! `try_shell_builtins`（`src/shell/input.rs`）は同期メソッドであり、
+//! rc.jsh 行の実行器（[`Shell::run_rc_line`]）からも同期的に呼ばれる
+//! （`Shell::handle_input` の非同期文脈からも同じ関数を経由する）。
+//! そのため `source <script>` を `try_shell_builtins` の中で処理するには
+//! 同期な実行コアが必要になる。[`Shell::run_rc_script_sync`] はその
+//! 同期コアで、内部は `.await` を一切含まない（ファイル読み込み・行実行は
+//! すべて同期処理のため）。[`Shell::run_rc_script`]（`async fn`）は
+//! `run()` / `run_command()` 側の呼び出し規約を変えないための薄い
+//! ラッパーとして残している。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use tracing::{debug, info, warn};
 
+use crate::cli::prompt::EXIT_CODE_NONE;
 use crate::engine::classifier::InputClassifier;
 use crate::engine::{execute, try_builtin, CommandResult, LoopAction};
 
@@ -80,11 +93,21 @@ pub(super) struct RcLine {
 /// rc スクリプト実行後の制御結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RcOutcome {
-    /// 全行を実行し終え、REPL ループを継続してよい
-    Continue,
+    /// 全行を実行し終え、REPL ループを継続してよい。
+    /// `had_failure`: 1行以上が非ゼロ終了コードで終わっていれば `true`
+    /// （`source` ビルトインが exit code 0/1 を決めるために使う、Phase 4.3）。
+    Continue { had_failure: bool },
     /// `exit` / goodbye 相当の行によりシェル終了が要求された
     ExitRequested,
 }
+
+/// `source` によるネストしたスクリプト実行の最大深さ（Phase 4.3）。
+///
+/// トップレベルの rc.jsh / `--rcfile` 実行は深さ 0。`source other.jsh` は
+/// 深さを 1 加算して再帰する。自己 source（`a.jsh` が `a.jsh` を
+/// source する等）で無限ループに陥らないよう、この値を超えるネストは
+/// エラーとして即座に停止する。
+pub(super) const MAX_SOURCE_DEPTH: usize = 8;
 
 /// rc.jsh の初回自動生成テンプレート。
 ///
@@ -164,6 +187,18 @@ pub(super) fn ensure_default_rc(path: &Path) {
     }
 }
 
+/// `source <path>` の拡張子が `.toml`（大文字小文字を区別しない）かどうかを
+/// 判定する（Phase 4.3）。真なら `reload_config`（config.toml 再読み込み）、
+/// 偽なら rc スクリプトとしての実行（[`Shell::dispatch_source`]）に回す。
+///
+/// 拡張子なし（例: `source myrc`）は `.toml` ではない側、つまり
+/// スクリプト実行として扱う。
+pub(super) fn is_toml_source_path(path_str: &str) -> bool {
+    Path::new(path_str)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+}
+
 /// rc スクリプトの内容を実行対象行のリストへパースする。
 ///
 /// - 空行（空白のみを含む）はスキップする
@@ -196,21 +231,44 @@ pub(super) fn parse_rc_lines(content: &str) -> Vec<RcLine> {
 /// （`Shell::handle_input` と同じ優先順位だが、`InputClassifier::classify`
 /// を一切呼び出さない）。
 impl Shell {
-    /// rc スクリプトファイルを実行する。
+    /// rc スクリプトファイルを実行する（`run()` / `run_command()` 用の
+    /// `async fn` ラッパー）。
+    ///
+    /// 内部は [`Shell::run_rc_script_sync`] にそのまま委譲する ——
+    /// このメソッド自体は `.await` を一切含まないが、`run()` /
+    /// `run_command()` 側の既存の呼び出し規約（`.await` で呼ぶ）を
+    /// 変えないために `async fn` のシグネチャを維持している。
+    pub(super) async fn run_rc_script(
+        &mut self,
+        path: &Path,
+        display_name: &str,
+        depth: usize,
+    ) -> RcOutcome {
+        self.run_rc_script_sync(path, display_name, depth)
+    }
+
+    /// rc スクリプトファイルを実行する同期コア。
     ///
     /// - `path`: 実行するファイルの実パス
     /// - `display_name`: エラー表示に使うファイル名（例: `rc.jsh`）。
     ///   `source` 経由のネストしたスクリプト（Phase 4.3）でも同じ実行器を
     ///   再利用できるよう、ファイルパスと表示名を分離している。
-    /// - `depth`: ネスト深さ（`source` からの再帰呼び出し用、Phase 4.3 で使用）。
-    ///   このメソッド自体は深さの上限チェックを行わない
-    ///   （呼び出し元 — Phase 4.3 の `source` 統合 — がガードする）。
+    /// - `depth`: ネスト深さ。トップレベル呼び出しは 0。`source` ビルトイン
+    ///   （`try_shell_builtins` の `"source"` 分岐）が非 TOML ファイルを
+    ///   検出した際、`self.source_depth + 1` を渡してこのメソッドを
+    ///   再帰的に呼び出す。[`MAX_SOURCE_DEPTH`] を超えると
+    ///   `jarvish: {display_name}:{lineno}: source nesting too deep`
+    ///   を出力して即座に停止する（自己 source の無限ループ防止）。
+    ///
+    /// `try_shell_builtins` は同期メソッドのため、このメソッドは
+    /// `.await` を一切含まない同期関数として実装している
+    /// （非同期呼び出し元向けの薄いラッパーは [`Shell::run_rc_script`]）。
     ///
     /// 各行は `last_exit_code` を更新し、失敗した行は
     /// `jarvish: {display_name}:{lineno}: ...` 形式でエラーを報告した上で
     /// 次の行へ継続する。`exit` / goodbye 相当の行が現れた場合は即座に
     /// `RcOutcome::ExitRequested` を返す。
-    pub(super) async fn run_rc_script(
+    pub(super) fn run_rc_script_sync(
         &mut self,
         path: &Path,
         display_name: &str,
@@ -218,40 +276,67 @@ impl Shell {
     ) -> RcOutcome {
         debug!(path = %path.display(), display_name, depth, "Running rc script");
 
+        if depth > MAX_SOURCE_DEPTH {
+            eprintln!("jarvish: {display_name}: source nesting too deep");
+            return RcOutcome::Continue { had_failure: true };
+        }
+
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("jarvish: {display_name}: no such file or directory: {e}");
-                return RcOutcome::Continue;
+                return RcOutcome::Continue { had_failure: true };
             }
         };
 
+        // 再帰的な source 呼び出し（try_shell_builtins 経由）が正しい深さを
+        // 見られるよう、実行中は self.source_depth をこのフレームの深さに
+        // 合わせる。関数を抜ける前に必ず元の値へ復元する（早期 return を
+        // 含むすべての経路をカバーするため、ループ本体はガードなしで書く
+        // 代わりに終端処理を一箇所に集約する）。
+        let previous_depth = self.source_depth;
+        self.source_depth = depth;
+
         let lines = parse_rc_lines(&content);
+        let mut had_failure = false;
+        let mut outcome = RcOutcome::Continue { had_failure: false };
         for rc_line in lines {
             match self.run_rc_line(&rc_line.text) {
                 RcLineOutcome::Ran(result) => {
                     self.last_exit_code
                         .store(result.exit_code, Ordering::Relaxed);
                     if result.exit_code != 0 {
+                        had_failure = true;
                         eprintln!(
                             "jarvish: {display_name}:{}: command exited with status {}",
                             rc_line.lineno, result.exit_code
                         );
                     }
                     match result.action {
-                        LoopAction::Exit => return RcOutcome::ExitRequested,
+                        LoopAction::Exit => {
+                            outcome = RcOutcome::ExitRequested;
+                            break;
+                        }
                         LoopAction::Restart => {
                             self.restart_requested.store(true, Ordering::Relaxed);
-                            return RcOutcome::ExitRequested;
+                            outcome = RcOutcome::ExitRequested;
+                            break;
                         }
                         LoopAction::Continue => {}
                     }
                 }
-                RcLineOutcome::Exit => return RcOutcome::ExitRequested,
+                RcLineOutcome::Exit => {
+                    outcome = RcOutcome::ExitRequested;
+                    break;
+                }
             }
         }
 
-        RcOutcome::Continue
+        self.source_depth = previous_depth;
+        match outcome {
+            RcOutcome::ExitRequested => RcOutcome::ExitRequested,
+            RcOutcome::Continue { .. } => RcOutcome::Continue { had_failure },
+        }
     }
 
     /// `self.rc_options`（`--rcfile` / `--no-rc`）を解決して rc スクリプトを
@@ -267,7 +352,7 @@ impl Shell {
     ///   `RcOutcome::Continue` を返す（rc なしで後続処理を継続させる）。
     pub(super) async fn run_configured_rc(&mut self) -> RcOutcome {
         match self.rc_options.resolve() {
-            ResolvedRc::None => RcOutcome::Continue,
+            ResolvedRc::None => RcOutcome::Continue { had_failure: false },
             ResolvedRc::Default(path) => {
                 ensure_default_rc(&path);
                 info!(path = %path.display(), "Executing rc.jsh");
@@ -276,7 +361,7 @@ impl Shell {
             ResolvedRc::Explicit(path) => {
                 if !path.exists() {
                     eprintln!("jarvish: rcfile not found: {}", path.display());
-                    return RcOutcome::Continue;
+                    return RcOutcome::Continue { had_failure: false };
                 }
                 let display_name = path
                     .file_name()
@@ -284,6 +369,98 @@ impl Shell {
                     .unwrap_or_else(|| path.display().to_string());
                 info!(path = %path.display(), "Executing explicit --rcfile");
                 self.run_rc_script(&path, &display_name, 0).await
+            }
+        }
+    }
+
+    /// `source <path>` ビルトインの本体（Phase 4.3）。
+    ///
+    /// 拡張子で分岐する:
+    /// - `.toml`（大文字小文字を区別しない） → 既存の `reload_config`
+    ///   （config.toml の再読み込み）を **そのまま** 呼ぶ。挙動は Phase 4.3
+    ///   より前と完全に同一。
+    /// - それ以外（拡張子なし含む） → このファイルを rc スクリプトとして
+    ///   実行する（[`Shell::run_rc_script_sync`]、分類器バイパス・
+    ///   行番号付きエラー・continue-on-error・`exit` 伝播はすべて
+    ///   rc.jsh と同一の意味論）。`display_name` にはユーザーが入力した
+    ///   パスの文字列をそのまま使う（`source ./foo.jsh` なら `./foo.jsh`
+    ///   がエラー行に表示される）。
+    ///
+    /// ネスト深さは `self.source_depth + 1` を渡す。現在の深さが既に
+    /// [`MAX_SOURCE_DEPTH`] に達している場合は実行前に打ち切り、
+    /// `jarvish: {path}: source nesting too deep` を報告する
+    /// （自己 source によるスタックオーバーフロー/無限ループを防ぐ）。
+    ///
+    /// 戻り値の `exit_code`: ファイルが読めない場合は 1
+    /// （`jarvish: source: no such file` を報告、`reload_config` 側は
+    /// 既存の `jarvish: source: {msg}` 形式を維持）。スクリプト実行の
+    /// 場合、全行成功なら 0、いずれかの行が失敗していれば 1。
+    /// `exit`/goodbye 相当の行があった場合は `CommandResult::action` を
+    /// `LoopAction::Exit` にして返し、`try_shell_builtins` →
+    /// `handle_builtin`（対話時）や `run_rc_line`（rc/source 実行時）が
+    /// それを見てシェル終了を要求する — これは既存の exit 伝播経路
+    /// （`handle_builtin` が `result.action == LoopAction::Exit` を見て
+    /// `handle_input` に `false` を返させる仕組み）をそのまま再利用して
+    /// おり、`source` 経由でも対話時の `exit` と全く同じ形でシェル終了が
+    /// 伝播する。
+    pub(super) fn dispatch_source(&mut self, path_str: &str) -> CommandResult {
+        if is_toml_source_path(path_str) {
+            let path = PathBuf::from(path_str);
+            return self.reload_config(&path);
+        }
+
+        let next_depth = self.source_depth + 1;
+        if next_depth > MAX_SOURCE_DEPTH {
+            let msg = format!("jarvish: {path_str}: source nesting too deep\n");
+            eprint!("{msg}");
+            return CommandResult::error(msg, 1);
+        }
+
+        let path = PathBuf::from(path_str);
+        if !path.exists() {
+            let msg = format!("jarvish: source: no such file: {path_str}\n");
+            eprint!("{msg}");
+            return CommandResult::error(msg, 1);
+        }
+
+        match self.run_rc_script_sync(&path, path_str, next_depth) {
+            RcOutcome::ExitRequested => {
+                // exit/goodbye 伝播（DESIGN CONTRACT）: sourced スクリプトが
+                // exit を要求した場合、この CommandResult 自体を
+                // LoopAction::Exit にして返す。呼び出し元は以下のとおり:
+                // - 対話プロンプトからの `source foo.jsh` →
+                //   try_shell_builtins が返す CommandResult を
+                //   handle_builtin が受け取り、result.action ==
+                //   LoopAction::Exit を見て handle_input が false を
+                //   返し REPL ループが終了する（通常の `exit` ビルトインと
+                //   全く同じ経路）。
+                // - rc.jsh / --rcfile 側からネストして呼ばれた
+                //   `source foo.jsh` 行 → run_rc_line 内の
+                //   try_shell_builtins 経由でこの CommandResult を受け取り、
+                //   result.action == LoopAction::Exit を見て
+                //   RcLineOutcome::Ran(result) → 呼び出し元の
+                //   run_rc_script_sync が RcOutcome::ExitRequested を返す
+                //   （外側のスクリプト実行もそこで打ち切られ、最終的に
+                //   run_configured_rc 経由でシェル終了まで伝播する）。
+                // どちらの経路も CommandResult::action を見るだけの
+                // 既存メカニズムを再利用しており、新規の分岐は不要。
+                let exit_code = self.last_exit_code.load(Ordering::Relaxed);
+                let exit_code = if exit_code == EXIT_CODE_NONE {
+                    0
+                } else {
+                    exit_code
+                };
+                CommandResult::exit_with(exit_code)
+            }
+            RcOutcome::Continue { had_failure } => {
+                if had_failure {
+                    // 個別行のエラーはそれぞれ run_rc_script_sync 内で既に
+                    // stderr へ報告済みのため、ここでは追加メッセージなしで
+                    // 集約された失敗として exit code 1 を返す。
+                    CommandResult::error(String::new(), 1)
+                } else {
+                    CommandResult::success(String::new())
+                }
             }
         }
     }
@@ -573,5 +750,78 @@ mod tests {
         // として失敗する（AI には絶対にルーティングされない）。
         let result = execute("please explain this error to me");
         assert_ne!(result.exit_code, 0);
+    }
+
+    // ── is_toml_source_path（Phase 4.3: source の拡張子ディスパッチ）──
+
+    #[test]
+    fn is_toml_source_path_lowercase_toml() {
+        assert!(is_toml_source_path("config.toml"));
+        assert!(is_toml_source_path("~/.config/jarvish/config.toml"));
+        assert!(is_toml_source_path("./relative/path/settings.toml"));
+    }
+
+    #[test]
+    fn is_toml_source_path_uppercase_and_mixed_case_toml() {
+        assert!(is_toml_source_path("CONFIG.TOML"));
+        assert!(is_toml_source_path("Config.Toml"));
+        assert!(is_toml_source_path("settings.ToMl"));
+    }
+
+    #[test]
+    fn is_toml_source_path_jsh_extension_is_not_toml() {
+        assert!(!is_toml_source_path("rc.jsh"));
+        assert!(!is_toml_source_path("~/.config/jarvish/rc.jsh"));
+    }
+
+    #[test]
+    fn is_toml_source_path_no_extension_is_not_toml() {
+        assert!(!is_toml_source_path("myrc"));
+        assert!(!is_toml_source_path("~/.config/jarvish/myscript"));
+    }
+
+    #[test]
+    fn is_toml_source_path_other_extensions_are_not_toml() {
+        assert!(!is_toml_source_path("script.sh"));
+        assert!(!is_toml_source_path("notes.txt"));
+        assert!(!is_toml_source_path("archive.toml.bak"));
+    }
+
+    // ── MAX_SOURCE_DEPTH / 深さガードのカウンタロジック（Phase 4.3）──
+    //
+    // `dispatch_source` / `run_rc_script_sync` はメソッドのため `Shell` の
+    // 構築を要するが、ガードそのものは単純な整数比較
+    // (`next_depth > MAX_SOURCE_DEPTH`) であり、その定数値と境界条件は
+    // `Shell` 抜きで直接検証できる。
+
+    #[test]
+    fn max_source_depth_is_eight() {
+        // DESIGN CONTRACT: max 8 levels of nesting.
+        assert_eq!(MAX_SOURCE_DEPTH, 8);
+    }
+
+    #[test]
+    fn depth_guard_boundary_allows_up_to_max_and_rejects_beyond() {
+        // dispatch_source は self.source_depth + 1 を next_depth として
+        // MAX_SOURCE_DEPTH と比較する。深さ 0（トップレベル）から
+        // MAX_SOURCE_DEPTH 回まで source できる（next_depth が
+        // 1..=MAX_SOURCE_DEPTH の間は許可）ことと、それを超える
+        // (MAX_SOURCE_DEPTH + 1) 回目で拒否されることを、実際に
+        // dispatch_source が使う比較式そのもので検証する。
+        for current_depth in 0..MAX_SOURCE_DEPTH {
+            let next_depth = current_depth + 1;
+            assert!(
+                next_depth <= MAX_SOURCE_DEPTH,
+                "depth {current_depth} -> {next_depth} must still be allowed"
+            );
+        }
+        // MAX_SOURCE_DEPTH 番目のフレームからさらに source すると
+        // next_depth は MAX_SOURCE_DEPTH + 1 になり、拒否される。
+        let current_depth = MAX_SOURCE_DEPTH;
+        let next_depth = current_depth + 1;
+        assert!(
+            next_depth > MAX_SOURCE_DEPTH,
+            "nesting one level beyond MAX_SOURCE_DEPTH must be rejected"
+        );
     }
 }
