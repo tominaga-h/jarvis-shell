@@ -352,14 +352,25 @@ fn natural_language_line_in_rcfile_is_run_as_command_not_routed_to_ai() {
         "the failing line should be reported with the file:lineno prefix and exit code 127: \
          stderr={stderr}"
     );
-    // AI には一切送信されていないことの追加確認: AI 呼び出し特有の文言
-    // （投機的だが `investigate` / OpenAI エラーメッセージ等）が出力に
-    // 混入していないこと。
-    assert!(
-        !stderr.contains("OPENAI_API_KEY") && !stdout.contains("OPENAI_API_KEY"),
-        "no AI/API-key related error should appear — the line must never reach the AI client: \
-         stdout={stdout} stderr={stderr}"
-    );
+    // AI には一切送信されていないことの追加確認: AI クライアントが実際に
+    // 呼び出された場合に特有の文言（API リクエスト失敗・`investigate` 応答
+    // 等）が出力に混入していないこと。
+    //
+    // 注意: `OPENAI_API_KEY` という文字列そのものは「AI 呼び出しの証拠」に
+    // ならない。API キーを unset した状態で jarvish を起動すると、AI 経路に
+    // 迷い込んだかどうかとは無関係に、起動時に必ず
+    // `jarvish: warning: AI disabled: OPENAI_API_KEY is not set.` という
+    // 警告が stderr に出るためである（CI のクリーン環境で顕在化）。
+    // したがって単純な substring 一致ではなく、「AI がキー欠如を理由に
+    // *呼び出しに失敗した* こと」を示す文言のみを検査対象とする。
+    let ai_invocation_markers = ["AI request failed", "API request", "investigate", "OpenAI"];
+    for marker in ai_invocation_markers {
+        assert!(
+            !stdout.contains(marker) && !stderr.contains(marker),
+            "no AI-invocation evidence ({marker:?}) should appear — the line must never reach \
+             the AI client: stdout={stdout} stderr={stderr}"
+        );
+    }
     // continue-on-error により、NL 行の後のエイリアス定義は生きている。
     assert!(
         stdout.contains("after-nl-line-still-works"),
