@@ -87,6 +87,58 @@ impl RcOptions {
     }
 }
 
+/// [`Shell::run_configured_rc`] が実際に行うべきことを表す純粋な計画
+/// （`Shell` を一切参照しない、`ResolvedRc` から直接導出できる決定）。
+///
+/// `run_configured_rc` 自体はスクリプトの実行に `&mut Shell` を要するため
+/// `Shell` 抜きでは呼べないが、「そもそも実行が必要か・自動生成が必要か」
+/// の分岐判断そのものは `ResolvedRc` の値だけから決まる純粋なロジックで
+/// あり、ここへ切り出すことで `Shell` を構築せずにテストできる
+/// （`--no-rc` によるブートストラップ抑制の対話コードパスの回帰防止、
+/// Fix C4）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum RcBootstrapPlan {
+    /// 何もしない —— テンプレート自動生成も含め、rc スクリプトには一切
+    /// 触れない（`--no-rc` 指定時）。
+    Skip,
+    /// このパスに対して [`ensure_default_rc`] を呼んでから実行する
+    /// （デフォルトパス、初回起動時のテンプレート自動生成込み）。
+    BootstrapAndRun {
+        path: PathBuf,
+        display_name: &'static str,
+    },
+    /// このパスをそのまま実行する。自動生成は行わない
+    /// （`--rcfile` で明示指定されたパスが存在する場合）。
+    RunExplicit { path: PathBuf, display_name: String },
+    /// 明示 `--rcfile` パスが存在しない —— 警告のみで実行はしない。
+    ExplicitMissing { path: PathBuf },
+}
+
+/// [`ResolvedRc`] と実際のファイル存在確認（`--rcfile` のみ）から
+/// [`RcBootstrapPlan`] を導出する。
+///
+/// `Shell` を一切必要としない純粋関数 —— `run_configured_rc` はこの結果を
+/// そのまま実行に落とし込むだけの薄いラッパーになる。
+pub(super) fn plan_rc_bootstrap(resolved: ResolvedRc) -> RcBootstrapPlan {
+    match resolved {
+        ResolvedRc::None => RcBootstrapPlan::Skip,
+        ResolvedRc::Default(path) => RcBootstrapPlan::BootstrapAndRun {
+            path,
+            display_name: "rc.jsh",
+        },
+        ResolvedRc::Explicit(path) => {
+            if !path.exists() {
+                return RcBootstrapPlan::ExplicitMissing { path };
+            }
+            let display_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            RcBootstrapPlan::RunExplicit { path, display_name }
+        }
+    }
+}
+
 /// rc スクリプト中の実行対象1行（コメント・空行を除去済み）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RcLine {
@@ -550,24 +602,20 @@ impl Shell {
     ///   `jarvish: rcfile not found: {path}` を stderr に出して
     ///   `RcOutcome::Continue` を返す（rc なしで後続処理を継続させる）。
     pub(super) async fn run_configured_rc(&mut self) -> RcOutcome {
-        match self.rc_options.resolve() {
-            ResolvedRc::None => RcOutcome::Continue { had_failure: false },
-            ResolvedRc::Default(path) => {
+        match plan_rc_bootstrap(self.rc_options.resolve()) {
+            RcBootstrapPlan::Skip => RcOutcome::Continue { had_failure: false },
+            RcBootstrapPlan::BootstrapAndRun { path, display_name } => {
                 ensure_default_rc(&path);
                 info!(path = %path.display(), "Executing rc.jsh");
-                self.run_rc_script(&path, "rc.jsh", 0).await
+                self.run_rc_script(&path, display_name, 0).await
             }
-            ResolvedRc::Explicit(path) => {
-                if !path.exists() {
-                    eprintln!("jarvish: rcfile not found: {}", path.display());
-                    return RcOutcome::Continue { had_failure: false };
-                }
-                let display_name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
+            RcBootstrapPlan::RunExplicit { path, display_name } => {
                 info!(path = %path.display(), "Executing explicit --rcfile");
                 self.run_rc_script(&path, &display_name, 0).await
+            }
+            RcBootstrapPlan::ExplicitMissing { path } => {
+                eprintln!("jarvish: rcfile not found: {}", path.display());
+                RcOutcome::Continue { had_failure: false }
             }
         }
     }
@@ -754,6 +802,7 @@ enum RcLineOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // ── parse_rc_lines ──
 
@@ -853,6 +902,7 @@ mod tests {
     // ── rc_path ──
 
     #[test]
+    #[serial]
     fn rc_path_uses_home_env_var() {
         let original = std::env::var("HOME").ok();
         unsafe {
@@ -906,6 +956,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn resolve_default_when_both_unset() {
         let original = std::env::var("HOME").ok();
         unsafe {
@@ -925,6 +976,103 @@ mod tests {
                 None => std::env::remove_var("HOME"),
             }
         }
+    }
+
+    // ── plan_rc_bootstrap（Fix C4: --no-rc の対話コードパス回帰防止）──
+    //
+    // `Shell::run_configured_rc`（対話 `run()` / `-c` の両方から呼ばれる、
+    // rc.jsh 起動のエントリポイント）は `plan_rc_bootstrap` の結果を
+    // そのまま実行に落とし込むだけの薄いラッパーである。ここでは
+    // `Shell` を一切構築せず、`run_configured_rc` が内部で実際に評価する
+    // のと同じ分岐ロジックを直接検証する。
+
+    #[test]
+    fn plan_rc_bootstrap_no_rc_skips_without_touching_filesystem() {
+        // --no-rc（ResolvedRc::None）が Skip を計画し、ensure_default_rc も
+        // run_rc_script も一切呼ばれない（呼ばれないことは、この関数の
+        // 戻り値が Skip であること自体で保証される —— run_configured_rc の
+        // match 実装上、Skip 以外の枝でしか ensure_default_rc/run_rc_script
+        // は呼ばれない）ことを確認する。
+        let plan = plan_rc_bootstrap(ResolvedRc::None);
+        assert_eq!(plan, RcBootstrapPlan::Skip);
+    }
+
+    #[test]
+    fn plan_rc_bootstrap_no_rc_skip_implies_no_bootstrap_side_effect() {
+        // Skip 計画を実際に「テンプレート自動生成をしない」という副作用の
+        // 不在として証明する: Skip 分岐では ensure_default_rc を呼ぶコードが
+        // 存在しない一方、対比としてデフォルトパスの計画
+        // (BootstrapAndRun) では常にその呼び出しに至ることを、実際に
+        // ensure_default_rc を呼んでファイルシステムへ観測可能な副作用が
+        // 出ることで示す（Skip 側は同じ隔離ディレクトリに何も作らない）。
+        let tmpdir = tempfile::tempdir().unwrap();
+        let rc_path = tmpdir.path().join(".config/jarvish/rc.jsh");
+        assert!(!rc_path.exists());
+
+        // Skip 計画: run_configured_rc の実装ではこの枝に入ると
+        // ensure_default_rc への参照ごと通らない。ここでは「Skip という
+        // 計画が出た」ことと「ファイルがまだ存在しない」ことを両方確認し、
+        // 続けて同じパスで BootstrapAndRun 相当の副作用（テンプレート生成）
+        // を実際に発生させて対比する。
+        let skip_plan = plan_rc_bootstrap(ResolvedRc::None);
+        assert_eq!(skip_plan, RcBootstrapPlan::Skip);
+        assert!(
+            !rc_path.exists(),
+            "planning Skip must not itself create the default rc.jsh"
+        );
+
+        let default_plan = plan_rc_bootstrap(ResolvedRc::Default(rc_path.clone()));
+        match default_plan {
+            RcBootstrapPlan::BootstrapAndRun { path, display_name } => {
+                assert_eq!(path, rc_path);
+                assert_eq!(display_name, "rc.jsh");
+                // BootstrapAndRun 計画が実際に ensure_default_rc へ渡された
+                // 場合にのみテンプレートが生成されることを対比として示す。
+                ensure_default_rc(&path);
+                assert!(
+                    path.exists(),
+                    "BootstrapAndRun's path, once passed to ensure_default_rc, must exist"
+                );
+            }
+            other => panic!("expected BootstrapAndRun, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_rc_bootstrap_explicit_existing_path_runs_without_bootstrap() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path().join("custom.jsh");
+        std::fs::write(&path, "alias x=echo\n").unwrap();
+
+        match plan_rc_bootstrap(ResolvedRc::Explicit(path.clone())) {
+            RcBootstrapPlan::RunExplicit {
+                path: got_path,
+                display_name,
+            } => {
+                assert_eq!(got_path, path);
+                assert_eq!(display_name, "custom.jsh");
+            }
+            other => panic!("expected RunExplicit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_rc_bootstrap_explicit_missing_path_never_bootstraps() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path().join("does-not-exist.jsh");
+        assert!(!path.exists());
+
+        let plan = plan_rc_bootstrap(ResolvedRc::Explicit(path.clone()));
+        assert_eq!(
+            plan,
+            RcBootstrapPlan::ExplicitMissing { path: path.clone() }
+        );
+        // ExplicitMissing の計画は ensure_default_rc を一切呼ばないため、
+        // 呼び出し後もファイルは作られない。
+        assert!(
+            !path.exists(),
+            "a missing explicit --rcfile path must never be auto-generated"
+        );
     }
 
     // ── ensure_default_rc ──

@@ -222,8 +222,10 @@ impl JarvisAI {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn new_fails_without_api_key() {
         let original = std::env::var("OPENAI_API_KEY").ok();
         std::env::remove_var("OPENAI_API_KEY");

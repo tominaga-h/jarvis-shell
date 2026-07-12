@@ -67,6 +67,8 @@ Debug mode: `jarvish --debug` writes logs to `./var/logs/`.
 - `jarvish --debug` — enable tracing logs to `./var/logs/`
 - `jarvish -c "<command>"` — run a single command and exit
 - `jarvish -v` / `--version` — print version
+- `jarvish --rcfile <path>` — load `<path>` instead of the default `~/.config/jarvish/rc.jsh`
+- `jarvish --no-rc` — skip loading the rc.jsh startup script entirely
 
 ## Rules
 

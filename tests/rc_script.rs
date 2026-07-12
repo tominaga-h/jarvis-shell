@@ -22,6 +22,7 @@
 //! `#[serial]` 規約に従っているため、規約を揃えて `#[serial]` を付与する。
 
 use std::io::Write;
+use std::path::PathBuf;
 
 use serial_test::serial;
 
@@ -297,6 +298,76 @@ fn rc_line_failure_reports_lineno_prefix_and_later_lines_still_take_effect() {
     );
 }
 
+/// (f-2) 分類器バイパス（classifier-bypass）の回帰テスト:
+/// AI に自然言語としてルーティングされるはずの行（例:
+/// `please explain this error to me` — 先頭トークン `please` は PATH 上に
+/// 実在しないバイナリであることを確認済み。macOS には `/usr/bin/what` の
+/// ような紛らわしい実在バイナリがあるため、先頭語の選定には注意が必要）
+/// が rc スクリプトに書かれていても、`try_shell_builtins` →
+/// `try_builtin` → `execute` の純粋なコマンド実行パスに落ちて
+/// 「command not found」（exit code 127）として失敗するだけであり、AI
+/// 呼び出しは一切発生しないこと。`OPENAI_API_KEY` を明示的に unset した
+/// 状態で実行し、（仮に AI 経路に迷い込んだ場合に出るはずの）AI 関連の
+/// エラー文言や応答が出力に一切現れないことも合わせて確認する。
+#[test]
+#[serial]
+fn natural_language_line_in_rcfile_is_run_as_command_not_routed_to_ai() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let rc_path = home.join("rc_with_nl_line.jsh");
+    std::fs::write(
+        &rc_path,
+        "please explain this error to me\n\
+         alias after_nl='echo after-nl-line-still-works'\n",
+    )
+    .unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .args(["--rcfile", rc_path.to_str().unwrap(), "-c", "after_nl"])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // 分類器を経由していれば自然言語と判定されるはずの行が、rc.jsh 経由では
+    // ただの「未知のコマンド」として command not found (exit 127) で
+    // 失敗すること。「command not found」自体は spawn_error() →
+    // jarvis_talk() が println! で stdout に出す文言（jarvish 全体の
+    // 既存挙動）であり、行番号付きの継続サマリー
+    // （"jarvish: <file>:<lineno>: command exited with status <code>"）は
+    // rc.rs 側が eprintln! で stderr に出す別の文言である —— 両方を
+    // それぞれの出力先で確認する。
+    assert!(
+        stdout.contains("command not found"),
+        "a natural-language-looking line must fail as an unknown command, not be routed to AI: \
+         stdout={stdout}"
+    );
+    assert!(
+        stderr.contains("rc_with_nl_line.jsh:1: command exited with status 127"),
+        "the failing line should be reported with the file:lineno prefix and exit code 127: \
+         stderr={stderr}"
+    );
+    // AI には一切送信されていないことの追加確認: AI 呼び出し特有の文言
+    // （投機的だが `investigate` / OpenAI エラーメッセージ等）が出力に
+    // 混入していないこと。
+    assert!(
+        !stderr.contains("OPENAI_API_KEY") && !stdout.contains("OPENAI_API_KEY"),
+        "no AI/API-key related error should appear — the line must never reach the AI client: \
+         stdout={stdout} stderr={stderr}"
+    );
+    // continue-on-error により、NL 行の後のエイリアス定義は生きている。
+    assert!(
+        stdout.contains("after-nl-line-still-works"),
+        "the alias registered on the line after the NL-looking line must still take effect: \
+         stdout={stdout}"
+    );
+}
+
 /// (g) rc スクリプト内に `exit`（あるいは goodbye 相当）の行があると、
 /// `--rcfile` + `-c` 経路では `-c` のコマンドが一切実行されないこと。
 #[test]
@@ -425,6 +496,160 @@ fn self_sourcing_script_terminates_quickly_with_depth_error() {
     );
 }
 
+/// `n_files` 個の連鎖する `source` チェーンを `dir` の下に書き出す。
+/// `chain_1.jsh` がトップレベル（`--rcfile` の深さ0）で、
+/// `chain_N.jsh`（`N < n_files`）は `alias chain_marker_N=...` を定義した
+/// 直後に `chain_{N+1}.jsh` を `source` する（このホップは
+/// `dispatch_source` の `next_depth = self.source_depth + 1` を
+/// `N`（1始まり）にする）。一番最後のファイル（`chain_{n_files}.jsh`）は
+/// 次を `source` せずに止まる。戻り値はトップレベル
+/// （`--rcfile` に渡す）`chain_1.jsh` のパス。
+///
+/// 深さ算術: `--rcfile`（`chain_1.jsh`）は `source_depth == 0` で走る。
+/// `chain_K.jsh`（`K < n_files`）から `chain_{K+1}.jsh` への `source` ホップ
+/// は `next_depth == K` を要求する（`K <= MAX_SOURCE_DEPTH` なら許可、
+/// 超えれば拒否）。したがって `n_files` 個のファイル・`n_files - 1` 回の
+/// ホップからなるチェーンがすべて実行されるための条件は
+/// `n_files - 1 <= MAX_SOURCE_DEPTH`、すなわち
+/// `n_files <= MAX_SOURCE_DEPTH + 1`。
+fn write_source_chain(dir: &std::path::Path, n_files: usize) -> PathBuf {
+    assert!(n_files >= 1, "chain must have at least 1 file");
+    for n in 1..=n_files {
+        let path = dir.join(format!("chain_{n}.jsh"));
+        let mut content = format!("alias chain_marker_{n}='echo chain-marker-{n}-reached'\n");
+        if n < n_files {
+            let next = dir.join(format!("chain_{}.jsh", n + 1));
+            content.push_str(&format!("source {}\n", next.display()));
+        }
+        std::fs::write(&path, content).unwrap();
+    }
+    dir.join("chain_1.jsh")
+}
+
+/// (b-2) `MAX_SOURCE_DEPTH`（8）ちょうどの実チェーン: `--rcfile`（深さ0、
+/// `chain_1.jsh`）から `source` を8回辿って `chain_9.jsh`（9番目のファイル、
+/// 最後の `source` ホップの `next_depth == 8 == MAX_SOURCE_DEPTH`）まで
+/// 全行が実行され、一番深いファイルで定義した alias が `-c` から見える
+/// こと。単なる整数比較の unit test ではなく、実際に9個の別ファイルを
+/// `source` で辿らせて末端の副作用（alias 登録）を観測する。
+#[test]
+#[serial]
+fn source_chain_at_exactly_max_depth_fully_executes_deepest_alias() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let chain_dir = home.join("chain");
+    std::fs::create_dir_all(&chain_dir).unwrap();
+
+    // MAX_SOURCE_DEPTH と実チェーンの本数が食い違ったら壊れるように、
+    // ハードコードではなく定数由来の値でチェーンを組み立てる。
+    // rc.rs の MAX_SOURCE_DEPTH は private のため、README/DESIGN CONTRACT
+    // で固定されている値 8 をここでは直接使う（`max_source_depth_is_eight`
+    // ユニットテストが定数側の回帰を別途保証する）。
+    const MAX_SOURCE_DEPTH: usize = 8;
+    // ちょうど限界のチェーン: ファイル数 = MAX_SOURCE_DEPTH + 1（ホップ数
+    // = MAX_SOURCE_DEPTH）。
+    let n_files = MAX_SOURCE_DEPTH + 1;
+    let top = write_source_chain(&chain_dir, n_files);
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let child = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args([
+            "--rcfile",
+            top.to_str().unwrap(),
+            "-c",
+            &format!("chain_marker_{n_files}"),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn jarvish");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let output = child.wait_with_output();
+        let _ = tx.send(output);
+    });
+    let output = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("jarvish did not terminate within 30s at the max-depth boundary")
+        .expect("failed to collect child output");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !stderr.contains("source nesting too deep"),
+        "a chain of exactly MAX_SOURCE_DEPTH source hops must NOT be rejected: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(&format!("chain-marker-{n_files}-reached")),
+        "the alias defined at the deepest file (file #{n_files}, the {MAX_SOURCE_DEPTH}th \
+         source hop) of an at-the-limit chain must be visible and runnable from -c: \
+         stdout={stdout}"
+    );
+}
+
+/// (b-3) `MAX_SOURCE_DEPTH` を1超える実チェーン（9ホップ、10ファイル）は、
+/// 10番目のファイルに到達する手前（9ホップ目、`next_depth == 9`）で
+/// "source nesting too deep" を報告して打ち切ること。加えて、そのエラーが
+/// 実際に到達を試みたファイル（10番目のパス）を名指ししていることを
+/// 確認する。
+#[test]
+#[serial]
+fn source_chain_one_beyond_max_depth_errors_at_the_right_file() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let chain_dir = home.join("chain");
+    std::fs::create_dir_all(&chain_dir).unwrap();
+
+    const MAX_SOURCE_DEPTH: usize = 8;
+    // 限界を1つ超えるチェーン: ファイル数 = MAX_SOURCE_DEPTH + 2
+    // （ホップ数 = MAX_SOURCE_DEPTH + 1、最後のホップが拒否される）。
+    let n_files = MAX_SOURCE_DEPTH + 2;
+    let top = write_source_chain(&chain_dir, n_files);
+    let unreached_path = chain_dir.join(format!("chain_{n_files}.jsh"));
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let child = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args(["--rcfile", top.to_str().unwrap(), "-c", "echo chain-done"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn jarvish");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let output = child.wait_with_output();
+        let _ = tx.send(output);
+    });
+    let output = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("jarvish did not terminate within 30s one level beyond the max-depth boundary")
+        .expect("failed to collect child output");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("source nesting too deep"),
+        "a chain one hop beyond MAX_SOURCE_DEPTH must be rejected: stderr={stderr}"
+    );
+    assert!(
+        stderr.contains(unreached_path.to_str().unwrap()),
+        "the nesting-too-deep error must name the file it failed to reach (file #{n_files}): \
+         stderr={stderr}"
+    );
+    // マーカーの alias（ファイル1..={MAX_SOURCE_DEPTH}+1、8ホップ目まで）は
+    // 登録済みだが、最後のファイルには到達しないためそのマーカーは
+    // 定義されない。-c 側は継続する。
+    assert!(
+        stdout.contains("chain-done"),
+        "the -c command must still run after the too-deep chain is cut off: stdout={stdout}"
+    );
+}
+
 /// (c) `source <path>.toml`（大文字小文字を問わず）は従来どおり
 /// config.toml の再読み込みパスを通り、"Loaded ..." サマリーが出力される
 /// こと（Phase 4.3 で拡張子ディスパッチを追加した後も .toml の挙動が
@@ -497,6 +722,44 @@ fn source_missing_file_errors_with_no_such_file() {
         stderr.contains("rc_sources_missing.jsh:1"),
         "the failing `source` line inside the rc script should be reported with its \
          line number: stderr={stderr}"
+    );
+}
+
+/// (d-2) Fix C5: `.toml` 側の「ファイルが存在しない」エラーはスクリプト側
+/// （`source_missing_file_errors_with_no_such_file`、"no such file"）とは
+/// **異なる文言**であることを固定する回帰テスト。`.toml` パスは
+/// `reload_config` → `JarvishConfig::load_from` → `fs::read_to_string` の
+/// 生の I/O エラーをそのまま `jarvish: source: failed to read <path>: ...`
+/// として報告する（README/README_JA の「両分岐で文言が異なる」という
+/// 記述を裏付ける）。
+#[test]
+#[serial]
+fn source_missing_toml_file_errors_with_failed_to_read_not_no_such_file() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+    let missing_toml = home.join("does-not-exist.toml");
+    assert!(!missing_toml.exists());
+
+    let rc_path = home.join("rc_sources_missing_toml.jsh");
+    std::fs::write(&rc_path, format!("source {}\n", missing_toml.display())).unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args(["--rcfile", rc_path.to_str().unwrap(), "-c", "true"])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to read"),
+        ".toml source on a missing path must report \"failed to read\" (via the config \
+         loader's raw I/O error), not the script branch's \"no such file\": stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("no such file"),
+        "the .toml branch's message must NOT match the script branch's wording — they are \
+         genuinely different code paths with different text: stderr={stderr}"
     );
 }
 
