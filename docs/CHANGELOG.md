@@ -3,6 +3,26 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.15.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.15.0) - 2026-07-12
+
+### Added
+
+- 起動時 rc スクリプト (`rc.jsh`) ローダーを実装
+  - 対話起動時に `~/.config/jarvish/rc.jsh` を自動読み込み（`[startup].commands` より前に実行）。初回対話起動時にコメント付きテンプレートを自動生成
+  - `--rcfile <path>`（既定の rc.jsh の代わりに指定ファイルを読み込む） / `--no-rc`（読み込みをスキップ）CLI オプションを追加
+  - `source` ビルトインをスクリプトファイル (`.jsh`) の実行に対応。ネスト呼び出し・深度上限による無限ループ防止に対応
+  - FIFO・巨大ファイル・symlink など不正入力からのファイル読み書き保護、実行器セマンティクスの対話モードへの統一
+
+### Fixed
+
+- `-c` 単体実行・rc.jsh 内 `exit` 終了時に zsh 補完デーモンが孤児プロセス化する不具合を tombstone 方式で根絶
+- prewarm の二重 spawn 破棄経路を有界同期 shutdown に統一し、事前ウォームアップ由来の孤児デーモンを解消
+
+### Changed
+
+- 補完デーモンの shutdown を全終了経路で有界同期化し、kill/reap の漏れを解消
+- 補完メガ機能のドキュメント総点検（`CLAUDE.md` 設定節・`reload_config` doc コメントの陳腐化を修正）
+
 ## [v1.14.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.14.0) - 2026-07-12
 
 ### Added
