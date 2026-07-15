@@ -145,13 +145,24 @@ impl Shell {
         self.record_history(&original_line, &result);
 
         // 6. AI が実行したコマンドを reedline 履歴に追加（矢印キーで辿れるようにする）
-        if let Some(ref cmd) = executed_command {
-            if let Err(e) = self
-                .editor
-                .history_mut()
-                .save(HistoryItem::from_command_line(cmd))
-            {
-                warn!("Failed to save AI-executed command to reedline history: {e}");
+        //    非対話単体実行（`jarvish -c "<command>"`）では追加しない。これは
+        //    reedline の `read_line()` 経由の自動保存（経路A）とは別の、
+        //    `handle_input` 内から直接 `BlackBoxHistory::save()` を呼ぶ経路で
+        //    あり、`read_line()` を通らない `-c` 実行でも走ってしまう。両者は
+        //    同じ `command_history` テーブルに書き込むため、`record_history`
+        //    （経路B）だけをガードしても、AI が自然言語入力からツールコールで
+        //    コマンドを実行した場合はここで履歴に混入する。`record_history`
+        //    と同じ `interactive` 条件で塞ぐ（詳細は `Shell::interactive` の
+        //    フィールド定義 `src/shell/mod.rs` 参照）。
+        if self.interactive {
+            if let Some(ref cmd) = executed_command {
+                if let Err(e) = self
+                    .editor
+                    .history_mut()
+                    .save(HistoryItem::from_command_line(cmd))
+                {
+                    warn!("Failed to save AI-executed command to reedline history: {e}");
+                }
             }
         }
 
@@ -348,7 +359,17 @@ impl Shell {
     }
 
     /// 履歴を BlackBox に記録する。
+    ///
+    /// 非対話単体実行（`jarvish -c "<command>"`）では記録しない。`nvim`
+    /// などの外部ツールがファイル glob 展開のために `jarvish -c
+    /// "vimglob() {...}"` を呼ぶと、そのツール由来の一時コマンドが履歴
+    /// （上下矢印キーの履歴補完）に混入してしまうため。bash/zsh でも
+    /// 非対話実行は履歴対象外であり、それと同じ挙動。`self.interactive`
+    /// の詳細は `Shell` 構造体のフィールド定義（`src/shell/mod.rs`）参照。
     fn record_history(&self, line: &str, result: &CommandResult) {
+        if !self.interactive {
+            return;
+        }
         if result.action == LoopAction::Continue {
             if let Some(ref bb) = self.black_box {
                 if let Err(e) = bb.record(line, result) {

@@ -125,6 +125,34 @@ pub struct Shell {
     /// `run_rc_script_sync` が加算・復元する。`MAX_SOURCE_DEPTH` を
     /// 超えるネストを検出して無限ループ（自己 source 等）を防ぐために使う。
     source_depth: usize,
+    /// 対話セッションか否か（`main.rs` が `args.command.is_none()`（`-c`
+    /// 未指定）のとき `true`）。`-c '<command>'` による非対話単体実行では
+    /// `false`。`nvim` などの外部ツールがファイル glob 展開のために
+    /// `jarvish -c "vimglob() {...}"` を呼ぶと、そのツール由来の一時
+    /// コマンドが履歴（上下矢印キーの履歴補完）に混入してしまう。これを
+    /// 防ぐため、非対話実行時は履歴（`command_history` テーブル）への
+    /// 書き込みをスキップする（bash/zsh でも非対話実行は履歴対象外なのと
+    /// 同じ挙動）。
+    ///
+    /// このフラグの consumer は2種類ある:
+    /// 1. **prewarm 判定** — `spawn_prewarm_thread_if_interactive` が
+    ///    `interactive == false` のとき zsh 補完デーモンの事前ウォーム
+    ///    アップをスキップする（S5 修正）。
+    /// 2. **履歴記録のゲート** — `handle_input`（`src/shell/input.rs`）から
+    ///    `command_history` テーブルへ書き込む経路は2つあり、どちらも
+    ///    `interactive == false` で塞ぐ:
+    ///    - 経路B: `record_history` の `BlackBox::record`。
+    ///    - 経路(reedline 直接): AI がツールコールで実行したコマンドを
+    ///      `self.editor.history_mut().save()` で reedline 履歴に直接追加
+    ///      する箇所（`executed_command`）。これは `read_line()` を通らない
+    ///      `-c` 実行でも走るため、`record_history` とは別に個別のガードが
+    ///      必要。
+    ///
+    /// なお reedline の `read_line()` が Enter 押下時に内部で行う自動保存
+    /// （純粋な経路A）は、`-c` 実行では REPL ループ（`read_line()`）自体に
+    /// 入らないため元々走らない。上記2つのゲートは `read_line()` の外側で
+    /// 起きる書き込みを対象にしている。
+    interactive: bool,
 }
 
 impl Shell {
@@ -284,6 +312,7 @@ impl Shell {
             startup_commands: config.startup.commands,
             rc_options,
             source_depth: 0,
+            interactive,
         }
     }
 
