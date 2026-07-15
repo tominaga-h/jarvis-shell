@@ -43,7 +43,7 @@ impl Shell {
         // read ガードは短命スコープで取得し、await を跨いで保持しない
         let expanded = {
             match self.aliases.read() {
-                Ok(guard) => expand::expand_alias(&line, &guard),
+                Ok(guard) => expand::expand_aliases_in_line(&line, &guard),
                 Err(_) => None,
             }
         };

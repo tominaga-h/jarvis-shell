@@ -61,8 +61,23 @@ impl std::fmt::Display for SplitError {
 /// - ダブルクォート内は `\` で `"` `\` `$` `\`` をエスケープ可能
 /// - クォート外は `\` で次の 1 文字をエスケープ
 /// - 制御演算子 `|`, `>`, `>>`, `<`, `&&`, `||`, `;` は単独トークンに分離
+///
+/// 実装は [`split_quoted_spans`] に委譲し、バイト range を捨てるだけ
+/// （トークナイザ実装は 1 箇所に一本化する）。
 pub fn split_quoted(input: &str) -> Result<Vec<Token>, SplitError> {
-    let mut tokens: Vec<Token> = Vec::new();
+    Ok(split_quoted_spans(input)?
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect())
+}
+
+/// `split_quoted` と同じトークン列に加えて、各トークンを生成した
+/// `input` 内のバイト range（クォート/エスケープ/演算子の文字を含む）を返す。
+///
+/// エイリアス展開（[`super::alias::expand_aliases_in_line`]）のように、
+/// トークン境界で元の入力文字列をバイト単位で置換したい場合に使う。
+pub fn split_quoted_spans(input: &str) -> Result<Vec<(Token, std::ops::Range<usize>)>, SplitError> {
+    let mut tokens: Vec<(Token, std::ops::Range<usize>)> = Vec::new();
     let mut current = String::new();
     let mut in_token = false;
     let mut quoted = false;
@@ -70,13 +85,21 @@ pub fn split_quoted(input: &str) -> Result<Vec<Token>, SplitError> {
     let mut has_subst = false;
     // unquoted な span を 1 つでも含んだか（含めば最終的に Unquoted 文脈）
     let mut has_unquoted_subst = false;
+    // 現トークンの開始バイトオフセット（in_token が true になった時点で記録）
+    let mut token_start_byte = 0usize;
+
+    // char index → byte offset の対応表（`chars[i]` の開始バイト位置）。
+    // 末尾に `input.len()`（EOF のバイトオフセット）も追加しておく。
+    let mut byte_offsets: Vec<usize> = input.char_indices().map(|(b, _)| b).collect();
+    byte_offsets.push(input.len());
 
     let chars: Vec<char> = input.chars().collect();
     let mut i = 0;
 
     // 現トークンを確定して push する。状態リセットは呼び出し側の責務。
+    // `end_byte` はトークンを生成した range の終端（exclusive）。
     macro_rules! push_current {
-        () => {{
+        ($end_byte:expr) => {{
             // subst_quoting は has_subst のトークンでのみ意味を持つ。
             // 置換 span のうち unquoted を 1 つでも含めば Unquoted、
             // 全 span がダブルクォート内なら DoubleQuoted。
@@ -86,20 +109,23 @@ pub fn split_quoted(input: &str) -> Result<Vec<Token>, SplitError> {
             } else {
                 SubstQuoting::Unquoted
             };
-            tokens.push(Token {
-                value: std::mem::take(&mut current),
-                quoted,
-                has_subst,
-                subst_quoting,
-            });
+            tokens.push((
+                Token {
+                    value: std::mem::take(&mut current),
+                    quoted,
+                    has_subst,
+                    subst_quoting,
+                },
+                token_start_byte..$end_byte,
+            ));
         }};
     }
 
     // 現トークンを確定して push し、トークン蓄積状態をリセットする
     // （トークン境界＝空白/演算子で使用）。
     macro_rules! flush_token {
-        () => {{
-            push_current!();
+        ($end_byte:expr) => {{
+            push_current!($end_byte);
             in_token = false;
             quoted = false;
             has_subst = false;
@@ -115,21 +141,30 @@ pub fn split_quoted(input: &str) -> Result<Vec<Token>, SplitError> {
             continue;
         }
 
+        if !in_token {
+            token_start_byte = byte_offsets[i];
+        }
+
         // 演算子: 既存トークンを flush してから演算子を 1 トークンとして追加。
         // ただしコマンド置換 span 内ではここに到達しない（span は下で
         // アトミックに取り込まれるため）。
         let op_len = operator_at(&chars, i);
         if op_len > 0 {
             if in_token {
-                flush_token!();
+                flush_token!(byte_offsets[i]);
             }
             let op: String = chars[i..i + op_len].iter().collect();
-            tokens.push(Token {
-                value: op,
-                quoted: false,
-                has_subst: false,
-                subst_quoting: SubstQuoting::Unquoted,
-            });
+            let op_start = byte_offsets[i];
+            let op_end = byte_offsets[i + op_len];
+            tokens.push((
+                Token {
+                    value: op,
+                    quoted: false,
+                    has_subst: false,
+                    subst_quoting: SubstQuoting::Unquoted,
+                },
+                op_start..op_end,
+            ));
             i += op_len;
             continue;
         }
@@ -224,7 +259,7 @@ pub fn split_quoted(input: &str) -> Result<Vec<Token>, SplitError> {
                 i += 2;
             }
             ch if ch.is_whitespace() => {
-                flush_token!();
+                flush_token!(byte_offsets[i]);
                 i += 1;
             }
             ch => {
@@ -237,7 +272,7 @@ pub fn split_quoted(input: &str) -> Result<Vec<Token>, SplitError> {
 
     if in_token {
         // 入力末尾の確定。以後リセットは不要なので push のみ。
-        push_current!();
+        push_current!(byte_offsets[chars.len()]);
     }
 
     Ok(tokens)
@@ -564,6 +599,73 @@ mod tests {
         assert_eq!(operator_prefix_len("&"), 0);
         assert_eq!(operator_prefix_len("|foo"), 1);
         assert_eq!(operator_prefix_len(">>foo"), 2);
+    }
+
+    // ── split_quoted_spans バイト range 検証 ──
+
+    #[test]
+    fn spans_cover_exact_source_substrings_unquoted() {
+        let input = "echo hello world";
+        let toks = split_quoted_spans(input).unwrap();
+        for (tok, range) in &toks {
+            assert_eq!(&input[range.clone()], tok.value.as_str());
+        }
+    }
+
+    #[test]
+    fn spans_include_surrounding_quotes() {
+        let input = r#"echo "a b""#;
+        let toks = split_quoted_spans(input).unwrap();
+        assert_eq!(toks.len(), 2);
+        let (second, range) = &toks[1];
+        assert_eq!(second.value, "a b");
+        assert_eq!(&input[range.clone()], r#""a b""#);
+    }
+
+    #[test]
+    fn spans_cover_operators() {
+        let input = "a && b || c ; d | e";
+        let toks = split_quoted_spans(input).unwrap();
+        for (tok, range) in &toks {
+            assert_eq!(&input[range.clone()], tok.value.as_str());
+        }
+    }
+
+    #[test]
+    fn spans_cover_command_subst() {
+        let input = "echo $(echo a b)";
+        let toks = split_quoted_spans(input).unwrap();
+        assert_eq!(toks.len(), 2);
+        let (second, range) = &toks[1];
+        assert_eq!(second.value, "$(echo a b)");
+        assert_eq!(&input[range.clone()], "$(echo a b)");
+    }
+
+    #[test]
+    fn spans_are_char_boundary_safe_for_multibyte() {
+        // マルチバイト文字（日本語）を含む入力でも byte range が
+        // 文字境界上に乗ることを確認する。
+        let input = "grep 検索 | ll";
+        let toks = split_quoted_spans(input).unwrap();
+        let values: Vec<&str> = toks.iter().map(|(t, _)| t.value.as_str()).collect();
+        assert_eq!(values, vec!["grep", "検索", "|", "ll"]);
+        for (tok, range) in &toks {
+            // スライスが char boundary からずれていればここで panic する。
+            assert_eq!(&input[range.clone()], tok.value.as_str());
+        }
+    }
+
+    #[test]
+    fn split_quoted_delegates_to_spans() {
+        // split_quoted は split_quoted_spans からトークンのみ取り出したもの。
+        let input = "ls *.txt | head";
+        let via_split: Vec<Token> = split_quoted(input).unwrap();
+        let via_spans: Vec<Token> = split_quoted_spans(input)
+            .unwrap()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        assert_eq!(via_split, via_spans);
     }
 
     #[test]
