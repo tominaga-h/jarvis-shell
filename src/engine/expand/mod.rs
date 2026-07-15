@@ -8,7 +8,7 @@
 //! - パイプライン (`pipeline`): command-subst → basic → brace → glob の統合 API
 //!
 //! 公開 API:
-//! - [`expand_alias`] — 先頭トークンのエイリアス置換
+//! - [`expand_aliases_in_line`] — セグメント（パイプ/コネクタ）ごとの先頭トークンのエイリアス置換
 //! - [`expand_token`] — チルダ/env のみ（1 出力）。`apply_exports` 等の単一値展開用
 //! - [`expand_token_globs`] — command-subst + basic + brace + glob の統合（複数出力）。dispatch 用
 //! - [`expand_token_globs_with_quoting`] — 上記のコマンド置換クォート文脈指定版
@@ -23,7 +23,7 @@ mod glob;
 mod pipeline;
 mod quote;
 
-pub use alias::expand_alias;
+pub use alias::expand_aliases_in_line;
 pub use basic::expand_token;
 pub use command_subst::{CmdSubstError, SubstQuoting};
 pub use pipeline::{

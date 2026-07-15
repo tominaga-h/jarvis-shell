@@ -752,12 +752,14 @@ impl Shell {
     /// と違い `InputClassifier::classify` は一切呼ばれない。
     ///
     /// エイリアス展開（Fix B1）: `handle_input`（`src/shell/input.rs`
-    /// ステップ0）と全く同じ `expand::expand_alias` を、同じ優先順位
-    /// （先頭トークンが一致すれば置換、それ以外は無変換）で先頭に適用する。
-    /// これを怠ると、rc.jsh / source されたスクリプトの中で早い行に定義
-    /// した `alias` が、同じスクリプトの後の行から見えない
-    /// （「command not found」になる）という非対称バグが生じる ——
-    /// 対話モードとスクリプトモードで alias 展開の有無が食い違ってはならない。
+    /// ステップ0）と全く同じ `expand::expand_aliases_in_line` を、同じ
+    /// 優先順位（各パイプライン/コネクタセグメントの先頭トークンが一致
+    /// すれば置換、それ以外は無変換）で先頭に適用する。これを怠ると、
+    /// rc.jsh / source されたスクリプトの中で早い行に定義した `alias` が、
+    /// 同じスクリプトの後の行から見えない（「command not found」になる）
+    /// という非対称バグが生じる —— 対話モードとスクリプトモードで
+    /// alias 展開の有無が食い違ってはならない（`|` `&&` `||` `;` の
+    /// どのセグメントでも同じ規則が両モードで一致する）。
     ///
     /// ## DESIGN CONTRACT（Fix B5）: rc/source 行は Black Box に記録しない
     /// `handle_input`（対話 / `-c` の通常経路）は各行の実行後に
@@ -774,7 +776,7 @@ impl Shell {
     /// を確認すること。
     fn run_rc_line(&mut self, line: &str) -> RcLineOutcome {
         let expanded = match self.aliases.read() {
-            Ok(guard) => expand::expand_alias(line, &guard),
+            Ok(guard) => expand::expand_aliases_in_line(line, &guard),
             Err(_) => None,
         };
         let line = expanded.as_deref().unwrap_or(line);
