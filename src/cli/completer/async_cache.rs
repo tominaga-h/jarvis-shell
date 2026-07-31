@@ -26,17 +26,11 @@
 //!    = 担当・候補なし）をキャッシュ越しでも保つ。
 //! 3. キャッシュミス → 同じキーの fetch が in-flight でなければバックグラウンド
 //!    スレッドを spawn して内部プロバイダの `provide()` を呼び、結果を
-//!    キャッシュへ格納する。呼び出し元は [`GRACE_WAIT`]（300ms）だけ完了を
-//!    待ち、間に合えばその結果を返す。間に合わなければ `None` を返して
-//!    チェーンを `PathProvider` までフォールスルーさせる。
-//! 4. バックグラウンド fetch は待ち時間を過ぎても走り続け、結果はキャッシュに
-//!    載る。そのため同じキーへの次の Tab 押下は 0ms で返る。
-//!
-//! # なぜ「ミス時に即 `None`」ではないのか
-//! 当初の実装はミス時に即座に `None` を返していた（UI ブロックを完全に
-//! ゼロにする方針）。しかし実機検証で、これは **積極的に間違った候補を
-//! 出す** 挙動になることが判明した — 詳細と設計判断は [`GRACE_WAIT`] の
-//! ドキュメントに記録している。
+//!    キャッシュへ格納する。**呼び出し元へは即座に `None` を返す**
+//!    （= 「このプロバイダは今回担当外」としてチェーンを `PathProvider` まで
+//!    フォールスルーさせる。UI は一切ブロックしない）。
+//! 4. バックグラウンド fetch が完了すると結果がキャッシュに載るので、
+//!    同じキーへの次の Tab 押下は即座にキャッシュから返る。
 //!
 //! # キャッシュキー
 //! `ctx.spans()`（現在のパイプラインセグメントの単語列）と
@@ -103,41 +97,6 @@ const DEFAULT_TTL: Duration = Duration::from_secs(5);
 /// `provide()` は spawn せずそのまま `None` を返す（次の Tab で再試行される）。
 const MAX_CONCURRENT_WORKERS: usize = 4;
 
-/// キャッシュミス時にバックグラウンド fetch の完了を待つ上限時間。
-///
-/// # なぜ「即座に諦める」ではダメだったか
-/// 当初はミス時に即 `None` を返してチェーンをフォールスルーさせていた
-/// （UI ブロックを完全にゼロにする方針）。しかし実機で試すと、これは
-/// **積極的に間違った候補を出す**挙動になることが分かった: `tmuxinator <TAB>`
-/// が `CLAUDE.md` / `Cargo.lock` / `docs/` といったカレントディレクトリの
-/// ファイル一覧（`PathProvider` のフォールバック結果）を表示してしまう。
-/// これらは tmuxinator の引数として意味をなさない上に、ユーザーには
-/// 「もう一度 Tab を押せば正しい候補が出る」ことを知る手がかりがない。
-/// 「遅い」より「間違っている」ほうが体験として悪い。
-///
-/// # なぜこの値か
-/// 実測では成功パスは十分速い（zsh デーモン温存 55〜60ms、carapace 温存
-/// 110ms 程度、コールドでも実測 ~260ms）。したがって 300ms 待てば通常の
-/// 補完は**初回 Tab で**間に合う。一方、人間が「引っかかった」と感じ始める
-/// のは概ね 100〜300ms 以降とされるため、この値は「ほとんどの場合は間に合い、
-/// 間に合わない場合でも許容できる範囲で打ち切る」境界として選んだ。
-///
-/// 重要なのは、これが**当初の 2.5 秒問題への回帰ではない**こと:
-/// - 待ち時間はプロバイダごとの設定値やフロア（2000ms）ではなく、この
-///   定数で一律に上限が決まる。
-/// - チェーン上の各プロバイダが待つのは高々 `GRACE_WAIT` なので、予算が
-///   加算されても最悪 600ms 程度で収まる（従来は最悪 2.5 秒）。
-/// - タイムアウトを踏む遅い補完は 1 回目こそ間に合わないが、裏で走り続けた
-///   結果がキャッシュに載るため 2 回目以降は 0ms で返る。
-const GRACE_WAIT: Duration = Duration::from_millis(300);
-
-/// [`GRACE_WAIT`] 中にキャッシュを再確認する間隔。
-///
-/// 短くしすぎるとロック取得のオーバーヘッドが増え、長くすると待ち時間の
-/// 粒度が粗くなる。10ms は「300ms の猶予を 30 回に分割する」程度の粒度で、
-/// どちらの弊害も実用上無視できる。
-const GRACE_POLL_INTERVAL: Duration = Duration::from_millis(10);
-
 /// キャッシュ 1 件分。`fetched_at` が [`DEFAULT_TTL`]（または注入された TTL）
 /// を超えたら期限切れとして扱う。
 #[derive(Clone)]
@@ -198,13 +157,11 @@ impl CompletionProvider for AsyncCacheProvider {
             return entry;
         }
 
-        self.shared.spawn_fetch_if_needed(key.clone(), ctx.clone());
+        self.shared.spawn_fetch_if_needed(key, ctx.clone());
 
-        // キャッシュミス: バックグラウンド fetch に [`GRACE_WAIT`] だけ猶予を
-        // 与えてから諦める（理由は [`GRACE_WAIT`] のドキュメント参照）。
-        // 間に合えばこの Tab で本来の候補が出るし、間に合わなくても
-        // `GRACE_WAIT` で確実に打ち切るので UI が数秒固まることはない。
-        self.shared.wait_for(&key, GRACE_WAIT)
+        // キャッシュミス（または期限切れ）: このプロバイダは今回「対象外」
+        // として即座にフォールスルーさせる。UI は一切ブロックしない。
+        None
     }
 }
 
@@ -220,31 +177,6 @@ impl Shared {
             return None;
         }
         Some(entry.value.clone())
-    }
-
-    /// `key` の結果がキャッシュに載るのを最大 `budget` だけ待つ。
-    ///
-    /// 間に合えばその結果（tri-state をそのまま保った
-    /// `Option<Vec<Candidate>>`）を返し、間に合わなければ `None` を返して
-    /// チェーンをフォールスルーさせる。`budget` は [`GRACE_WAIT`] 由来の
-    /// 短い固定値なので、ここでの待ちが数秒に伸びることはない。
-    ///
-    /// バックグラウンド fetch が `None`（内部プロバイダが「担当外」と判断）を
-    /// 返した場合もキャッシュには載るため、その `None` を返して正しく
-    /// フォールスルーさせられる（待ち続けて無駄に `budget` を使い切らない）。
-    fn wait_for(&self, key: &str, budget: Duration) -> Option<Vec<Candidate>> {
-        let deadline = Instant::now() + budget;
-        loop {
-            if let Some(entry) = self.get_fresh(key) {
-                return entry;
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return None;
-            }
-            // 残り時間を超えて眠らない（`budget` を必ず守る）。
-            thread::sleep(GRACE_POLL_INTERVAL.min(deadline - now));
-        }
     }
 
     /// `key` の fetch が in-flight でなく、同時ワーカー数の上限にも達して
@@ -449,16 +381,12 @@ mod tests {
 
     #[test]
     #[serial]
-    fn cold_miss_gives_up_within_the_grace_budget() {
-        // 内部プロバイダが猶予（GRACE_WAIT）より明確に遅い場合、
-        // `provide()` は待ち続けずに諦めて `None` を返さなければならない。
-        // これが「最悪 2.5 秒フリーズ」への回帰を防ぐ最後の砦なので、
-        // 実測経過時間に上限を課して検証する。
+    fn cold_miss_returns_none_without_blocking() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let inner = Arc::new(FakeInner {
             response: Some(vec![candidate("foo")]),
             call_count: Arc::clone(&call_count),
-            delay: GRACE_WAIT * 4,
+            delay: Duration::from_millis(200),
         });
         let provider = AsyncCacheProvider::new(inner);
 
@@ -467,42 +395,10 @@ mod tests {
         let result = provider.provide(&ctx);
         let elapsed = start.elapsed();
 
-        assert_eq!(
-            result, None,
-            "a fetch slower than the grace budget must fall through"
-        );
-        // 猶予そのものは待つので下限は課さず、上限だけを見る（CI の負荷で
-        // 多少伸びても落ちないよう十分な余裕を取る）。
+        assert_eq!(result, None, "cold miss should return None immediately");
         assert!(
-            elapsed < GRACE_WAIT * 3,
-            "provide() must give up close to GRACE_WAIT, not wait for the inner \
-             provider's full delay: {elapsed:?}"
-        );
-    }
-
-    // ── 1b. 猶予内に間に合う fetch は初回 Tab で候補を返す ──
-
-    #[test]
-    #[serial]
-    fn fetch_within_grace_budget_returns_candidates_on_the_first_tab() {
-        // 実測上、通常の補完は猶予内に収まる（zsh デーモン温存 55〜60ms、
-        // carapace 温存 110ms 程度）。その場合は**初回 Tab で**正しい候補が
-        // 出ることを保証する — これがユーザー報告
-        //（`tmuxinator <TAB>` が無関係なファイル一覧を出す）への直接の回帰テスト。
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let inner = Arc::new(FakeInner {
-            response: Some(vec![candidate("start")]),
-            call_count: Arc::clone(&call_count),
-            delay: Duration::from_millis(20),
-        });
-        let provider = AsyncCacheProvider::new(inner);
-
-        let result = provider.provide(&ctx_for("tmuxinator "));
-
-        assert_eq!(
-            result,
-            Some(vec![candidate("start")]),
-            "a fast fetch must surface on the very first Tab press, not the second"
+            elapsed < Duration::from_millis(100),
+            "provide() must not block on the inner provider's delay: {elapsed:?}"
         );
     }
 
@@ -544,29 +440,18 @@ mod tests {
         let provider = AsyncCacheProvider::new(inner);
 
         let ctx = ctx_for("git checkout ma");
-        // 1回目（猶予内に fetch が完了するので、この時点で候補が返る）。
-        assert_eq!(provider.provide(&ctx), Some(vec![candidate("foo")]));
+        assert_eq!(provider.provide(&ctx), None);
 
-        // 2回目はキャッシュヒットなので、内部プロバイダを呼び直さずに
-        // 即座に返る。呼び出し回数が増えていないことでヒットを証明する。
-        let calls_after_first = call_count.load(Ordering::SeqCst);
-        let start = Instant::now();
-        let result = provider.provide(&ctx);
-        let elapsed = start.elapsed();
+        let result = poll_until(Duration::from_secs(2), || {
+            let r = provider.provide(&ctx);
+            r.is_some().then_some(r)
+        })
+        .flatten();
 
         assert_eq!(
             result,
             Some(vec![candidate("foo")]),
-            "a cached entry must be returned as-is"
-        );
-        assert_eq!(
-            call_count.load(Ordering::SeqCst),
-            calls_after_first,
-            "a cache hit must not call the inner provider again"
-        );
-        assert!(
-            elapsed < GRACE_WAIT,
-            "a cache hit must return well within the grace budget: {elapsed:?}"
+            "second provide() after background fetch completes should hit the cache"
         );
     }
 
@@ -584,13 +469,7 @@ mod tests {
         let provider = AsyncCacheProvider::new(inner);
 
         let ctx = ctx_for("git checkout ma");
-        // 猶予内に完了するので 1 回目から Some(vec![]) が返る（= 「担当したが
-        // 候補なし」。None に潰れてフォールスルーしてはならない）。
-        assert_eq!(
-            provider.provide(&ctx),
-            Some(Vec::new()),
-            "handled-but-empty must not collapse into a fall-through None"
-        );
+        assert_eq!(provider.provide(&ctx), None, "cold miss is None");
 
         let result = poll_until(Duration::from_secs(2), || {
             let cache_key = cache_key(&ctx);
@@ -744,11 +623,9 @@ mod tests {
         // TTL を過ぎるまで待つ。
         thread::sleep(Duration::from_millis(80));
 
-        // TTL 切れなのでミス扱いになり、新規 fetch がトリガーされる。
-        // fetch 自体は猶予内に終わるため戻り値は Some だが、ここで確認したい
-        // のは「古いエントリを再利用せず取り直したか」なので、下の
-        // 呼び出し回数（1 → 2）で判定する。
-        let _ = provider.provide(&ctx);
+        // TTL 切れなので再度ミス（None）になり、新規 fetch がトリガーされる。
+        let result = provider.provide(&ctx);
+        assert_eq!(result, None, "expired entry should be treated as a miss");
 
         let seen = poll_until(Duration::from_secs(2), || {
             let n = call_count.load(Ordering::SeqCst);
@@ -929,22 +806,12 @@ mod tests {
             call_count: Arc::clone(&call_count),
             delay: Duration::from_millis(400),
         });
-        let provider = Arc::new(AsyncCacheProvider::new(inner));
+        let provider = AsyncCacheProvider::new(inner);
 
         // 上限ぴったりまで、それぞれ別キーで埋める。
-        //
-        // `provide()` はミス時に GRACE_WAIT だけ待つようになったため、
-        // 逐次に呼ぶと 1 件ごとに猶予を消費してしまい「4 枠が同時に埋まった
-        // 状態」を作れない（先に呼んだワーカーが片付いてしまう）。埋める側を
-        // 別スレッドに逃がして、4 件を同時に in-flight にする。
-        let fillers: Vec<_> = (0..MAX_CONCURRENT_WORKERS)
-            .map(|i| {
-                let provider = Arc::clone(&provider);
-                thread::spawn(move || {
-                    provider.provide(&ctx_for(&format!("git checkout cap-{i}")));
-                })
-            })
-            .collect();
+        for i in 0..MAX_CONCURRENT_WORKERS {
+            provider.provide(&ctx_for(&format!("git checkout cap-{i}")));
+        }
 
         // 全ワーカーが「実際に内部プロバイダを呼び終える」ところまで待つ。
         //
@@ -978,10 +845,6 @@ mod tests {
             active, MAX_CONCURRENT_WORKERS,
             "the over-cap request must not have incremented the worker count"
         );
-
-        for filler in fillers {
-            filler.join().expect("filler threads must not panic");
-        }
     }
 
     // ── 13. 容量超過時に本当に全消去が起きる ──
