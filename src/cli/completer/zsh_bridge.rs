@@ -70,7 +70,7 @@ use super::carapace::{gate, ExternalCompletionSettings, ExternalKind};
 use super::context::CompletionContext;
 use super::external::run_external_capped;
 use super::provider::{Candidate, CompletionProvider};
-use super::zsh_daemon::ZshDaemon;
+use super::zsh_daemon::{cleanup_stale_compdumps, cleanup_stale_init_scripts, ZshDaemon};
 
 /// zsh ブリッジ本体（`assets/zsh/capture.zsh` を vendor したもの）。
 const CAPTURE_SCRIPT: &str = include_str!("../../../assets/zsh/capture.zsh");
@@ -612,6 +612,23 @@ fn prewarm_zsh_daemon_with(
     };
     let current_mtime = fs::metadata(&zshrc_path).and_then(|m| m.modified()).ok();
 
+    // 死んだプロセスが残した init スクリプトを掃除する（起動時に1回だけ）。
+    // prewarm はシェル起動直後にバックグラウンドスレッドで走るため、
+    // ここに置けば UI スレッドを一切ブロックしない。生きているプロセスの
+    // ファイルは消さない（`cleanup_stale_init_scripts` のドキュメント参照）。
+    let removed = cleanup_stale_init_scripts(bridge_dir);
+    if removed > 0 {
+        tracing::debug!("zsh daemon prewarm: removed {removed} stale init script(s)");
+    }
+
+    // 同様に、compinit のリネーム途中で取り残された compdump 一時ファイル
+    // （`.zcompdump.<host>.<pid>`）も掃除する。完成品の `.zcompdump` 本体は
+    // 有効なキャッシュなので残す（`cleanup_stale_compdumps` のドキュメント参照）。
+    let removed_dumps = cleanup_stale_compdumps(bridge_dir);
+    if removed_dumps > 0 {
+        tracing::debug!("zsh daemon prewarm: removed {removed_dumps} stale compdump temp file(s)");
+    }
+
     // 重い spawn 処理は Mutex の外で行う（provide() 側の UI スレッドを
     // ブロックしないため——ドキュメント冒頭参照）。
     let spawned = ZshDaemon::spawn(
@@ -905,7 +922,66 @@ impl ZshBridgeProvider {
     }
 }
 
+impl ZshBridgeProvider {
+    /// `ctx` が zsh ブリッジの対象（先頭トークンでない・zsh が優先順リストに
+    /// 有効化されている・spans 十分・span 内容がエスケープ可能）かどうかを、
+    /// 実際に zsh プロセスを起動せず安価に判定する。
+    ///
+    /// [`CompletionProvider::is_responsible`] と `provide()` 本体の両方から
+    /// 呼ばれる判定基準の単一の情報源（perf/completion-latency）。
+    /// `provide()` が `gate()` の後に行う副作用（`shutdown_daemon_if_running`
+    /// の呼び出し、ブリッジディレクトリへのファイル書き込み）はここには
+    /// 含めない — `is_responsible` は「対象かどうか」の純粋に近い判定に
+    /// 留め、実際の実行（と、その過程で起きる副作用）は `provide()` 側の
+    /// 責務のままにする。
+    fn is_target_of_zsh_bridge(&self, ctx: &CompletionContext) -> bool {
+        if ctx.is_first_token {
+            // コマンド名自体の補完は CommandProvider の担当。
+            return false;
+        }
+
+        // `MIN_TIMEOUT_MS` フロアの有無は「対象かどうか」の判定には無関係
+        // （timeout 値そのものは使わない）が、`gate()` を呼ぶこと自体が
+        // 「zsh が enabled かつバイナリ検出済みか」を確認する唯一の経路
+        // なので `provide()` と同じ呼び方をする。
+        if gate(
+            &self.settings,
+            ExternalKind::Zsh,
+            Some(Duration::from_millis(MIN_TIMEOUT_MS)),
+        )
+        .is_none()
+        {
+            return false;
+        }
+
+        if self.resolve_zsh().is_none() {
+            return false;
+        }
+
+        if ctx.spans().len() < 2 {
+            // spans[0] (コマンド名) しかない = まだサブコマンド/引数の
+            // 補完対象がない（carapace.rs と同じガード）。
+            return false;
+        }
+
+        // 制御文字を含む span は `escape_spans` が None を返す（安全に
+        // 表現できず補完を諦める既存仕様）。この場合も「zsh ブリッジが
+        // 対象だが実行できない」ではなく「そもそも対象外」寄りの性質が
+        // 強いが、`provide()` 側もこの場合 None に縮退するため、
+        // is_responsible を true にすると「誤って PathProvider を抑止して
+        // 空候補になる」だけで済み（安全側）、逆に false にすると通常の
+        // 制御文字混入ケースで PathProvider に静かにフォールスルーする
+        // （挙動が変わる）。ここでは後者（既存挙動維持）を優先し、
+        // escape 不能なら「対象外」として扱う。
+        escape_spans(&ctx.spans()).is_some()
+    }
+}
+
 impl CompletionProvider for ZshBridgeProvider {
+    fn is_responsible(&self, ctx: &CompletionContext) -> bool {
+        self.is_target_of_zsh_bridge(ctx)
+    }
+
     fn provide(&self, ctx: &CompletionContext) -> Option<Vec<Candidate>> {
         if ctx.is_first_token {
             // コマンド名自体の補完は CommandProvider の担当。
@@ -1554,6 +1630,65 @@ mod tests {
         assert!(provider.provide(&ctx).is_none());
     }
 
+    // ── is_responsible (perf/completion-latency) ──
+    //
+    // provide() 冒頭の「そもそも自分の対象か」ガードと同じ基準で、実際に
+    // zsh プロセスを起動せず判定できることを検証する。
+
+    #[test]
+    fn is_responsible_true_when_zsh_enabled_and_not_first_token() {
+        let settings = zsh_enabled_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary(settings, PathBuf::from("/bin/zsh"));
+        let ctx = super::super::context::extract_context("git chec", 8);
+        assert!(!ctx.is_first_token);
+        assert!(provider.is_responsible(&ctx));
+    }
+
+    #[test]
+    fn is_responsible_false_when_external_is_disabled() {
+        let settings = disabled_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary(settings, PathBuf::from("/bin/zsh"));
+        let ctx = super::super::context::extract_context("git chec", 8);
+        assert!(!provider.is_responsible(&ctx));
+    }
+
+    #[test]
+    fn is_responsible_false_when_only_carapace_is_enabled() {
+        let settings = carapace_only_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary(settings, PathBuf::from("/bin/zsh"));
+        let ctx = super::super::context::extract_context("git chec", 8);
+        assert!(!provider.is_responsible(&ctx));
+    }
+
+    #[test]
+    fn is_responsible_false_for_first_token() {
+        let settings = zsh_enabled_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary(settings, PathBuf::from("/bin/zsh"));
+        let ctx = super::super::context::extract_context("gi", 2);
+        assert!(ctx.is_first_token);
+        assert!(!provider.is_responsible(&ctx));
+    }
+
+    #[test]
+    fn is_responsible_false_when_spans_too_short() {
+        let settings = zsh_enabled_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary(settings, PathBuf::from("/bin/zsh"));
+        let ctx = super::super::context::extract_context("git", 3);
+        assert!(!provider.is_responsible(&ctx));
+    }
+
+    #[test]
+    fn is_responsible_matches_provide_none_reason_when_zsh_disabled_or_carapace_only() {
+        // provide() と is_responsible() が同じ判定基準（gate() 経由）を
+        // 共有していることの確認: 無効化されている場合は両方揃って
+        // false/None を返す。
+        let settings = carapace_only_external_completion();
+        let provider = ZshBridgeProvider::with_zsh_binary(settings, PathBuf::from("/bin/zsh"));
+        let ctx = super::super::context::extract_context("git chec", 8);
+        assert_eq!(provider.provide(&ctx), None);
+        assert!(!provider.is_responsible(&ctx));
+    }
+
     // ── 統合テスト（実行時 zsh 有無で skip） ──
 
     fn zsh_binary() -> Option<PathBuf> {
@@ -1594,7 +1729,30 @@ mod tests {
                 ..CompletionConfig::default()
             },
         )));
-        let provider = ZshBridgeProvider::with_zsh_binary(settings, zsh);
+        // ブリッジディレクトリと HOME をテスト専用の一時ディレクトリへ隔離する。
+        //
+        // 隔離しない場合、このテストは**実ユーザーの**
+        // `~/.config/jarvish/zsh-bridge` と実 `$HOME` を使ってデーモンを
+        // spawn してしまう。そのため結果が開発者のローカル環境に依存し、
+        // 実際に以下の形で不安定化していた（実測）:
+        //   - 実 `.zshrc` / `.zshenv` が重い（プラグインマネージャ等）と
+        //     レディマーカーが cold timeout 内に届かず spawn に失敗する
+        //     （`zsh daemon failed to reach ready marker within timeout`）
+        //   - 実ブリッジ dir に溜まった大量の残骸ファイルや、実 `$HOME` の
+        //     compdump キャッシュの状態に左右される
+        // 他の統合テスト（`extra_envs` で `HOME` を隔離しているもの）と同じ
+        // 方針に揃え、環境非依存にする。
+        let bridge_tmp = tempfile::tempdir().unwrap();
+        let home_tmp = tempfile::tempdir().unwrap();
+        let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
+            settings,
+            zsh,
+            bridge_tmp.path().join("zsh-bridge"),
+            vec![(
+                "HOME".to_string(),
+                home_tmp.path().to_string_lossy().into_owned(),
+            )],
+        );
 
         let line = "git checkout zzjarvish-bridge-";
         let ctx = super::super::context::extract_context(line, line.len());

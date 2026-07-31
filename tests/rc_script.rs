@@ -1363,16 +1363,40 @@ fn sourcing_a_directory_named_dot_toml_reports_is_a_directory_and_skips_reload_c
     );
 }
 
-/// (B5) rc/source 経由で実行された行は Black Box（history.db）に
-/// **記録されない**こと。これは DESIGN CONTRACT（意図的な仕様）であり、
-/// スクリプト行は「設定の再生」であって対話的に打ったコマンドではない
-/// ため、起動のたびに history をスパムしない（bash の `source` と同じ
-/// 方針）。対照として、`-c` の引数自体として渡された行は通常どおり
-/// 記録されることも合わせて確認し、「rc 経由は記録されない」ことが
-/// 「history 機能そのものが働いていない」わけではないことを示す。
+/// (B5 / 非対話単体実行の履歴非記録) rc/source 経由で実行された行、および
+/// `jarvish -c "<command>"`（非対話単体実行）で渡された行は、いずれも
+/// Black Box（history.db）に **記録されない** こと。
+///
+/// これは DESIGN CONTRACT（意図的な仕様）である:
+/// - rc スクリプト行は「設定の再生」であって対話的に打ったコマンドでは
+///   ないため、起動のたびに history をスパムしない（bash の `source` と
+///   同じ方針）。
+/// - `-c` 単体実行は `Shell { interactive: false, .. }` となり、
+///   `record_history`（`src/shell/input.rs`）の冒頭 `if !self.interactive
+///   { return; }` により記録がスキップされる。これは `nvim` 等の外部
+///   ツールがファイル glob 展開のために `jarvish -c "vimglob() {...}"`
+///   を呼んだ際、その一時コマンドが対話履歴（上下矢印キー補完）に混入
+///   するのを防ぐための変更（`interactive` フィールドは `src/shell/mod.rs`、
+///   `resolve_interactive` は `src/main.rs` 参照）。
+///
+/// 旧仕様では「rc.jsh 行は非記録／-c 行は記録される」という対比だったが、
+/// 本変更により -c 行も非記録になったため、両方が非記録であることを
+/// 検証する形に書き換えた（旧テスト名:
+/// `rc_script_lines_are_not_recorded_to_history_but_dash_c_lines_are`）。
+///
+/// 対話入力（reedline 経由）が記録されることまでは本テストでは検証
+/// できない。reedline は実端末（TTY, raw mode の termios）を要求し、
+/// `std::process::Command` の `Stdio::piped()` で stdin にコマンドを
+/// 流し込む方式では PTY が割り当てられず `Device not configured
+/// (os error 6)` で即エラー終了することを実験で確認済み（PTY 未割当の
+/// パイプ stdin では reedline の `read_line()` に到達すらしない）。
+/// そのため対話経路の記録確認は本テストの対象外とし、「history 機能
+/// 自体は生きている」ことの担保は `src/storage/mod.rs` の
+/// `record_stores_command_metadata`（`BlackBox::record` のユニット
+/// テスト）に委ねる。
 #[test]
 #[serial]
-fn rc_script_lines_are_not_recorded_to_history_but_dash_c_lines_are() {
+fn dash_c_lines_are_not_recorded_to_history() {
     let tmpdir = tempfile::tempdir().unwrap();
     let home = tmpdir.path();
     let rc_path = home.join("rc_defines_marker_alias.jsh");
@@ -1381,16 +1405,25 @@ fn rc_script_lines_are_not_recorded_to_history_but_dash_c_lines_are() {
     let exe = env!("CARGO_BIN_EXE_jarvish");
     // rc.jsh 側では alias 定義だけ行い、実際にそれを「実行」するのは
     // -c 側の1行目にする —— これにより、rc.jsh の行自体
-    // （alias 定義行）が記録されていないことと、-c 側の行
-    // （dash_c_marker_line、対話/非対話コマンド実行の通常経路）が
-    // 記録されていることの両方を、同一プロセスの起動で確認できる。
+    // （alias 定義行）と、-c 側の行（echo コマンド）の両方が非記録で
+    // あることを、同一プロセスの起動で確認できる。
+    //
+    // -c 側は `echo <marker>` の形にする（他のテストと同じパターン）:
+    // 単語一つだけの未知コマンド名（例: "dash_c_marker_line" 単体）は
+    // 分類器が InputType::NaturalLanguage と判定して AI にルーティング
+    // してしまい、Command 経路（record_history が呼ばれる経路）を
+    // 通らないため、確実に InputType::Command になる `echo` 呼び出しに
+    // する。history 側の判定マーカーは echo の**出力文字列**とは別の
+    // 語（`DASH_C_HISTORY_MARKER`）にし、record が働いていれば
+    // `history -n 50` の一覧にコマンド文字列として出現するはずのその
+    // 語を素直に contains で検査する（echo 自身の出力と紛れない）。
     let output = std::process::Command::new(exe)
         .env("HOME", home)
         .args([
             "--rcfile",
             rc_path.to_str().unwrap(),
             "-c",
-            "dash_c_marker_line\nhistory -n 50",
+            "echo DASH_C_HISTORY_MARKER\nhistory -n 50",
         ])
         .output()
         .expect("failed to spawn jarvish");
@@ -1398,18 +1431,77 @@ fn rc_script_lines_are_not_recorded_to_history_but_dash_c_lines_are() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // -c の1行目自体（"dash_c_marker_line"、存在しないコマンド）は
-    // 通常の -c 実行経路を通るため history に記録されるはず。
+    // echo 自身の出力として、マーカー文字列は1回は stdout に現れる。
     assert!(
-        stdout.contains("dash_c_marker_line"),
-        "a line passed via -c must be recorded to history (contrast case): \
-         stdout={stdout} stderr={stderr}"
+        stdout.contains("DASH_C_HISTORY_MARKER"),
+        "sanity check: the echo command itself must have run and printed the \
+         marker: stdout={stdout} stderr={stderr}"
+    );
+    // history 一覧にコマンド全文（"echo DASH_C_HISTORY_MARKER"）が
+    // 記録されていれば、その文字列が stdout 中に2回目以降として出現する
+    // はず。新仕様（-c 単体実行は非記録）では、echo の出力による1回の
+    // 出現のみで、history 一覧側には出現しない。
+    let occurrences = stdout.matches("DASH_C_HISTORY_MARKER").count();
+    assert_eq!(
+        occurrences, 1,
+        "a line passed via -c (non-interactive single execution) must NOT be \
+         recorded to history: expected the marker to appear exactly once \
+         (from echo's own stdout) but it appeared {occurrences} times \
+         (a 2nd+ occurrence would indicate it also showed up in the \
+         `history -n 50` listing): stdout={stdout} stderr={stderr}"
     );
     // rc.jsh 側の行（"alias rc_marker_cmd=..."）は rc/source 経由なので
-    // 記録されてはならない。
+    // 引き続き記録されてはならない。
     assert!(
         !stdout.contains("rc_marker_cmd"),
         "a line executed via the rc script must NOT be recorded to history \
          (Fix B5 / DESIGN CONTRACT): stdout={stdout}"
+    );
+}
+
+/// `dash_c_lines_are_not_recorded_to_history` の単純化版: `--rcfile` を
+/// 一切絡めず、`jarvish -c "<command>"` 単体だけで
+/// 「-c で渡した行は履歴に記録されない」ことを確認する。上のテストは
+/// rc.jsh との相互作用込みの回帰確認を兼ねるため、こちらは `-c` 単体の
+/// 非記録契約だけを狙い撃ちで検証する最小構成のテストとして分離した
+/// （`--no-rc` で rc.jsh 読み込み自体を無効化し、変数を完全に排除）。
+#[test]
+#[serial]
+fn dash_c_single_command_is_not_recorded_to_history() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let home = tmpdir.path();
+
+    let exe = env!("CARGO_BIN_EXE_jarvish");
+    // マーカーは `echo` 経由で出力する（単語単体の未知コマンド名は
+    // InputType::NaturalLanguage に分類されて AI にルーティングされて
+    // しまい、Command 経路 = record_history の対象経路を通らないため。
+    // 詳細は `dash_c_lines_are_not_recorded_to_history` のコメント参照）。
+    let output = std::process::Command::new(exe)
+        .env("HOME", home)
+        .args([
+            "--no-rc",
+            "-c",
+            "echo some_unique_marker_cmd\nhistory -n 50",
+        ])
+        .output()
+        .expect("failed to spawn jarvish");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("some_unique_marker_cmd"),
+        "sanity check: the echo command itself must have run and printed the \
+         marker: stdout={stdout} stderr={stderr}"
+    );
+    // echo 自身の出力として1回だけ現れるはず。history 一覧
+    // （`history -n 50` の出力）に記録されていれば2回目以降が出現する。
+    let occurrences = stdout.matches("some_unique_marker_cmd").count();
+    assert_eq!(
+        occurrences, 1,
+        "a line passed via `jarvish -c` must NOT be recorded to history.db \
+         (non-interactive single execution, interactive=false): expected \
+         the marker to appear exactly once (from echo's own stdout) but it \
+         appeared {occurrences} times: stdout={stdout} stderr={stderr}"
     );
 }

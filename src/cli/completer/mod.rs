@@ -16,9 +16,20 @@
 //! 既定 `"auto"` では [`Carapace`](carapace::CarapaceProvider) →
 //! [`ZshBridge`](zsh_bridge::ZshBridgeProvider) の順だが、`[completion]
 //! external` を配列（例: `["zsh", "carapace"]`）で指定すると入れ替わる）→
-//! [`Path`](path::PathProvider) の順に各プロバイダを走査し、最初に `Some` を
-//! 返したプロバイダの候補を採用する（`None` = 対象外で次へ、`Some(vec![])` =
-//! 担当したが候補なしでそこで確定）。`GitProvider` を外部補完プロバイダ列より
+//! [`Path`](path::PathProvider) の順に各プロバイダを走査し（実際の走査は
+//! [`dispatch_providers`] が行う）、最初に `Some` を返したプロバイダの候補を
+//! 採用する（`None` = 対象外で次へ、`Some(vec![])` = 担当したが候補なしで
+//! そこで確定）。ただし外部補完プロバイダ（carapace / zsh ブリッジ）が
+//! `is_responsible(ctx)`（[`CompletionProvider::is_responsible`]）で
+//! 「自分が対象コマンドの責任者である」と申告した上で `None`（タイムアウト・
+//! 実行エラー）を返した場合は例外で、以降の `PathProvider` へは
+//! フォールスルーせず候補なしのまま確定する（perf/completion-latency:
+//! 「対象コマンドなのに外部補完が失敗 → 無関係なパス補完が一瞬表示され、
+//! 後続の Tab で正しい候補に切り替わる」という体験を根絶するため —
+//! fish shell の調査で判明した設計指針「待たせるのは良いが、誤った結果を
+//! 見せてはならない」を反映している。詳細は [`dispatch_providers`] と
+//! `provider.rs` の `is_responsible` ドキュメント参照）。
+//! `GitProvider` を外部補完プロバイダ列より
 //! 先に置いているのは、設定済みのブランチ系サブコマンドではカレントブランチ
 //! 優先の並び順（`GitProvider` 側の既存ロジック）を外部補完の並び順より
 //! 優先したいため。既定順で carapace を zsh ブリッジより先にしているのは、
@@ -183,11 +194,7 @@ impl Completer for JarvishCompleter {
             apply_shell_alias(&mut ctx, &snapshot);
         }
 
-        let candidates = self
-            .providers
-            .iter()
-            .find_map(|provider| provider.provide(&ctx))
-            .unwrap_or_default();
+        let candidates = dispatch_providers(&self.providers, &ctx);
 
         let strip_descriptions = should_strip_descriptions(candidates.len());
 
@@ -208,6 +215,52 @@ impl Completer for JarvishCompleter {
             })
             .collect()
     }
+}
+
+/// プロバイダ列を順に走査し、`Some` を返した最初のプロバイダの候補を採用する
+/// （tri-state 契約は維持: `None` = 次へ、`Some(vec![])` = 担当したが候補なし
+/// でそこで確定）。
+///
+/// 唯一の変更点: あるプロバイダを試す**前**に、それまで `None` を返した
+/// 先行プロバイダのうち一つでも `is_responsible(ctx)` が true だったかを
+/// 追跡し、true になった時点でそのプロバイダ（多くの場合、常に `Some` を
+/// 返す終端の `PathProvider`）自体を**呼び出さずに**空候補で確定する。
+///
+/// これが無いと「carapace/zsh が対象コマンドだったのに失敗 → 常に `Some`
+/// を返す `PathProvider` まで `find_map` が落ちて、無関係なファイルパス
+/// 候補が表示される」という perf/completion-latency の core bug がそのまま
+/// 再現する。`is_responsible` の既定値は `false` なので、外部補完プロバイダ
+/// 以外（`CommandProvider` / `GitProvider` / `RegistryProvider` 等）は今まで
+/// どおり単純な `None` フォールスルーとして扱われる。
+///
+/// なおこのフラグは、外部補完プロバイダが実際に候補を返せた場合
+/// （ループ内で先に `Some(candidates)` として return する）には一切
+/// 関与しない — 通常の成功パスは完全に従来どおり。
+fn dispatch_providers(
+    providers: &[Box<dyn CompletionProvider>],
+    ctx: &CompletionContext,
+) -> Vec<provider::Candidate> {
+    let mut external_provider_failed = false;
+
+    for candidate_provider in providers {
+        if external_provider_failed {
+            // 対象コマンドの責任者（外部補完プロバイダ）が既に失敗している。
+            // 以降のプロバイダ（典型的には PathProvider）は呼び出さず、
+            // 誤った候補を一切見せないまま空候補で確定する。
+            break;
+        }
+
+        match candidate_provider.provide(ctx) {
+            Some(candidates) => return candidates,
+            None => {
+                if candidate_provider.is_responsible(ctx) {
+                    external_provider_failed = true;
+                }
+            }
+        }
+    }
+
+    Vec::new()
 }
 
 /// 候補数が [`DESCRIPTION_LIMIT`] を超えるかどうかを判定する。
@@ -1235,9 +1288,17 @@ mod tests {
         response: Option<Vec<provider::Candidate>>,
         call_count: Arc<std::sync::atomic::AtomicUsize>,
         call_order: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        /// [`CompletionProvider::is_responsible`] の戻り値（既定 `false`）。
+        /// 外部補完プロバイダの「対象コマンドなのに失敗した」を模擬する
+        /// テスト（`dispatch_provider_chain` 系）でのみ `true` を使う。
+        is_responsible: bool,
     }
 
     impl CompletionProvider for FakeProvider {
+        fn is_responsible(&self, _ctx: &CompletionContext) -> bool {
+            self.is_responsible
+        }
+
         fn provide(&self, _ctx: &CompletionContext) -> Option<Vec<provider::Candidate>> {
             self.call_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1266,6 +1327,7 @@ mod tests {
             response: None,
             call_count: Arc::clone(&first_calls),
             call_order: Arc::clone(&call_order),
+            is_responsible: false,
         };
         let second = FakeProvider {
             name: "second",
@@ -1276,6 +1338,7 @@ mod tests {
             }]),
             call_count: Arc::clone(&second_calls),
             call_order: Arc::clone(&call_order),
+            is_responsible: false,
         };
 
         let mut completer = fake_completer_with_providers(vec![Box::new(first), Box::new(second)]);
@@ -1306,6 +1369,7 @@ mod tests {
             response: Some(Vec::new()),
             call_count: Arc::clone(&first_calls),
             call_order: Arc::clone(&call_order),
+            is_responsible: false,
         };
         let second = FakeProvider {
             name: "second",
@@ -1316,6 +1380,7 @@ mod tests {
             }]),
             call_count: Arc::clone(&second_calls),
             call_order: Arc::clone(&call_order),
+            is_responsible: false,
         };
 
         let mut completer = fake_completer_with_providers(vec![Box::new(first), Box::new(second)]);
@@ -1357,12 +1422,14 @@ mod tests {
                 response: None,
                 call_count: Arc::clone(&dummy_counts[0]),
                 call_order: Arc::clone(&call_order),
+                is_responsible: false,
             }),
             Box::new(FakeProvider {
                 name: "beta",
                 response: None,
                 call_count: Arc::clone(&dummy_counts[1]),
                 call_order: Arc::clone(&call_order),
+                is_responsible: false,
             }),
             Box::new(FakeProvider {
                 name: "gamma",
@@ -1373,6 +1440,7 @@ mod tests {
                 }]),
                 call_count: Arc::clone(&dummy_counts[2]),
                 call_order: Arc::clone(&call_order),
+                is_responsible: false,
             }),
         ];
 
@@ -1388,6 +1456,225 @@ mod tests {
         );
         let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
         assert_eq!(values, vec!["from-gamma"]);
+    }
+
+    // ── is_responsible / PathProvider フォールスルー抑止 (perf/completion-latency) ──
+    //
+    // 「対象コマンドの外部補完プロバイダが None（タイムアウト/失敗）を
+    // 返した場合、PathProvider へフォールスルーしない」という新しい振る舞い
+    // を、実際の carapace/zsh バイナリに依存せず FAKE provider で証明する。
+
+    #[test]
+    fn dispatch_responsible_provider_failure_suppresses_path_fallback() {
+        // 「対象だが失敗」(is_responsible=true, response=None) の後ろに
+        // PathProvider 相当の「常に Some を返す」FAKE を置いても、
+        // その FAKE は一切呼ばれず、結果は空になる。
+        let responsible_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let path_like_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let call_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let responsible_but_failed = FakeProvider {
+            name: "external",
+            response: None,
+            call_count: Arc::clone(&responsible_calls),
+            call_order: Arc::clone(&call_order),
+            is_responsible: true,
+        };
+        let path_like = FakeProvider {
+            name: "path-like",
+            response: Some(vec![provider::Candidate {
+                value: "irrelevant-file.txt".to_string(),
+                description: None,
+                append_whitespace: true,
+            }]),
+            call_count: Arc::clone(&path_like_calls),
+            call_order: Arc::clone(&call_order),
+            is_responsible: false,
+        };
+
+        let mut completer = fake_completer_with_providers(vec![
+            Box::new(responsible_but_failed),
+            Box::new(path_like),
+        ]);
+        let line = "tmuxinator ";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        assert_eq!(
+            responsible_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the responsible external provider should have been tried exactly once"
+        );
+        assert_eq!(
+            path_like_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "PathProvider-like terminal provider must NOT be invoked once a \
+             responsible external provider has failed: wrong-then-switch must not happen"
+        );
+        assert!(
+            suggestions.is_empty(),
+            "no wrong path candidates should ever surface: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_no_responsible_provider_still_falls_through_to_path() {
+        // 対比: is_responsible=false のまま None を返す従来どおりの
+        // プロバイダの後ろでは、PathProvider 相当の FAKE が通常どおり
+        // 呼ばれ候補を返す（既存挙動の非回帰確認）。
+        let not_responsible_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let path_like_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let call_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let not_responsible = FakeProvider {
+            name: "not-responsible",
+            response: None,
+            call_count: Arc::clone(&not_responsible_calls),
+            call_order: Arc::clone(&call_order),
+            is_responsible: false,
+        };
+        let path_like = FakeProvider {
+            name: "path-like",
+            response: Some(vec![provider::Candidate {
+                value: "readme.txt".to_string(),
+                description: None,
+                append_whitespace: true,
+            }]),
+            call_count: Arc::clone(&path_like_calls),
+            call_order: Arc::clone(&call_order),
+            is_responsible: false,
+        };
+
+        let mut completer =
+            fake_completer_with_providers(vec![Box::new(not_responsible), Box::new(path_like)]);
+        let line = "somecmd ";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        assert_eq!(
+            path_like_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "PathProvider-like terminal provider must still run when no \
+             provider claimed responsibility: ordinary path completion must not regress"
+        );
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert_eq!(values, vec!["readme.txt"]);
+    }
+
+    #[test]
+    fn dispatch_responsible_provider_success_returns_its_candidates_normally() {
+        // 対象コマンドの外部補完プロバイダが実際に候補を返せた場合は、
+        // is_responsible の有無に関わらず通常どおりその候補が採用される
+        // （成功パスは is_responsible の影響を一切受けない）。
+        let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let call_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let succeeding_external = FakeProvider {
+            name: "external",
+            response: Some(vec![provider::Candidate {
+                value: "start".to_string(),
+                description: None,
+                append_whitespace: true,
+            }]),
+            call_count: Arc::clone(&call_count),
+            call_order: Arc::clone(&call_order),
+            is_responsible: true,
+        };
+
+        let mut completer = fake_completer_with_providers(vec![Box::new(succeeding_external)]);
+        let line = "tmuxinator ";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
+        assert_eq!(values, vec!["start"]);
+    }
+
+    #[test]
+    fn dispatch_responsible_provider_empty_some_still_short_circuits() {
+        // tri-state 契約の保存確認: is_responsible=true のプロバイダが
+        // Some(vec![])（担当したが候補なし）を返した場合も、これは
+        // "None による失敗" ではなく正常な短絡確定であり、以降の
+        // プロバイダ（PathProvider 相当）へは一切フォールスルーしない
+        // （これは元々の tri-state の意味論であり、is_responsible の導入で
+        // 変わらないことを確認する）。
+        let first_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let call_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let first = FakeProvider {
+            name: "first",
+            response: Some(Vec::new()),
+            call_count: Arc::clone(&first_calls),
+            call_order: Arc::clone(&call_order),
+            is_responsible: true,
+        };
+        let second = FakeProvider {
+            name: "second",
+            response: Some(vec![provider::Candidate {
+                value: "from-second".to_string(),
+                description: None,
+                append_whitespace: true,
+            }]),
+            call_count: Arc::clone(&second_calls),
+            call_order: Arc::clone(&call_order),
+            is_responsible: false,
+        };
+
+        let mut completer = fake_completer_with_providers(vec![Box::new(first), Box::new(second)]);
+        let line = "anything arg";
+        let pos = line.len();
+        let suggestions = completer.complete(line, pos);
+
+        assert_eq!(second_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn dispatch_bounded_time_when_multiple_providers_fail() {
+        // スタック予算リグレッションのガード: 複数の外部プロバイダ相当の
+        // FAKE が「対象だが失敗」を返しても、判定自体は実プロセスを
+        // 起動しないため、チェーン全体の所要時間はミリ秒オーダーに収まる
+        // べき（carapace の 500ms + zsh ブリッジの 2000ms フロアが
+        // 積み上がって 2.5 秒フリーズする、という #(perf/completion-latency)
+        // の回帰を防ぐガード）。ここでは FAKE のため実際の外部プロセス
+        // コストは含まれないが、`dispatch_providers` 自体のオーバーヘッドが
+        // 無視できる程度であることを確認する。
+        let call_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let providers: Vec<Box<dyn CompletionProvider>> = (0..5)
+            .map(|i| {
+                Box::new(FakeProvider {
+                    name: match i {
+                        0 => "p0",
+                        1 => "p1",
+                        2 => "p2",
+                        3 => "p3",
+                        _ => "p4",
+                    },
+                    response: None,
+                    call_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    call_order: Arc::clone(&call_order),
+                    is_responsible: i == 0,
+                }) as Box<dyn CompletionProvider>
+            })
+            .collect();
+
+        let mut completer = fake_completer_with_providers(providers);
+        let line = "anything arg";
+        let pos = line.len();
+
+        let start = std::time::Instant::now();
+        let suggestions = completer.complete(line, pos);
+        let elapsed = start.elapsed();
+
+        assert!(suggestions.is_empty());
+        // p0 が is_responsible=true で None を返した時点で以降は一切
+        // 呼ばれないはず。
+        assert_eq!(*call_order.lock().unwrap(), vec!["p0"]);
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "dispatch should short-circuit quickly once a responsible provider fails, took {elapsed:?}"
+        );
     }
 
     #[test]
