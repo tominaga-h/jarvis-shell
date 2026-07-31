@@ -52,7 +52,6 @@
 //! 形で追加できる（既存の `enabled` 優先順リストとは別に、コマンド名 →
 //! 優先種別のマップを resolve() 側に持たせる設計が有力）。
 
-mod async_cache;
 mod carapace;
 mod command;
 mod context;
@@ -72,7 +71,6 @@ use reedline::{Completer, Suggestion};
 
 use crate::engine::expand::{operator_prefix_len, split_quoted};
 
-use async_cache::AsyncCacheProvider;
 use carapace::{CarapaceProvider, ExternalKind};
 use command::CommandProvider;
 use context::{extract_context, CompletionContext};
@@ -146,15 +144,6 @@ impl JarvishCompleter {
 ///
 /// 未知の種別が将来追加されても [`ExternalKind`] の列挙に従うだけなので、
 /// この関数自体を変更する必要はない。
-///
-/// carapace / zsh ブリッジはいずれも自身のタイムアウト予算いっぱいまで
-/// UI スレッドをブロックしうる（`find_map` チェーンではタイムアウト予算が
-/// 加算されるため最悪 ~2.5 秒 — `mod.rs` モジュールドキュメント参照）ため、
-/// ここで [`AsyncCacheProvider`] にラップしてバックグラウンド化する。
-/// `CommandProvider` / `RegistryProvider` / `GitProvider` / `PathProvider`
-/// は高速なローカル処理なのでラップ対象外（ラップするとミス時に
-/// 「1 回目は必ず空、2 回目でようやく候補」という UX 劣化を招くだけで
-/// 得るものがない）。
 fn external_provider_chain(
     external_completion: &Arc<RwLock<ExternalCompletionSettings>>,
     zsh_daemon: &SharedDaemonSlot,
@@ -167,16 +156,15 @@ fn external_provider_chain(
     order
         .into_iter()
         .map(|kind| -> Box<dyn CompletionProvider> {
-            let inner: Arc<dyn CompletionProvider + Send + Sync> = match kind {
+            match kind {
                 ExternalKind::Carapace => {
-                    Arc::new(CarapaceProvider::new(Arc::clone(external_completion)))
+                    Box::new(CarapaceProvider::new(Arc::clone(external_completion)))
                 }
-                ExternalKind::Zsh => Arc::new(ZshBridgeProvider::new(
+                ExternalKind::Zsh => Box::new(ZshBridgeProvider::new(
                     Arc::clone(external_completion),
                     Arc::clone(zsh_daemon),
                 )),
-            };
-            Box::new(AsyncCacheProvider::new(inner))
+            }
         })
         .collect()
 }
