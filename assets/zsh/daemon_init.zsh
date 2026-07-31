@@ -111,6 +111,41 @@ jarvish-complete-word () {
 zle -N jarvish-complete-word
 bindkey '^I' jarvish-complete-word
 
+# ZLE widget that applies the current working directory sent by jarvish.
+#
+# WHY THIS EXISTS: this daemon is a long-lived child process. It inherits
+# jarvish's cwd at spawn time and keeps it forever — jarvish's later
+# `chdir(2)` (the `cd` builtin) cannot reach an already-running child.
+# Without this, completion functions that resolve relative paths (`_files`,
+# `_path_files`, ...) would glob against the directory jarvish was LAUNCHED
+# from, offering files that do not exist where the user actually is.
+#
+# jarvish sends `^U <escaped-dir> ^G` before a request whenever its cwd has
+# changed. The widget consumes $BUFFER as the target directory, chdirs, then
+# clears the buffer so the following completion request starts clean.
+#
+# WHY ^G AND NOT ^X: in zsh's emacs keymap `^X` is a multi-key PREFIX (16
+# bindings such as `^X^B`, `^X^U`, ...). Binding a widget to bare `^X` leaves
+# ZLE waiting for a second keystroke, so the byte never fires the widget and
+# is instead redrawn as literal buffer text — empirically observed during
+# development. `^G` (default `send-break`) is a single, self-contained
+# binding with no prefix role, so rebinding it is unambiguous. The daemon
+# never needs `send-break`: it never runs commands (^M/^J are `undefined`).
+#
+# `cd` is invoked as `builtin cd -q --` so that user-level `cd` wrappers,
+# chpwd hooks (-q) and directories starting with `-` cannot interfere.
+# The buffer is cleared unconditionally: on failure the daemon simply stays
+# where it was rather than leaving a stray path in the completion buffer.
+jarvish-set-cwd () {
+    local target=${(Q)BUFFER}
+    BUFFER=
+    CURSOR=0
+    [[ -n $target ]] && builtin cd -q -- $target 2>/dev/null
+    return 0
+}
+zle -N jarvish-set-cwd
+bindkey '^G' jarvish-set-cwd
+
 # never group stuff! (verbatim from capture.zsh's inner block)
 zstyle ':completion:*' list-grouped false
 # don't insert tab when attempting completion on empty line
