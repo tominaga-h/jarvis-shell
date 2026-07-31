@@ -485,17 +485,36 @@ impl CompletionProvider for CarapaceProvider {
     /// を共有するため、判定基準が drift しない（`is_responsible` の
     /// ドキュメントは `provider.rs` 参照）。
     ///
-    /// carapace の `values` が空だった場合（実行はできたが対象コマンドの
-    /// spec が無い等）もここでは true のまま — `provide()` 内部で
-    /// `run_external_capped` がタイムアウトしたのか、正常終了して単に空
-    /// だったのかを `is_responsible` の呼び出し時点（実行前）では区別
-    /// できない。実測ではタイムアウトより「spec が無く一瞬で空応答」の
-    /// 方が遥かに多い（タスク背景: tmuxinator で carapace は 10-20ms で
-    /// bail する）ため、この設計は過度に保守的になり得るが、安全側
-    /// （「対象コマンドなら待ってでも正しい結果か何もなしを見せる」）に
-    /// 倒すという設計判断に合致する。
-    fn is_responsible(&self, ctx: &CompletionContext) -> bool {
-        self.responsibility_gate(ctx).is_some()
+    /// **carapace は「責任者」を名乗らない**（常に `false`）。
+    ///
+    /// # なぜ常に false なのか（実機で踏んだ不具合）
+    /// carapace は内蔵 spec（653 個）を持つコマンドしか答えられず、spec が
+    /// 無いコマンドでは**正常終了しつつ空の出力**を返す（実測: `carapace
+    /// tmuxinator export tmuxinator ''` は exit 0 かつ出力ゼロ、10〜20ms）。
+    /// `provide()` はこれを `None` に畳むが、これは「タイムアウトして
+    /// 答えられなかった」ではなく「自分の担当ではないので次に譲る」の意味。
+    ///
+    /// ここで `responsibility_gate().is_some()` を返していた実装は、
+    /// **spec の有無を区別できない**ため、carapace が spec を持たない
+    /// コマンド（tmuxinator 等）でも「責任者だが失敗した」と申告していた。
+    /// その結果 `dispatch_providers` がチェーンをそこで打ち切り、**本来
+    /// 答えられる zsh ブリッジが一度も呼ばれず**、ユーザーには
+    /// 「NO RECORDS FOUND」だけが表示された（実機報告）。
+    ///
+    /// # 責任者になれるのは「後ろに誰もいない」プロバイダだけ
+    /// `external = "auto"` では carapace → zsh ブリッジの順に並ぶ。carapace が
+    /// 答えられなくても後段の zsh ブリッジが答えられる以上、carapace は
+    /// 「このコマンドの最終的な責任者」ではない。誤ったパス補完を抑止する
+    /// 役割は、外部補完チェーンの**最後**に位置する zsh ブリッジ
+    /// （[`super::zsh_bridge::ZshBridgeProvider::is_responsible`]）が担う。
+    ///
+    /// carapace のみを有効化した構成（`external = "carapace"`）では zsh
+    /// ブリッジが存在しないため、carapace が答えられなければ従来どおり
+    /// `PathProvider` へフォールバックする。carapace が扱えないコマンドで
+    /// パス補完すら出さないより、パス補完に落ちるほうが実害が小さい
+    /// （carapace は spec の無いコマンドが多数あるため）。
+    fn is_responsible(&self, _ctx: &CompletionContext) -> bool {
+        false
     }
 
     fn provide(&self, ctx: &CompletionContext) -> Option<Vec<Candidate>> {
@@ -917,13 +936,28 @@ mod tests {
     // provide() の冒頭ガードと同じ条件を、実際に外部プロセスを起動せず
     // 判定できることを検証する。
 
+    /// carapace は spec を持たないコマンドで正常終了しつつ空を返すため、
+    /// 「責任者だが失敗した」と申告してはならない（常に false）。
+    ///
+    /// これを true にしていた実装では、carapace が spec を持たない
+    /// コマンド（tmuxinator 等）で `dispatch_providers` がチェーンを
+    /// 打ち切り、後段の zsh ブリッジが呼ばれずに候補ゼロ（実機の
+    /// 「NO RECORDS FOUND」）になっていた。その回帰テスト。
     #[test]
-    fn is_responsible_true_when_binary_present_and_not_first_token_and_not_cd() {
+    fn is_responsible_is_always_false_so_the_chain_can_reach_the_zsh_bridge() {
         let provider = CarapaceProvider::new(settings_with_binary(Some(PathBuf::from(
             "/no/such/carapace/binary",
         ))));
-        let ctx = extract_context("git checkout ma", "git checkout ma".len());
-        assert!(provider.is_responsible(&ctx));
+
+        // 「carapace が対象になりうる」典型的なケースでも false を返す。
+        for line in ["git checkout ma", "tmuxinator ", "docker run "] {
+            let ctx = extract_context(line, line.len());
+            assert!(
+                !provider.is_responsible(&ctx),
+                "carapace must never claim final responsibility ({line:?}) — \
+                 the zsh bridge sits behind it and can still answer"
+            );
+        }
     }
 
     #[test]
