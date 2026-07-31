@@ -70,7 +70,7 @@ use super::carapace::{gate, ExternalCompletionSettings, ExternalKind};
 use super::context::CompletionContext;
 use super::external::run_external_capped;
 use super::provider::{Candidate, CompletionProvider};
-use super::zsh_daemon::{cleanup_stale_init_scripts, ZshDaemon};
+use super::zsh_daemon::{cleanup_stale_compdumps, cleanup_stale_init_scripts, ZshDaemon};
 
 /// zsh ブリッジ本体（`assets/zsh/capture.zsh` を vendor したもの）。
 const CAPTURE_SCRIPT: &str = include_str!("../../../assets/zsh/capture.zsh");
@@ -619,6 +619,14 @@ fn prewarm_zsh_daemon_with(
     let removed = cleanup_stale_init_scripts(bridge_dir);
     if removed > 0 {
         tracing::debug!("zsh daemon prewarm: removed {removed} stale init script(s)");
+    }
+
+    // 同様に、compinit のリネーム途中で取り残された compdump 一時ファイル
+    // （`.zcompdump.<host>.<pid>`）も掃除する。完成品の `.zcompdump` 本体は
+    // 有効なキャッシュなので残す（`cleanup_stale_compdumps` のドキュメント参照）。
+    let removed_dumps = cleanup_stale_compdumps(bridge_dir);
+    if removed_dumps > 0 {
+        tracing::debug!("zsh daemon prewarm: removed {removed_dumps} stale compdump temp file(s)");
     }
 
     // 重い spawn 処理は Mutex の外で行う（provide() 側の UI スレッドを

@@ -975,6 +975,82 @@ pub(super) fn cleanup_stale_init_scripts(bridge_dir: &Path) -> usize {
     removed
 }
 
+/// ブリッジディレクトリに溜まった compdump のリネーム残骸を掃除する。
+///
+/// # なぜ溜まるのか
+///
+/// `compinit` はダンプを書き換えるとき、まず
+/// `<dump>.<host>.<pid>` という一時ファイルへ書き出してから本来の名前へ
+/// `mv` する。プロセスがその間に落ちると一時ファイルだけが残る。
+/// ブリッジ用 `.zshrc` が `compinit`（`-d` 指定なし）を実行する構成だと
+/// ダンプは `$ZDOTDIR/.zcompdump` になるため、残骸も
+/// `.zcompdump.<host>.<pid>` としてブリッジディレクトリに積み上がる
+/// （実環境で 25 個の残骸を確認した）。
+///
+/// # 消すもの / 消さないもの
+///
+/// 消すのは**リネーム途中の一時ファイルだけ**（`.zcompdump.<host>.<pid>`）。
+/// 完成品の `.zcompdump` 本体は**消さない** — これは残骸ではなく有効な
+/// キャッシュであり、消すと次回の `compinit` が全補完関数を読み直して
+/// 起動が目に見えて遅くなる（掃除の目的はゴミの除去であって、キャッシュ
+/// 破棄ではない）。
+///
+/// 対象は引数で渡されたディレクトリ配下のみ。ユーザーの `$HOME` にある
+/// `~/.zcompdump`（jarvish ではなくユーザー自身の対話 zsh が作るもの）には
+/// 一切触れない。
+///
+/// [`cleanup_stale_init_scripts`] と違い pid 生存確認はしない。compdump の
+/// 一時ファイルは `mv` 直前の一瞬しか存在しない設計であり、残っている時点で
+/// 既に「落ちたプロセスの残骸」が確定しているため（そして仮に競合しても
+/// `compinit` は単に作り直すだけで、実害が無い）。
+///
+/// 戻り値は削除できたファイル数。
+pub(super) fn cleanup_stale_compdumps(bridge_dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(bridge_dir) else {
+        return 0;
+    };
+
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+
+        if !is_stale_compdump_name(name) {
+            continue;
+        }
+
+        if fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+
+    removed
+}
+
+/// `.zcompdump.<host>.<pid>` 形式（`compinit` のリネーム途中の一時ファイル）
+/// かどうかを判定する。
+///
+/// 完成品の `.zcompdump` そのもの（サフィックス無し）は **false** を返す
+/// （有効なキャッシュであり削除対象ではない — [`cleanup_stale_compdumps`]
+/// のドキュメント参照）。`.zcompdump_capture` のような別プレフィックスの
+/// ファイルも対象外（`.zcompdump.` というドット区切りを厳密に要求する）。
+fn is_stale_compdump_name(file_name: &str) -> bool {
+    let Some(rest) = file_name.strip_prefix(".zcompdump.") else {
+        return false;
+    };
+    // `<host>.<pid>` の形。末尾が数値（pid）であることを確認する。
+    // ホスト名自体にドットを含みうる（`foo.local.123`）ため、最後の
+    // ドット以降だけを pid として見る。
+    match rest.rsplit_once('.') {
+        Some((host, pid)) => {
+            !host.is_empty() && !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit())
+        }
+        None => false,
+    }
+}
+
 /// `.daemon_init.<pid>.<random>.zsh` / `.daemon_init.<pid>.zsh` から pid を
 /// 取り出す。命名規則に合致しない場合は `None`。
 ///
@@ -2300,6 +2376,64 @@ mod tests {
         assert!(own.exists(), "must not delete a live process's script");
         assert!(zshrc.exists(), "must not touch the bridge .zshrc");
         assert!(unrelated.exists(), "must not touch unrelated files");
+    }
+
+    #[test]
+    fn is_stale_compdump_name_matches_only_rename_temp_files() {
+        // `.zcompdump.<host>.<pid>` = compinit のリネーム途中の一時ファイル。
+        assert!(is_stale_compdump_name(".zcompdump.MacBookPro.3262"));
+        // ホスト名にドットを含むケース（実環境で観測した形）。
+        assert!(is_stale_compdump_name(
+            ".zcompdump.macnoMacBook-Pro.local.13066"
+        ));
+
+        // 完成品のキャッシュ本体は残す（消すと compinit がやり直しになる）。
+        assert!(!is_stale_compdump_name(".zcompdump"));
+        // 別プレフィックスのダンプは対象外。
+        assert!(!is_stale_compdump_name(".zcompdump_capture"));
+        assert!(!is_stale_compdump_name(".zcompdump_capture.Mac.123"));
+        // pid 部分が数値でないものは対象外。
+        assert!(!is_stale_compdump_name(".zcompdump.MacBookPro.abc"));
+        // 無関係なファイル。
+        assert!(!is_stale_compdump_name(".zshrc"));
+        assert!(!is_stale_compdump_name("notes.txt"));
+    }
+
+    #[test]
+    fn cleanup_compdumps_removes_temps_but_keeps_the_real_cache() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+
+        let temp1 = dir.join(".zcompdump.MacBookPro.3262");
+        let temp2 = dir.join(".zcompdump.macnoMacBook-Pro.local.13066");
+        let real_cache = dir.join(".zcompdump");
+        let capture = dir.join(".zcompdump_capture");
+        let zshrc = dir.join(".zshrc");
+        for p in [&temp1, &temp2, &real_cache, &capture, &zshrc] {
+            fs::write(p, "x").unwrap();
+        }
+
+        let removed = cleanup_stale_compdumps(dir);
+
+        assert_eq!(
+            removed, 2,
+            "only the two rename temp files should be removed"
+        );
+        assert!(!temp1.exists());
+        assert!(!temp2.exists());
+        assert!(
+            real_cache.exists(),
+            "the real .zcompdump cache must be kept — deleting it slows the next compinit"
+        );
+        assert!(capture.exists(), "must not touch .zcompdump_capture");
+        assert!(zshrc.exists(), "must not touch the bridge .zshrc");
+    }
+
+    #[test]
+    fn cleanup_compdumps_on_missing_directory_is_noop() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let missing = tmpdir.path().join("does-not-exist");
+        assert_eq!(cleanup_stale_compdumps(&missing), 0);
     }
 
     #[test]
