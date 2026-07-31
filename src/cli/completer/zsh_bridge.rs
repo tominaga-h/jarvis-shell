@@ -70,7 +70,7 @@ use super::carapace::{gate, ExternalCompletionSettings, ExternalKind};
 use super::context::CompletionContext;
 use super::external::run_external_capped;
 use super::provider::{Candidate, CompletionProvider};
-use super::zsh_daemon::ZshDaemon;
+use super::zsh_daemon::{cleanup_stale_init_scripts, ZshDaemon};
 
 /// zsh ブリッジ本体（`assets/zsh/capture.zsh` を vendor したもの）。
 const CAPTURE_SCRIPT: &str = include_str!("../../../assets/zsh/capture.zsh");
@@ -611,6 +611,15 @@ fn prewarm_zsh_daemon_with(
         }
     };
     let current_mtime = fs::metadata(&zshrc_path).and_then(|m| m.modified()).ok();
+
+    // 死んだプロセスが残した init スクリプトを掃除する（起動時に1回だけ）。
+    // prewarm はシェル起動直後にバックグラウンドスレッドで走るため、
+    // ここに置けば UI スレッドを一切ブロックしない。生きているプロセスの
+    // ファイルは消さない（`cleanup_stale_init_scripts` のドキュメント参照）。
+    let removed = cleanup_stale_init_scripts(bridge_dir);
+    if removed > 0 {
+        tracing::debug!("zsh daemon prewarm: removed {removed} stale init script(s)");
+    }
 
     // 重い spawn 処理は Mutex の外で行う（provide() 側の UI スレッドを
     // ブロックしないため——ドキュメント冒頭参照）。
