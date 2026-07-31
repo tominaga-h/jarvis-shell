@@ -895,6 +895,196 @@ fn write_init_script(bridge_dir: &Path) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// 死んだプロセスが残した `.daemon_init.*.zsh` を掃除する。
+///
+/// # なぜ必要か
+///
+/// [`write_init_script`] が書き出す一時スクリプトは、デーモンの正常な
+/// 終了経路（`shutdown` / `Drop` の reap）で削除される。しかし
+/// `SIGKILL`・OOM killer・電源断など reap を経ない終わり方をすると
+/// ファイルだけが残る。1回あたり数 KB と小さいため実害は出にくいが、
+/// 放置するとブリッジディレクトリに数百個単位で堆積する
+/// （実環境で 237 個の残骸を確認した）。
+///
+/// # 安全性: 生きているデーモンのファイルは消さない
+///
+/// ファイル名は `.daemon_init.<pid>.<random>.zsh`（旧形式は
+/// `.daemon_init.<pid>.zsh`）で、`<pid>` は**そのファイルを作った
+/// jarvish プロセス**の pid。ここでは pid を取り出し、`kill(pid, 0)` で
+/// 生存を確認して、**既に存在しないプロセスのファイルだけ**を削除する。
+/// これにより、複数の jarvish を同時に起動していても、他インスタンスが
+/// 今まさに使っているスクリプトを消してしまう事故が起きない
+/// （デーモンは init 時に一度 source するだけだが、`initialize()` 実行中に
+/// 消されると spawn 自体が失敗しうる）。
+///
+/// 自分自身の pid のファイルも削除対象外（起動直後に自分が書いたものを
+/// 消さないため — 呼び出し順に依存しない安全側の設計）。
+///
+/// pid として解釈できない名前のファイルは触らない。削除に失敗しても
+/// 無視する（権限・競合など。掃除は best-effort であり、失敗しても
+/// 補完機能自体には影響しない）。
+///
+/// # 既知の限界: pid の再利用
+///
+/// OS は終了したプロセスの pid をいずれ再利用する。そのため「残骸を
+/// 作った jarvish は既に終了しているが、同じ pid を無関係のプロセスが
+/// 引き継いでいる」状態が起こりうる（実環境で、残骸 237 個のうち 1 個が
+/// この状態だった — pid を macOS の `followupd` が再利用していた）。
+/// この場合そのファイルは「生きている」と判定されて残る。
+///
+/// これは意図的な割り切りである。判定を強めるには pid だけでなく
+/// プロセスの実体まで確認する必要があるが、掃除し損ねたファイルは
+/// 数 KB 残るだけで無害な一方、**生きているデーモンのファイルを誤って
+/// 消すと spawn 失敗という実害が出る**。したがって「消してよいと確信
+/// できない限り消さない」側に倒している。取りこぼしたファイルも、pid が
+/// さらに再利用されて次に空くタイミングで回収される。
+///
+/// 戻り値は削除できたファイル数（呼び出し元のログ用）。
+pub(super) fn cleanup_stale_init_scripts(bridge_dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(bridge_dir) else {
+        return 0;
+    };
+
+    let self_pid = std::process::id();
+    let mut removed = 0usize;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+
+        let Some(pid) = parse_init_script_pid(name) else {
+            continue;
+        };
+
+        // 自分自身のファイルは対象外。
+        if pid == self_pid {
+            continue;
+        }
+
+        if process_is_alive(pid) {
+            continue;
+        }
+
+        if fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+
+    removed
+}
+
+/// ブリッジディレクトリに溜まった compdump のリネーム残骸を掃除する。
+///
+/// # なぜ溜まるのか
+///
+/// `compinit` はダンプを書き換えるとき、まず
+/// `<dump>.<host>.<pid>` という一時ファイルへ書き出してから本来の名前へ
+/// `mv` する。プロセスがその間に落ちると一時ファイルだけが残る。
+/// ブリッジ用 `.zshrc` が `compinit`（`-d` 指定なし）を実行する構成だと
+/// ダンプは `$ZDOTDIR/.zcompdump` になるため、残骸も
+/// `.zcompdump.<host>.<pid>` としてブリッジディレクトリに積み上がる
+/// （実環境で 25 個の残骸を確認した）。
+///
+/// # 消すもの / 消さないもの
+///
+/// 消すのは**リネーム途中の一時ファイルだけ**（`.zcompdump.<host>.<pid>`）。
+/// 完成品の `.zcompdump` 本体は**消さない** — これは残骸ではなく有効な
+/// キャッシュであり、消すと次回の `compinit` が全補完関数を読み直して
+/// 起動が目に見えて遅くなる（掃除の目的はゴミの除去であって、キャッシュ
+/// 破棄ではない）。
+///
+/// 対象は引数で渡されたディレクトリ配下のみ。ユーザーの `$HOME` にある
+/// `~/.zcompdump`（jarvish ではなくユーザー自身の対話 zsh が作るもの）には
+/// 一切触れない。
+///
+/// [`cleanup_stale_init_scripts`] と違い pid 生存確認はしない。compdump の
+/// 一時ファイルは `mv` 直前の一瞬しか存在しない設計であり、残っている時点で
+/// 既に「落ちたプロセスの残骸」が確定しているため（そして仮に競合しても
+/// `compinit` は単に作り直すだけで、実害が無い）。
+///
+/// 戻り値は削除できたファイル数。
+pub(super) fn cleanup_stale_compdumps(bridge_dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(bridge_dir) else {
+        return 0;
+    };
+
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+
+        if !is_stale_compdump_name(name) {
+            continue;
+        }
+
+        if fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+
+    removed
+}
+
+/// `.zcompdump.<host>.<pid>` 形式（`compinit` のリネーム途中の一時ファイル）
+/// かどうかを判定する。
+///
+/// 完成品の `.zcompdump` そのもの（サフィックス無し）は **false** を返す
+/// （有効なキャッシュであり削除対象ではない — [`cleanup_stale_compdumps`]
+/// のドキュメント参照）。`.zcompdump_capture` のような別プレフィックスの
+/// ファイルも対象外（`.zcompdump.` というドット区切りを厳密に要求する）。
+fn is_stale_compdump_name(file_name: &str) -> bool {
+    let Some(rest) = file_name.strip_prefix(".zcompdump.") else {
+        return false;
+    };
+    // `<host>.<pid>` の形。末尾が数値（pid）であることを確認する。
+    // ホスト名自体にドットを含みうる（`foo.local.123`）ため、最後の
+    // ドット以降だけを pid として見る。
+    match rest.rsplit_once('.') {
+        Some((host, pid)) => {
+            !host.is_empty() && !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit())
+        }
+        None => false,
+    }
+}
+
+/// `.daemon_init.<pid>.<random>.zsh` / `.daemon_init.<pid>.zsh` から pid を
+/// 取り出す。命名規則に合致しない場合は `None`。
+///
+/// [`write_init_script`] の命名規則と対になっているため、片方を変更する
+/// 場合は必ずもう片方も追従させること。
+fn parse_init_script_pid(file_name: &str) -> Option<u32> {
+    let rest = file_name.strip_prefix(".daemon_init.")?;
+    let rest = rest.strip_suffix(".zsh")?;
+    // 新形式は `<pid>.<random>`、旧形式は `<pid>` のみ。どちらも先頭が pid。
+    let pid_part = rest.split('.').next()?;
+    if pid_part.is_empty() {
+        return None;
+    }
+    pid_part.parse::<u32>().ok()
+}
+
+/// `pid` のプロセスが存在するかを `kill(pid, 0)` で判定する。
+///
+/// シグナル 0 は「送らずに存在と権限だけ確認する」という POSIX の慣用。
+/// `ESRCH`（そんなプロセスは無い）のときだけ「死んでいる」と判定し、
+/// `EPERM`（存在するが自分の権限では触れない）を含むそれ以外は
+/// **生きている扱い**にする（消してよいと確信できない限り消さない、
+/// という安全側の倒し方）。
+fn process_is_alive(pid: u32) -> bool {
+    // pid が i32 に収まらない場合は判定不能 → 生きている扱い（消さない）。
+    let Ok(raw) = i32::try_from(pid) else {
+        return true;
+    };
+    if unsafe { libc::kill(raw, 0) } == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
 /// PTY master から利用可能なバイト列を読み取る（最大 `timeout` 待つ）。
 ///
 /// ノンブロッキング切り替えはせず、`read` がタイムアウト付きで返る保証は
@@ -2109,6 +2299,153 @@ mod tests {
         assert_eq!(fs::read_to_string(&path2).unwrap(), DAEMON_INIT_SCRIPT);
         let _ = fs::remove_file(&path1);
         let _ = fs::remove_file(&path2);
+    }
+
+    // ── 残骸 init スクリプトの掃除テスト ──
+
+    #[test]
+    fn parse_init_script_pid_accepts_both_formats() {
+        // 新形式（pid + ランダム）と旧形式（pid のみ）の両方から pid を拾う。
+        assert_eq!(
+            parse_init_script_pid(".daemon_init.1234.8d9e13a523321077.zsh"),
+            Some(1234)
+        );
+        assert_eq!(parse_init_script_pid(".daemon_init.57763.zsh"), Some(57763));
+    }
+
+    #[test]
+    fn parse_init_script_pid_rejects_unrelated_names() {
+        for name in [
+            ".zshrc",
+            "daemon_init.123.zsh",          // 先頭のドットが無い
+            ".daemon_init.zsh",             // pid 部分が無い
+            ".daemon_init..zsh",            // pid が空
+            ".daemon_init.abc.zsh",         // pid が数値でない
+            ".daemon_init.123.zsh.bak",     // 拡張子が違う
+            ".daemon_init.-1.deadbeef.zsh", // 負値は pid ではない
+        ] {
+            assert_eq!(
+                parse_init_script_pid(name),
+                None,
+                "{name} should not be treated as an init script"
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_removes_only_dead_pid_scripts() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let bridge_dir = tmpdir.path();
+
+        // 1) 確実に存在しない pid の残骸（削除されるべき）。
+        //    pid 1 は必ず生きているので使わない。十分大きな未使用 pid を
+        //    実際に生存確認して選ぶ（環境依存で偶然使われている可能性を排除）。
+        let dead_pid = (1..=50_000u32)
+            .rev()
+            .find(|&p| !process_is_alive(p))
+            .expect("some pid in range must be free");
+        let stale_new = bridge_dir.join(format!(".daemon_init.{dead_pid}.deadbeefdeadbeef.zsh"));
+        let stale_old = bridge_dir.join(format!(".daemon_init.{dead_pid}.zsh"));
+        fs::write(&stale_new, "x").unwrap();
+        fs::write(&stale_old, "x").unwrap();
+
+        // 2) 自分自身の pid（生きている → 残すべき）。
+        let own = bridge_dir.join(format!(
+            ".daemon_init.{}.cafecafecafecafe.zsh",
+            std::process::id()
+        ));
+        fs::write(&own, "x").unwrap();
+
+        // 3) 命名規則に合致しない無関係なファイル（触ってはいけない）。
+        let zshrc = bridge_dir.join(".zshrc");
+        let unrelated = bridge_dir.join("notes.txt");
+        fs::write(&zshrc, "x").unwrap();
+        fs::write(&unrelated, "x").unwrap();
+
+        let removed = cleanup_stale_init_scripts(bridge_dir);
+
+        assert_eq!(removed, 2, "both stale scripts should be removed");
+        assert!(
+            !stale_new.exists(),
+            "stale new-format script should be gone"
+        );
+        assert!(
+            !stale_old.exists(),
+            "stale old-format script should be gone"
+        );
+        assert!(own.exists(), "must not delete a live process's script");
+        assert!(zshrc.exists(), "must not touch the bridge .zshrc");
+        assert!(unrelated.exists(), "must not touch unrelated files");
+    }
+
+    #[test]
+    fn is_stale_compdump_name_matches_only_rename_temp_files() {
+        // `.zcompdump.<host>.<pid>` = compinit のリネーム途中の一時ファイル。
+        assert!(is_stale_compdump_name(".zcompdump.MacBookPro.3262"));
+        // ホスト名にドットを含むケース（実環境で観測した形）。
+        assert!(is_stale_compdump_name(
+            ".zcompdump.macnoMacBook-Pro.local.13066"
+        ));
+
+        // 完成品のキャッシュ本体は残す（消すと compinit がやり直しになる）。
+        assert!(!is_stale_compdump_name(".zcompdump"));
+        // 別プレフィックスのダンプは対象外。
+        assert!(!is_stale_compdump_name(".zcompdump_capture"));
+        assert!(!is_stale_compdump_name(".zcompdump_capture.Mac.123"));
+        // pid 部分が数値でないものは対象外。
+        assert!(!is_stale_compdump_name(".zcompdump.MacBookPro.abc"));
+        // 無関係なファイル。
+        assert!(!is_stale_compdump_name(".zshrc"));
+        assert!(!is_stale_compdump_name("notes.txt"));
+    }
+
+    #[test]
+    fn cleanup_compdumps_removes_temps_but_keeps_the_real_cache() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+
+        let temp1 = dir.join(".zcompdump.MacBookPro.3262");
+        let temp2 = dir.join(".zcompdump.macnoMacBook-Pro.local.13066");
+        let real_cache = dir.join(".zcompdump");
+        let capture = dir.join(".zcompdump_capture");
+        let zshrc = dir.join(".zshrc");
+        for p in [&temp1, &temp2, &real_cache, &capture, &zshrc] {
+            fs::write(p, "x").unwrap();
+        }
+
+        let removed = cleanup_stale_compdumps(dir);
+
+        assert_eq!(
+            removed, 2,
+            "only the two rename temp files should be removed"
+        );
+        assert!(!temp1.exists());
+        assert!(!temp2.exists());
+        assert!(
+            real_cache.exists(),
+            "the real .zcompdump cache must be kept — deleting it slows the next compinit"
+        );
+        assert!(capture.exists(), "must not touch .zcompdump_capture");
+        assert!(zshrc.exists(), "must not touch the bridge .zshrc");
+    }
+
+    #[test]
+    fn cleanup_compdumps_on_missing_directory_is_noop() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let missing = tmpdir.path().join("does-not-exist");
+        assert_eq!(cleanup_stale_compdumps(&missing), 0);
+    }
+
+    #[test]
+    fn cleanup_on_missing_directory_is_noop() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let missing = tmpdir.path().join("does-not-exist");
+        assert_eq!(cleanup_stale_init_scripts(&missing), 0);
+    }
+
+    #[test]
+    fn process_is_alive_reports_self_as_alive() {
+        assert!(process_is_alive(std::process::id()));
     }
 
     // ── cwd 同期（デーモンの作業ディレクトリ追従）テスト ──

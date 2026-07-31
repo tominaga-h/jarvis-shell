@@ -70,7 +70,7 @@ use super::carapace::{gate, ExternalCompletionSettings, ExternalKind};
 use super::context::CompletionContext;
 use super::external::run_external_capped;
 use super::provider::{Candidate, CompletionProvider};
-use super::zsh_daemon::ZshDaemon;
+use super::zsh_daemon::{cleanup_stale_compdumps, cleanup_stale_init_scripts, ZshDaemon};
 
 /// zsh ブリッジ本体（`assets/zsh/capture.zsh` を vendor したもの）。
 const CAPTURE_SCRIPT: &str = include_str!("../../../assets/zsh/capture.zsh");
@@ -611,6 +611,23 @@ fn prewarm_zsh_daemon_with(
         }
     };
     let current_mtime = fs::metadata(&zshrc_path).and_then(|m| m.modified()).ok();
+
+    // 死んだプロセスが残した init スクリプトを掃除する（起動時に1回だけ）。
+    // prewarm はシェル起動直後にバックグラウンドスレッドで走るため、
+    // ここに置けば UI スレッドを一切ブロックしない。生きているプロセスの
+    // ファイルは消さない（`cleanup_stale_init_scripts` のドキュメント参照）。
+    let removed = cleanup_stale_init_scripts(bridge_dir);
+    if removed > 0 {
+        tracing::debug!("zsh daemon prewarm: removed {removed} stale init script(s)");
+    }
+
+    // 同様に、compinit のリネーム途中で取り残された compdump 一時ファイル
+    // （`.zcompdump.<host>.<pid>`）も掃除する。完成品の `.zcompdump` 本体は
+    // 有効なキャッシュなので残す（`cleanup_stale_compdumps` のドキュメント参照）。
+    let removed_dumps = cleanup_stale_compdumps(bridge_dir);
+    if removed_dumps > 0 {
+        tracing::debug!("zsh daemon prewarm: removed {removed_dumps} stale compdump temp file(s)");
+    }
 
     // 重い spawn 処理は Mutex の外で行う（provide() 側の UI スレッドを
     // ブロックしないため——ドキュメント冒頭参照）。
@@ -1594,7 +1611,30 @@ mod tests {
                 ..CompletionConfig::default()
             },
         )));
-        let provider = ZshBridgeProvider::with_zsh_binary(settings, zsh);
+        // ブリッジディレクトリと HOME をテスト専用の一時ディレクトリへ隔離する。
+        //
+        // 隔離しない場合、このテストは**実ユーザーの**
+        // `~/.config/jarvish/zsh-bridge` と実 `$HOME` を使ってデーモンを
+        // spawn してしまう。そのため結果が開発者のローカル環境に依存し、
+        // 実際に以下の形で不安定化していた（実測）:
+        //   - 実 `.zshrc` / `.zshenv` が重い（プラグインマネージャ等）と
+        //     レディマーカーが cold timeout 内に届かず spawn に失敗する
+        //     （`zsh daemon failed to reach ready marker within timeout`）
+        //   - 実ブリッジ dir に溜まった大量の残骸ファイルや、実 `$HOME` の
+        //     compdump キャッシュの状態に左右される
+        // 他の統合テスト（`extra_envs` で `HOME` を隔離しているもの）と同じ
+        // 方針に揃え、環境非依存にする。
+        let bridge_tmp = tempfile::tempdir().unwrap();
+        let home_tmp = tempfile::tempdir().unwrap();
+        let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
+            settings,
+            zsh,
+            bridge_tmp.path().join("zsh-bridge"),
+            vec![(
+                "HOME".to_string(),
+                home_tmp.path().to_string_lossy().into_owned(),
+            )],
+        );
 
         let line = "git checkout zzjarvish-bridge-";
         let ctx = super::super::context::extract_context(line, line.len());
