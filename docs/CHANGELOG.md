@@ -3,6 +3,25 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.15.4](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.15.4) - 2026-07-31
+
+### Fixed
+
+- 外部補完が担当するコマンドで、無関係なパス補完が表示されてから正しい候補に入れ替わる問題を修正
+  - `tmuxinator <TAB>` がまず `CLAUDE.md` / `Cargo.lock` / `docs/` といったカレントディレクトリのファイル一覧を表示し、しばらくしてから本来のサブコマンド補完へ切り替わっていた。tmuxinator の引数として意味をなさない候補が出るうえ、「もう一度 Tab を押せば正しい候補が出る」ことを知る手がかりがユーザー側に無い
+  - 原因は `PathProvider::provide` が無条件で `Some(...)` を返すこと。外部補完プロバイダがタイムアウト・失敗して `None` を返すと、プロバイダ連鎖（`find_map`）がそのまま `PathProvider` へ落ち、「答えられなかった」が「パス補完が正解」にすり替わっていた
+  - `CompletionProvider` に `is_responsible(&ctx) -> bool`（既定 `false`）を追加し、外部補完プロバイダのみが「このコマンドを自分が担当するか」を外部プロセスを起動せずに宣言する。`provide()` が冒頭で行う安価なガードと同じ判定を共有ヘルパーに切り出して再利用するため、2 箇所で判定基準が drift しない
+  - ディスパッチを `find_map` から `dispatch_providers()` へ置き換え、担当プロバイダが `None` を返した時点で以降のプロバイダを呼ばずに空候補で確定する。`PathProvider` へ落ちないため、誤った候補が表示されることも後から入れ替わることもない
+  - 副次的な効果として、担当プロバイダの失敗時点で連鎖を打ち切るため、carapace と zsh ブリッジでタイムアウト予算が加算される問題（最悪 2.5 秒の UI フリーズ）も解消される
+  - 設計方針は fish-shell の実装調査に基づく。fish の Tab 補完は完全に同期・ブロッキング（バックグラウンド化しているのは autosuggestion / syntax highlighting / history pager の 3 つのみ）で、補完結果のキャッシュも持たず毎回スクリプトを再実行する。`tmuxinator <TAB>` には実測 ~190ms かかっている（10 回で 2.16 秒、毎回ほぼ一定）。fish の体感の良さは速さではなく「待ってから正しい結果を一度だけ出す」一貫性に由来するため、「待つのは許容できるが、間違ったものを見せてはいけない」という方針を採った
+  - `MIN_TIMEOUT_MS` / `WARM_MIN_TIMEOUT_MS` は death-loop 対策として意図的に設定された値のため変更していない
+
+- 上記の修正により `tmuxinator <TAB>` が候補ゼロ（`NO RECORDS FOUND`）になる回帰を修正
+  - carapace は内蔵 spec（653 個）を持つコマンドしか答えられず、spec が無いコマンドでは**正常終了しつつ空の出力**を返す（実測: `carapace tmuxinator export tmuxinator ''` は exit 0 かつ出力ゼロ、10〜20ms）。`provide()` はこれを `None` に畳むが、これは「タイムアウトして答えられなかった」ではなく「担当外なので次に譲る」の意味である
+  - しかし `is_responsible` は carapace が有効かどうかしか見ておらず spec の有無を区別できないため、tmuxinator でも「責任者だが失敗した」と申告していた。その結果ディスパッチが連鎖を打ち切り、本来答えられる zsh ブリッジが一度も呼ばれない状態になっていた
+  - 「責任者を名乗れるのは後ろに誰もいないプロバイダだけ」という原則に沿って、carapace の `is_responsible` を常に `false` にした。`external = "auto"` では carapace → zsh ブリッジの順に並ぶため、誤ったパス補完を抑止する役割は連鎖最後尾の zsh ブリッジが担う
+  - carapace のみを有効化した構成（`external = "carapace"`）では従来どおり `PathProvider` へフォールバックする。carapace は spec の無いコマンドが多いため、そこでパス補完すら出さないほうが実害が大きいという判断
+
 ## [v1.15.3](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.15.3) - 2026-07-31
 
 ### Added

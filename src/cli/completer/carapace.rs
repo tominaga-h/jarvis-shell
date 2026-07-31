@@ -436,12 +436,21 @@ impl CarapaceProvider {
     }
 }
 
-impl CompletionProvider for CarapaceProvider {
-    fn provide(&self, ctx: &CompletionContext) -> Option<Vec<Candidate>> {
+impl CarapaceProvider {
+    /// `provide()` 冒頭の「そもそも自分の対象か」ガード群だけを切り出した
+    /// もの（外部プロセスは一切起動しない、安価な判定）。
+    ///
+    /// [`CompletionProvider::is_responsible`] と `provide()` 本体の両方から
+    /// 呼ぶことで、判定基準が 2 箇所に drift するのを防ぐ（perf/
+    /// completion-latency）。返り値が `Some((binary, timeout))` なら
+    /// 「carapace が実際に対象コマンドの責任者である」ことを意味し、
+    /// `provide()` はこれを使って実行に進む。`is_responsible` は中身
+    /// （バイナリパス/timeout）を使わず `is_some()` だけを見る。
+    fn responsibility_gate(&self, ctx: &CompletionContext) -> Option<(PathBuf, Duration)> {
         // 短命な read ロック（`gate` 内部で取得・即座に drop する — `mod.rs`
         // の aliases スナップショットと同じ方針）。carapace は起動コストが
         // 低いため `min_timeout` フロアは適用しない（`None`）。
-        let (binary, timeout) = gate(&self.settings, ExternalKind::Carapace, None)?;
+        let gated = gate(&self.settings, ExternalKind::Carapace, None)?;
 
         if ctx.is_first_token {
             // コマンド名自体の補完は CommandProvider の担当。
@@ -459,13 +468,59 @@ impl CompletionProvider for CarapaceProvider {
             return None;
         }
 
-        let spans = ctx.spans();
-        if spans.len() < 2 {
+        if ctx.spans().len() < 2 {
             // spans[0] (コマンド名) しかない = まだサブコマンド/引数の
             // 補完対象がない。
             return None;
         }
 
+        Some(gated)
+    }
+}
+
+impl CompletionProvider for CarapaceProvider {
+    /// `ctx` が carapace の対象（バイナリ有効・先頭トークンでない・`cd`
+    /// でない・spans 十分）かどうかを、実際に carapace プロセスを起動せず
+    /// 判定する。`provide()` と同じ [`CarapaceProvider::responsibility_gate`]
+    /// を共有するため、判定基準が drift しない（`is_responsible` の
+    /// ドキュメントは `provider.rs` 参照）。
+    ///
+    /// **carapace は「責任者」を名乗らない**（常に `false`）。
+    ///
+    /// # なぜ常に false なのか（実機で踏んだ不具合）
+    /// carapace は内蔵 spec（653 個）を持つコマンドしか答えられず、spec が
+    /// 無いコマンドでは**正常終了しつつ空の出力**を返す（実測: `carapace
+    /// tmuxinator export tmuxinator ''` は exit 0 かつ出力ゼロ、10〜20ms）。
+    /// `provide()` はこれを `None` に畳むが、これは「タイムアウトして
+    /// 答えられなかった」ではなく「自分の担当ではないので次に譲る」の意味。
+    ///
+    /// ここで `responsibility_gate().is_some()` を返していた実装は、
+    /// **spec の有無を区別できない**ため、carapace が spec を持たない
+    /// コマンド（tmuxinator 等）でも「責任者だが失敗した」と申告していた。
+    /// その結果 `dispatch_providers` がチェーンをそこで打ち切り、**本来
+    /// 答えられる zsh ブリッジが一度も呼ばれず**、ユーザーには
+    /// 「NO RECORDS FOUND」だけが表示された（実機報告）。
+    ///
+    /// # 責任者になれるのは「後ろに誰もいない」プロバイダだけ
+    /// `external = "auto"` では carapace → zsh ブリッジの順に並ぶ。carapace が
+    /// 答えられなくても後段の zsh ブリッジが答えられる以上、carapace は
+    /// 「このコマンドの最終的な責任者」ではない。誤ったパス補完を抑止する
+    /// 役割は、外部補完チェーンの**最後**に位置する zsh ブリッジ
+    /// （[`super::zsh_bridge::ZshBridgeProvider::is_responsible`]）が担う。
+    ///
+    /// carapace のみを有効化した構成（`external = "carapace"`）では zsh
+    /// ブリッジが存在しないため、carapace が答えられなければ従来どおり
+    /// `PathProvider` へフォールバックする。carapace が扱えないコマンドで
+    /// パス補完すら出さないより、パス補完に落ちるほうが実害が小さい
+    /// （carapace は spec の無いコマンドが多数あるため）。
+    fn is_responsible(&self, _ctx: &CompletionContext) -> bool {
+        false
+    }
+
+    fn provide(&self, ctx: &CompletionContext) -> Option<Vec<Candidate>> {
+        let (binary, timeout) = self.responsibility_gate(ctx)?;
+
+        let spans = ctx.spans();
         let mut args = vec![spans[0].clone(), "export".to_string()];
         args.extend(spans.iter().cloned());
 
@@ -874,6 +929,95 @@ mod tests {
         assert_eq!(ctx.spans(), vec!["git"]);
 
         assert_eq!(provider.provide(&ctx), None);
+    }
+
+    // ── is_responsible (perf/completion-latency) ──
+    //
+    // provide() の冒頭ガードと同じ条件を、実際に外部プロセスを起動せず
+    // 判定できることを検証する。
+
+    /// carapace は spec を持たないコマンドで正常終了しつつ空を返すため、
+    /// 「責任者だが失敗した」と申告してはならない（常に false）。
+    ///
+    /// これを true にしていた実装では、carapace が spec を持たない
+    /// コマンド（tmuxinator 等）で `dispatch_providers` がチェーンを
+    /// 打ち切り、後段の zsh ブリッジが呼ばれずに候補ゼロ（実機の
+    /// 「NO RECORDS FOUND」）になっていた。その回帰テスト。
+    #[test]
+    fn is_responsible_is_always_false_so_the_chain_can_reach_the_zsh_bridge() {
+        let provider = CarapaceProvider::new(settings_with_binary(Some(PathBuf::from(
+            "/no/such/carapace/binary",
+        ))));
+
+        // 「carapace が対象になりうる」典型的なケースでも false を返す。
+        for line in ["git checkout ma", "tmuxinator ", "docker run "] {
+            let ctx = extract_context(line, line.len());
+            assert!(
+                !provider.is_responsible(&ctx),
+                "carapace must never claim final responsibility ({line:?}) — \
+                 the zsh bridge sits behind it and can still answer"
+            );
+        }
+    }
+
+    #[test]
+    fn is_responsible_false_when_binary_absent() {
+        let provider = CarapaceProvider::new(settings_with_binary(None));
+        let ctx = extract_context("git checkout ma", "git checkout ma".len());
+        assert!(!provider.is_responsible(&ctx));
+    }
+
+    #[test]
+    fn is_responsible_false_for_first_token() {
+        let provider = CarapaceProvider::new(settings_with_binary(Some(PathBuf::from(
+            "/no/such/carapace/binary",
+        ))));
+        let ctx = extract_context("gi", "gi".len());
+        assert!(ctx.is_first_token);
+        assert!(!provider.is_responsible(&ctx));
+    }
+
+    #[test]
+    fn is_responsible_false_for_cd() {
+        // cd は常に PathProvider の dirs_only 判定に譲る（provide() と
+        // 同じガード）。carapace は cd について「対象外」を宣言するため、
+        // cd の通常のディレクトリ補完は影響を受けない。
+        let provider = CarapaceProvider::new(settings_with_binary(Some(PathBuf::from(
+            "/no/such/carapace/binary",
+        ))));
+        let ctx = extract_context("cd sub", "cd sub".len());
+        assert_eq!(ctx.head_command(), Some("cd"));
+        assert!(!provider.is_responsible(&ctx));
+    }
+
+    #[test]
+    fn is_responsible_false_when_spans_too_short() {
+        let provider = CarapaceProvider::new(settings_with_binary(Some(PathBuf::from(
+            "/no/such/carapace/binary",
+        ))));
+        let mut ctx = extract_context("git", "git".len());
+        ctx.is_first_token = false;
+        assert_eq!(ctx.spans(), vec!["git"]);
+        assert!(!provider.is_responsible(&ctx));
+    }
+
+    #[test]
+    fn is_responsible_matches_provide_none_reason_for_disabled_kind() {
+        // carapace が enabled リストに含まれていない場合、provide() も
+        // is_responsible() も揃って false/None を返す（判定基準の単一の
+        // 情報源であることの確認）。
+        let settings = Arc::new(RwLock::new(ExternalCompletionSettings {
+            zsh_daemon_enabled: true,
+            timeout: CARAPACE_TIMEOUT,
+            enabled: vec![ResolvedExternal {
+                kind: ExternalKind::Zsh,
+                binary: Some(PathBuf::from("/bin/zsh")),
+            }],
+        }));
+        let provider = CarapaceProvider::new(settings);
+        let ctx = extract_context("git checkout ma", "git checkout ma".len());
+        assert_eq!(provider.provide(&ctx), None);
+        assert!(!provider.is_responsible(&ctx));
     }
 
     // ── ExternalCompletionSettings::resolve ──
