@@ -63,6 +63,7 @@
 //! mtime が spawn 時から変わっていた場合は shutdown して次回リクエストで
 //! 再 spawn する（`zsh_bridge.rs` のモジュールドキュメント参照）。
 
+use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
@@ -152,6 +153,20 @@ pub(crate) struct ZshDaemon {
     /// kill する（[`mark_dead_and_kill`](Self::mark_dead_and_kill)）。
     /// 成功したフレーム読み取りが1回でもあればこのカウンタは 0 に戻る。
     consecutive_timeouts: u8,
+    /// デーモン（子プロセス `zsh -i`）が現在いる作業ディレクトリ。
+    ///
+    /// 子プロセスは spawn 時点の cwd を継承し、以後 jarvish 側の
+    /// `std::env::set_current_dir`（`cd` ビルトイン）は**一切届かない**
+    /// （プロセスごとに独立した cwd を持つため）。そのため補完関数
+    /// （`_files` / `_path_files` 等）が相対パスを解決すると、ユーザーが
+    /// 実際にいるディレクトリではなく jarvish の**起動時**ディレクトリの
+    /// 中身を返してしまう。
+    ///
+    /// これを防ぐため、[`sync_cwd`](Self::sync_cwd) が各リクエストの直前に
+    /// jarvish の現在の cwd と突き合わせ、食い違っていればデーモンのバッファ
+    /// へ `cd` 行を送って追従させる。ここにはその「デーモン側が今いると
+    /// 判っているディレクトリ」を記録する（spawn 直後は継承した cwd）。
+    cwd: Option<PathBuf>,
 }
 
 /// [`ZshDaemon`] がハングと判定してデーモンを kill するまでに許容する
@@ -163,6 +178,43 @@ pub(crate) struct ZshDaemon {
 /// または2回連続で素の要求がタイムアウトする）で初めて「本当にハングして
 /// いる」とみなす。
 const MAX_CONSECUTIVE_TIMEOUTS: u8 = 2;
+
+/// [`ZshDaemon::sync_cwd`] 後に ZLE の再描画出力を読み捨てる予算。
+///
+/// `cd` の適用自体はローカルな `chdir(2)` で、補完関数の実行のような
+/// 重い処理は伴わない（実測でミリ秒未満）。この予算は「再描画バイトが
+/// PTY を通って戻ってくるまで」を賄えれば十分であり、長く取ると
+/// ディレクトリ移動直後の Tab が無駄に待たされる。読めるデータが尽きた
+/// 時点で早期に戻るため、通常はこの上限には達しない。
+const CWD_SYNC_DRAIN: Duration = Duration::from_millis(120);
+
+/// 文字列を zsh のシングルクォート文字列としてクォートする。
+///
+/// [`ZshDaemon::sync_cwd`] がディレクトリパスをデーモンのバッファへ送る際に
+/// 使う。シングルクォート内では zsh は**一切の展開を行わない**（`$`、`` ` ``、
+/// `~`、グロブ、バックスラッシュエスケープすべて無効）ため、含まれうる
+/// 特殊文字を個別にエスケープする必要がない。唯一の例外がシングルクォート
+/// 自身で、これは一度クォートを閉じ、バックスラッシュでエスケープした
+/// `'` を置き、再びクォートを開く定番の `'\''` パターンで表現する
+/// （POSIX sh / zsh 共通のイディオム）。
+///
+/// これにより、`It's a dir` や `$HOME`、`*` を名前に含むディレクトリでも
+/// リテラルとして安全に渡せる（クォートを破って任意コマンドが実行される
+/// 事故を防ぐ）。受け取り側の `jarvish-set-cwd` ウィジェットは `${(Q)BUFFER}`
+/// でこのクォートを外す。
+fn single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
 
 /// [`ZshDaemon::read_framed_response`] の結果。
 enum FramedRead {
@@ -310,6 +362,10 @@ impl ZshDaemon {
             pending_frame: false,
             partial_read: PartialRead::default(),
             consecutive_timeouts: 0,
+            // 子プロセスは spawn 時点の jarvish の cwd をそのまま継承する。
+            // 取得できなかった場合は `None` とし、最初の `sync_cwd` で
+            // 必ず `cd` を送る（安全側 — 不明なまま放置しない）。
+            cwd: env::current_dir().ok(),
         };
 
         if !daemon.initialize(init_timeout) {
@@ -441,6 +497,11 @@ impl ZshDaemon {
             return None;
         }
 
+        // デーモンの cwd を jarvish の現在の cwd に追従させる（#cwd bug）。
+        // 補完リクエストを送る**前**に行う必要がある — `_files` 等が相対
+        // パスを解決するのはリクエスト処理中のため。
+        self.sync_cwd();
+
         // ^U (kill-whole-line) で前回リクエストの残留を破棄してから、
         // 新しい行 + ^I (jarvish-complete-word) を送る。
         let payload = format!("\x15{line}\t");
@@ -464,6 +525,81 @@ impl ZshDaemon {
             FramedRead::Timeout => {
                 self.register_timeout_and_maybe_kill();
                 None
+            }
+        }
+    }
+
+    /// デーモン（子プロセス）の作業ディレクトリを jarvish の現在の cwd に
+    /// 追従させる。
+    ///
+    /// # なぜ必要か
+    ///
+    /// デーモンは spawn 時の cwd を継承したまま**セッション中ずっと生き続ける**。
+    /// jarvish 側の `cd`（`std::env::set_current_dir`）は自プロセスの cwd を
+    /// 変えるだけで、既に走っている子プロセスには届かない。この同期が無いと
+    /// `_files` / `_path_files` 等の補完関数が **jarvish の起動ディレクトリ**を
+    /// 基準に相対パスを解決し、「今いるディレクトリに存在しないファイル」が
+    /// 候補に出る（しかも `PathProvider` は provider チェーンの最後尾なので、
+    /// デーモンが `Some` を返した時点で正しい `fs::read_dir` の結果は
+    /// 握り潰される — `mod.rs` の `find_map` ディスパッチ参照）。
+    ///
+    /// # コスト
+    ///
+    /// cwd が前回と同じなら**何も送らない**（実際に `cd` するのはユーザーが
+    /// ディレクトリを移動した直後の1リクエストだけ）。送る場合も応答を待つ
+    /// フレームは無く、`^X` ウィジェットは同期的にバッファを消費するため、
+    /// 直後の `^U` + 補完リクエストと衝突しない。デーモンを再 spawn する案
+    /// （`cd` の度に compinit やり直し）と違い warm の利点を失わない。
+    ///
+    /// 書き込みに失敗した場合はデーモンを死亡扱いにする（以降の
+    /// リクエストは `None`、次の Tab で遅延 respawn される）。
+    /// cwd が取得できない場合は同期をスキップする（`cd` すべき先が
+    /// 判らないため、誤ったディレクトリへ移動させるより現状維持が安全）。
+    fn sync_cwd(&mut self) {
+        let Ok(current) = env::current_dir() else {
+            return;
+        };
+
+        if self.cwd.as_deref() == Some(current.as_path()) {
+            return;
+        }
+
+        // `^U` で残留バッファを消し、クォート済みパスを置いて `^G`
+        // （`jarvish-set-cwd` ウィジェット）で適用する。`^X` ではなく `^G`
+        // を使う理由は `daemon_init.zsh` のウィジェット定義のコメント参照
+        // （`^X` は emacs キーマップのプレフィックスキーで、単体では発火しない）。
+        let payload = format!("\x15{}\x07", single_quote(&current.to_string_lossy()));
+        if self.master.write_all(payload.as_bytes()).is_err() {
+            self.mark_dead_and_kill();
+            return;
+        }
+
+        // ZLE はバッファを再描画するため、送った行が PTY 上にエコーバック
+        // される（ECHO は termios で切ってあるが、これは端末エコーではなく
+        // ZLE 自身の描画出力）。この残骸を読み捨てておかないと、直後の
+        // 補完リクエストのフレーム読み取り（NUL トグル）に混入して
+        // desync の原因になる。センチネルを伴わない出力なので、短い予算で
+        // 「読めるだけ読む」だけでよい（フレーム待ちはしない）。
+        self.drain_echo(CWD_SYNC_DRAIN);
+
+        self.cwd = Some(current);
+    }
+
+    /// [`sync_cwd`](Self::sync_cwd) 後の ZLE 再描画出力を読み捨てる。
+    ///
+    /// フレーム（センチネル対）を待つ [`read_framed_response`] とは異なり、
+    /// 「`budget` の間に届いたものを捨てる」だけ。読めるデータが尽きたら
+    /// 早期に戻る。ここでのエラーやタイムアウトはデーモンの死とはみなさない
+    /// （再描画が来ないこと自体は異常ではない）。
+    fn drain_echo(&mut self, budget: Duration) {
+        let deadline = Instant::now() + budget;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match read_available(&mut self.master, remaining) {
+                // 何か読めた場合は捨てて、まだ続きがあるかもう一度試す。
+                Some(chunk) if !chunk.is_empty() => {}
+                // データ無し（予算切れ） / EOF / エラー: これ以上待たない。
+                _ => return,
             }
         }
     }
@@ -1973,5 +2109,129 @@ mod tests {
         assert_eq!(fs::read_to_string(&path2).unwrap(), DAEMON_INIT_SCRIPT);
         let _ = fs::remove_file(&path1);
         let _ = fs::remove_file(&path2);
+    }
+
+    // ── cwd 同期（デーモンの作業ディレクトリ追従）テスト ──
+
+    #[test]
+    fn single_quote_wraps_plain_string() {
+        assert_eq!(single_quote("/tmp/foo"), "'/tmp/foo'");
+    }
+
+    #[test]
+    fn single_quote_escapes_embedded_single_quotes() {
+        // `'\''` パターン: クォートを閉じ、エスケープした ' を置き、再び開く。
+        assert_eq!(single_quote("/tmp/it's"), r"'/tmp/it'\''s'");
+    }
+
+    #[test]
+    fn single_quote_leaves_expansion_chars_literal() {
+        // シングルクォート内では展開が起きないため、これらは追加の
+        // エスケープ無しでリテラルとして安全に渡る。
+        for s in ["/tmp/$HOME", "/tmp/`id`", "/tmp/*", "/tmp/~x", "/tmp/a b"] {
+            let quoted = single_quote(s);
+            assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
+            assert_eq!(&quoted[1..quoted.len() - 1], s);
+        }
+    }
+
+    /// デーモンが「起動後に jarvish が `cd` した先」のファイルを補完すること
+    /// を検証する回帰テスト（本バグの核心）。
+    ///
+    /// 修正前は、デーモンが spawn 時の cwd に固まったままだったため、
+    /// `dir_a` の中身（`alpha_from_a`）が返ってしまっていた。
+    #[test]
+    #[serial]
+    fn completion_follows_jarvish_cwd_after_chdir() {
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        // `_files` を使う補完定義（相対パスを cwd 基準で解決する）。
+        let fixture = setup_fixture(&[("_jarvishcwd", "#compdef jarvishcwd\n_files\n")]);
+
+        let workdir = tempfile::tempdir().unwrap();
+        let dir_a = workdir.path().join("dir_a");
+        let dir_b = workdir.path().join("dir_b");
+        fs::create_dir_all(&dir_a).unwrap();
+        fs::create_dir_all(&dir_b).unwrap();
+        fs::write(dir_a.join("alpha_from_a"), "").unwrap();
+        fs::write(dir_b.join("bravo_from_b"), "").unwrap();
+
+        let original = env::current_dir().unwrap();
+
+        // dir_a でデーモンを spawn（この時点の cwd を継承する）。
+        env::set_current_dir(&dir_a).unwrap();
+        let spawned = ZshDaemon::spawn(
+            &zsh,
+            &fixture.zdotdir,
+            &extra_envs_for(&fixture),
+            Duration::from_secs(10),
+        );
+
+        // jarvish が dir_b へ移動（デーモンには自動では伝わらない）。
+        let result = spawned.map(|mut daemon| {
+            env::set_current_dir(&dir_b).unwrap();
+            daemon.request("jarvishcwd ", Duration::from_secs(5))
+        });
+
+        // 他テストへ影響させないため cwd を必ず戻す。
+        env::set_current_dir(&original).unwrap();
+
+        let response = result
+            .expect("daemon should spawn")
+            .expect("request should return a frame");
+
+        assert!(
+            response.contains("bravo_from_b"),
+            "completion should list files from the CURRENT directory (dir_b), got: {response:?}"
+        );
+        assert!(
+            !response.contains("alpha_from_a"),
+            "completion must NOT list files from the daemon's spawn directory (dir_a), \
+             got: {response:?}"
+        );
+    }
+
+    /// cwd が変わっていない場合は `cd` 行を送らない（無駄な往復をしない）
+    /// ことを、内部状態の追従で検証する。
+    #[test]
+    #[serial]
+    fn sync_cwd_is_noop_when_directory_is_unchanged() {
+        let Some(zsh) = zsh_binary() else {
+            eprintln!("skipping: zsh not found on PATH");
+            return;
+        };
+        let fixture = setup_fixture(&[("_jarvishcwd", "#compdef jarvishcwd\n_files\n")]);
+
+        let workdir = tempfile::tempdir().unwrap();
+        let original = env::current_dir().unwrap();
+        env::set_current_dir(workdir.path()).unwrap();
+
+        let spawned = ZshDaemon::spawn(
+            &zsh,
+            &fixture.zdotdir,
+            &extra_envs_for(&fixture),
+            Duration::from_secs(10),
+        );
+
+        let observed = spawned.map(|mut daemon| {
+            // spawn 直後は継承した cwd が記録されている。
+            let at_spawn = daemon.cwd.clone();
+            // cwd を変えずに sync_cwd を呼んでも記録は変わらない。
+            daemon.sync_cwd();
+            let after_noop_sync = daemon.cwd.clone();
+            (at_spawn, after_noop_sync, daemon.is_alive())
+        });
+
+        env::set_current_dir(&original).unwrap();
+
+        let (at_spawn, after_noop_sync, alive) = observed.expect("daemon should spawn");
+        assert!(at_spawn.is_some(), "spawn should record the inherited cwd");
+        assert_eq!(
+            at_spawn, after_noop_sync,
+            "sync_cwd must not change the recorded cwd when the directory is unchanged"
+        );
+        assert!(alive, "a no-op sync must not kill the daemon");
     }
 }
