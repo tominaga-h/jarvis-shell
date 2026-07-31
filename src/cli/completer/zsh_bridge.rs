@@ -1594,7 +1594,30 @@ mod tests {
                 ..CompletionConfig::default()
             },
         )));
-        let provider = ZshBridgeProvider::with_zsh_binary(settings, zsh);
+        // ブリッジディレクトリと HOME をテスト専用の一時ディレクトリへ隔離する。
+        //
+        // 隔離しない場合、このテストは**実ユーザーの**
+        // `~/.config/jarvish/zsh-bridge` と実 `$HOME` を使ってデーモンを
+        // spawn してしまう。そのため結果が開発者のローカル環境に依存し、
+        // 実際に以下の形で不安定化していた（実測）:
+        //   - 実 `.zshrc` / `.zshenv` が重い（プラグインマネージャ等）と
+        //     レディマーカーが cold timeout 内に届かず spawn に失敗する
+        //     （`zsh daemon failed to reach ready marker within timeout`）
+        //   - 実ブリッジ dir に溜まった大量の残骸ファイルや、実 `$HOME` の
+        //     compdump キャッシュの状態に左右される
+        // 他の統合テスト（`extra_envs` で `HOME` を隔離しているもの）と同じ
+        // 方針に揃え、環境非依存にする。
+        let bridge_tmp = tempfile::tempdir().unwrap();
+        let home_tmp = tempfile::tempdir().unwrap();
+        let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
+            settings,
+            zsh,
+            bridge_tmp.path().join("zsh-bridge"),
+            vec![(
+                "HOME".to_string(),
+                home_tmp.path().to_string_lossy().into_owned(),
+            )],
+        );
 
         let line = "git checkout zzjarvish-bridge-";
         let ctx = super::super::context::extract_context(line, line.len());
