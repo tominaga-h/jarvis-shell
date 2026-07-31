@@ -3,6 +3,21 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.15.1](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.15.1) - 2026-07-15
+
+### Fixed
+
+- パイプ/コネクタの各セグメント先頭でエイリアスを展開するよう修正
+  - `cat x | grep y` のようにパイプ後段のコマンドがエイリアスでも展開されなかった（`&&` `||` `;` の 2 番目以降のセグメントも同様）。原因は `expand_alias` が行全体の先頭 1 トークンのみを、パイプ/コネクタ分割より前に 1 回だけ置換していたこと
+  - `quote.rs` にバイト範囲付きトークナイザ `split_quoted_spans` を新設し `split_quoted` をそれに委譲（トークナイザ実装を一本化）。`alias.rs` の `expand_alias` を `expand_aliases_in_line` へ置き換え、`|` `&&` `||` `;` で分割した各セグメント先頭にエイリアスを適用して原文へバイト splice で復元（クォート・空白・マルチバイトを保持）
+  - `>` `>>` `<`（リダイレクト）や、クォート内・`$(...)` 内の `|` はセグメント境界にしない。one-shot・クォート/subst 先頭は非展開、演算子を含む alias 値は bash 準拠
+
+### Changed
+
+- 非対話単体実行 (`-c`) のコマンドを履歴に記録しないよう変更
+  - nvim 等の外部ツールがファイル glob 展開のために `jarvish -c "..."` を非対話実行すると、その一時コマンドが `history.db`（上下矢印キーの履歴補完）に混入していた。bash/zsh と同様に非対話単体実行は履歴対象外とする
+  - `Shell` 構造体に `interactive: bool` を保持し、`command_history` テーブルへ書き込む 2 経路（`record_history` / AI ツールコール実行コマンドの reedline 直接保存）を `interactive` でガード。設定項目は増やさず常に有効。rc.jsh/startup/source は元々 `record_history` を通らないため影響なし
+
 ## [v1.15.0](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.15.0) - 2026-07-12
 
 ### Added
