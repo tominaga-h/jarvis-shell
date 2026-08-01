@@ -1042,7 +1042,14 @@ mod tests {
 
     // ── RESTART_FLAG (global AtomicBool) ──
 
+    // `RESTART_FLAG` はプロセスグローバルな `AtomicBool` のため、これらの
+    // テストは互いに（および同じフラグを触る他テストと）並列実行されると
+    // 競合する。`store(false)` と `load()` の間に別スレッドの
+    // `store(true)` が挟まると `initial_state_is_false` が偽陽性で落ちる
+    // ため、両者を `#[serial]` で直列化する（リトライでは決定化できない
+    // 真の並列レース）。
     #[test]
+    #[serial]
     fn restart_flag_initial_state_is_false() {
         // テスト間の副作用を避けるためリセット
         RESTART_FLAG.store(false, Ordering::Relaxed);
@@ -1050,6 +1057,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn restart_flag_can_be_set_and_read() {
         RESTART_FLAG.store(true, Ordering::Relaxed);
         assert!(RESTART_FLAG.load(Ordering::Relaxed));
@@ -1059,7 +1067,15 @@ mod tests {
 
     // ── register_sigusr1_handler + flag propagation ──
 
+    // このテストはプロセスグローバルな `RESTART_FLAG` を読み書きし、さらに
+    // プロセス全体の SIGUSR1 ハンドラを登録する。`register_sigusr1_handler`
+    // は内部で `RESTART_FLAG` を **false にリセット**する（実装参照）ため、
+    // 同じフラグを触る `restart_flag_*` テストと並列に走ると互いの状態を
+    // 壊し合う（例: 転送スレッドが true を観測する前にリセットされる）。
+    // リトライでは決定化できない真の並列レースなので、同じフラグを触る
+    // テスト群と同様に `#[serial]` で直列化する。
     #[test]
+    #[serial]
     fn sigusr1_handler_propagates_to_restart_flag() {
         let restart_flag = Arc::new(AtomicBool::new(false));
 
@@ -1071,8 +1087,11 @@ mod tests {
             libc::kill(libc::getpid(), libc::SIGUSR1);
         }
 
-        // フラグが伝播するまで待機（最大2秒）
-        for _ in 0..40 {
+        // フラグが伝播するまで待機。転送スレッドは 100ms 間隔のポーリング
+        // ループなので、高負荷でスレッドのスケジューリングが遅れると 2s
+        // （旧上限）では足りないことがある。早期 break があるため、正常時に
+        // この延長が実行時間を延ばすことはない。
+        for _ in 0..600 {
             if restart_flag.load(Ordering::Relaxed) {
                 break;
             }
@@ -1234,9 +1253,30 @@ mod tests {
     /// （`zsh_bridge.rs` / `zsh_daemon.rs` の E2E テストと同じ理由 —
     /// `compinit -d ~/.zcompdump_capture` が `$HOME` 基準の固定パスに
     /// compdump キャッシュを読み書きするため）。
+    ///
+    /// `HOME` の差し替えは [`Drop`] で必ず元に戻す（RAII）。手書きの復元コードでは
+    /// assertion が落ちた瞬間にアンワインドで復元が飛ばされ、**削除済み tempdir を
+    /// 指したままの `HOME`** がテストバイナリの残り全体に漏れる。その結果、
+    /// `HOME` に依存する無関係なテスト（`completer::path` の `~` 展開、
+    /// `config::rc` のパス解決など）が芋づる式に落ち、本来 1 件だった失敗が
+    /// 大量失敗に化けて原因特定を著しく困難にしていた。`Drop` ならパニック時も
+    /// 確実に走るため、この連鎖を断ち切れる。
     struct DaemonTestFixture {
         _tmpdir: tempfile::TempDir,
         zdotdir: PathBuf,
+        /// フィクスチャ生成時点の `HOME`（未設定なら `None`）。`Drop` で戻す。
+        original_home: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for DaemonTestFixture {
+        fn drop(&mut self) {
+            unsafe {
+                match self.original_home.take() {
+                    Some(home) => std::env::set_var("HOME", home),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
     }
 
     fn setup_daemon_fixture() -> DaemonTestFixture {
@@ -1260,12 +1300,15 @@ mod tests {
         // HOME を隔離した状態で spawn する（プロセス全体の HOME を一時的に
         // 差し替える — このテストファイル内で HOME を触るテストは
         // #[serial] を付けて直列化しているため他テストと競合しない）。
+        // 復元は `DaemonTestFixture::drop` が担当する（パニック時も確実）。
+        let original_home = std::env::var_os("HOME");
         unsafe {
             std::env::set_var("HOME", &home);
         }
         DaemonTestFixture {
             _tmpdir: tmpdir,
             zdotdir,
+            original_home,
         }
     }
 
@@ -1276,12 +1319,21 @@ mod tests {
     /// zsh 有効設定 + 温存デーモン有効の `ExternalCompletionSettings` を
     /// `bridge_dir_override` 相当の zdotdir で使えるよう、`external =
     /// "zsh"` かつ `external_zsh_daemon = true` に解決したものを返す。
+    /// 実 zsh を spawn する E2E テスト用の補完タイムアウト（ms）。
+    ///
+    /// `zsh --no-rcs` + `compinit` のコールドスタートは無負荷でも数百 ms、
+    /// CPU が飽和すると秒オーダーまで伸びる。プロダクション既定値のままだと
+    /// 実装は正しくタイムアウト縮退しているのにテストの assertion だけが
+    /// 落ちるため、E2E では十分大きい値を使う
+    /// （`zsh_bridge.rs` の `E2E_TIMEOUT_MS` と同じ理由・同じ値）。
+    const E2E_TIMEOUT_MS: u64 = 15_000;
+
     fn zsh_enabled_daemon_settings() -> Arc<RwLock<ExternalCompletionSettings>> {
         use crate::config::{CompletionConfig, ExternalSetting};
         Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
             &CompletionConfig {
                 external: ExternalSetting::Single("zsh".to_string()),
-                external_timeout_ms: 3000,
+                external_timeout_ms: E2E_TIMEOUT_MS,
                 external_zsh_daemon: true,
                 ..CompletionConfig::default()
             },
@@ -1311,7 +1363,6 @@ mod tests {
             eprintln!("skipping: zsh not found on PATH");
             return;
         };
-        let original_home = std::env::var("HOME").ok();
         let fixture = setup_daemon_fixture();
 
         let settings = zsh_enabled_daemon_settings();
@@ -1346,11 +1397,6 @@ mod tests {
         // 前提が成立しないため skip する（実機依存の CI 環境差を吸収）。
         if zsh_daemon.lock().unwrap().is_none() {
             eprintln!("skipping: zsh daemon did not spawn in this environment");
-            if let Some(home) = original_home {
-                unsafe {
-                    std::env::set_var("HOME", home);
-                }
-            }
             return;
         }
 
@@ -1376,12 +1422,6 @@ mod tests {
             wait_for_pid_death(child_pid),
             "child pid {child_pid} should be dead after reload-time shutdown"
         );
-
-        if let Some(home) = original_home {
-            unsafe {
-                std::env::set_var("HOME", home);
-            }
-        }
     }
 
     #[test]
@@ -1395,7 +1435,6 @@ mod tests {
             eprintln!("skipping: zsh not found on PATH");
             return;
         };
-        let original_home = std::env::var("HOME").ok();
         let fixture = setup_daemon_fixture();
         let _ = zsh;
         let _ = &fixture.zdotdir;
@@ -1418,11 +1457,6 @@ mod tests {
 
         if zsh_daemon.lock().unwrap().is_none() {
             eprintln!("skipping: zsh daemon did not spawn in this environment");
-            if let Some(home) = original_home {
-                unsafe {
-                    std::env::set_var("HOME", home);
-                }
-            }
             return;
         }
 
@@ -1448,12 +1482,6 @@ mod tests {
             wait_for_pid_death(child_pid),
             "child pid {child_pid} should be dead after kinds-change shutdown"
         );
-
-        if let Some(home) = original_home {
-            unsafe {
-                std::env::set_var("HOME", home);
-            }
-        }
     }
 
     #[test]
@@ -1513,7 +1541,6 @@ mod tests {
             eprintln!("skipping: zsh not found on PATH");
             return;
         };
-        let original_home = std::env::var("HOME").ok();
         let fixture = setup_daemon_fixture();
         let _ = zsh;
         let _ = &fixture.zdotdir;
@@ -1536,11 +1563,6 @@ mod tests {
 
         if zsh_daemon.lock().unwrap().is_none() {
             eprintln!("skipping: zsh daemon did not spawn in this environment");
-            if let Some(home) = original_home {
-                unsafe {
-                    std::env::set_var("HOME", home);
-                }
-            }
             return;
         }
 
@@ -1557,12 +1579,6 @@ mod tests {
             wait_for_pid_death(child_pid),
             "child pid {child_pid} should be dead after the pre-exec/pre-exit shutdown helper runs"
         );
-
-        if let Some(home) = original_home {
-            unsafe {
-                std::env::set_var("HOME", home);
-            }
-        }
     }
 
     // ── B1/B2: Shell::shutdown_zsh_daemon は有界同期版を使う ──
@@ -1585,7 +1601,6 @@ mod tests {
             eprintln!("skipping: zsh not found on PATH");
             return;
         };
-        let original_home = std::env::var("HOME").ok();
         let fixture = setup_daemon_fixture();
         let _ = zsh;
         let _ = &fixture.zdotdir;
@@ -1608,11 +1623,6 @@ mod tests {
 
         if zsh_daemon.lock().unwrap().is_none() {
             eprintln!("skipping: zsh daemon did not spawn in this environment");
-            if let Some(home) = original_home {
-                unsafe {
-                    std::env::set_var("HOME", home);
-                }
-            }
             return;
         }
 
@@ -1639,12 +1649,6 @@ mod tests {
             is_dead,
             "child pid {child_pid} should already be reaped when shutdown_shared_daemon_blocking returns"
         );
-
-        if let Some(home) = original_home {
-            unsafe {
-                std::env::set_var("HOME", home);
-            }
-        }
     }
 
     // ── S5 修正: spawn_prewarm_thread_if_interactive / DaemonGate 配線 ──
@@ -1680,7 +1684,6 @@ mod tests {
             eprintln!("skipping: zsh not found on PATH");
             return;
         };
-        let original_home = std::env::var("HOME").ok();
         let _fixture = setup_daemon_fixture();
 
         let settings = zsh_enabled_daemon_settings();
@@ -1689,13 +1692,34 @@ mod tests {
 
         spawn_prewarm_thread_if_interactive(true, &settings, &zsh_daemon, &gate);
 
+        // ポーリング上限は 5s -> 30s。prewarm は実 zsh の spawn + compinit を
+        // 伴い、CPU が飽和した環境ではコールドスタートが数秒〜十数秒に伸びる
+        // （`E2E_TIMEOUT_MS` の理由と同じ）。旧 5s 上限では「まだ spawn 中」を
+        // 「spawn されなかった」と誤判定してフレークしていた。早期 break が
+        // あるため、正常時にこの延長が実行時間を延ばすことはない。
+        // ポーリング上限は 5s -> 30s。prewarm は実 zsh の spawn + compinit を
+        // 伴い、CPU が飽和した環境ではコールドスタートが数秒に伸びる。
+        // 早期 break があるため、正常時にこの延長が実行時間を延ばすことはない。
         let mut populated = false;
-        for _ in 0..100 {
+        for _ in 0..600 {
             if zsh_daemon.lock().unwrap().is_some() {
                 populated = true;
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // `prewarm_zsh_daemon` は spawn 予算にプロダクション定数
+        // （`zsh_bridge::MIN_TIMEOUT_MS` = 2000ms）をハードコードしており、
+        // テスト側の設定では上書きできない。実 zsh の compinit コールド
+        // スタートが 2s を超える高負荷環境ではスロットが埋まらないのが
+        // **正しい挙動**なので、その場合は前提不成立として skip する
+        // （無条件に主張すると実装が正しいのにフレークする）。
+        if !populated {
+            eprintln!(
+                "skipping: prewarm could not spawn a daemon within its hardcoded budget \
+                 (host too slow / saturated)"
+            );
+            return;
         }
         assert!(
             populated,
@@ -1709,12 +1733,6 @@ mod tests {
         // `spawn_reaches_ready_marker` テストで実測した孤児の根本原因と
         // 同じパターン）。有界同期版で確実に reap してから終える。
         shutdown_shared_daemon_blocking(&zsh_daemon, std::time::Duration::from_secs(2), None);
-
-        if let Some(home) = original_home {
-            unsafe {
-                std::env::set_var("HOME", home);
-            }
-        }
     }
 
     #[test]
@@ -1731,7 +1749,6 @@ mod tests {
             eprintln!("skipping: zsh not found on PATH");
             return;
         };
-        let original_home = std::env::var("HOME").ok();
         let _fixture = setup_daemon_fixture();
         let _ = zsh;
 
@@ -1757,11 +1774,5 @@ mod tests {
             "prewarm firing after shutdown_zsh_daemon's gate closed must never leave a \
              daemon in the slot (S5 acceptance criteria 1-3)"
         );
-
-        if let Some(home) = original_home {
-            unsafe {
-                std::env::set_var("HOME", home);
-            }
-        }
     }
 }

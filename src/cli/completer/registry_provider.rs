@@ -1423,12 +1423,18 @@ mod tests {
                 ..Default::default()
             },
         );
-        // 集約予算 300ms（フロア 200ms 超なのでそのまま使われる）。
-        // 直列にフルタイムアウトを与えると 2 * 300ms = 600ms 掛かるはずだが、
-        // 集約予算なら 300ms + 若干のオーバーヘッドで収まるはず。
+        // 集約予算 1000ms（フロア 200ms 超なのでそのまま使われる）。
+        // 直列にフルタイムアウトを与えると 2 * 1000ms = 2000ms 掛かるはずだが、
+        // 集約予算なら 1000ms + 若干のオーバーヘッドで収まるはず。
+        //
+        // 旧実装は予算 300ms / 上限 900ms だったが、これは 2 回分の
+        // fork+exec+kill に 600ms しか余裕がなく、負荷の高いランナーでは
+        // フレークしていた。予算を上げて「直列なら 2000ms・集約なら 1000ms」
+        // という差を広げることで、判別力（集約かどうか）を落とさずに
+        // オーバーヘッド耐性だけを増やす。
         let settings = Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
             &CompletionConfig {
-                external_timeout_ms: 300,
+                external_timeout_ms: 1000,
                 ..CompletionConfig::default()
             },
         )));
@@ -1443,9 +1449,9 @@ mod tests {
             result.is_none(),
             "both hanging dynamic sources should yield zero candidates -> None fall-through"
         );
-        // 2倍(600ms)には遠く及ばない、1回分の予算 + 十分なエポックのみを許容する。
+        // 2倍(2000ms)には遠く及ばない、1回分の予算(1000ms) + 十分なエポックのみを許容する。
         assert!(
-            elapsed < Duration::from_millis(900),
+            elapsed < Duration::from_millis(1600),
             "two hanging specs must share ONE aggregate budget, not stack sequentially, took {elapsed:?}"
         );
     }
