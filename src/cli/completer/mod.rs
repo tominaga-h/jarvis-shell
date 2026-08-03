@@ -72,6 +72,8 @@ mod path;
 mod provider;
 pub mod registry;
 mod registry_provider;
+#[cfg(test)]
+mod test_git;
 mod zsh_bridge;
 mod zsh_daemon;
 
@@ -389,57 +391,14 @@ mod tests {
     }
 
     fn create_test_git_repo() -> tempfile::TempDir {
-        use std::process::Command;
-
         let tmpdir = tempfile::tempdir().unwrap();
-        let dir = tmpdir.path();
-
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["branch", "test-feature"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-
+        super::test_git::init_repo_with_test_feature_branch(tmpdir.path());
         tmpdir
     }
 
     fn create_test_git_repo_with_aliases() -> tempfile::TempDir {
-        use std::process::Command;
-
-        let tmpdir = create_test_git_repo();
-        let dir = tmpdir.path();
-
-        Command::new("git")
-            .args(["config", "alias.co", "checkout"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "alias.nb", "checkout -b"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-
+        let tmpdir = tempfile::tempdir().unwrap();
+        super::test_git::init_repo_with_aliases(tmpdir.path());
         tmpdir
     }
 
@@ -473,9 +432,49 @@ mod tests {
         assert!(values.contains(&format!("{path}/readme.txt").as_str()));
     }
 
+    /// `HOME` を「必ず中身のあるディレクトリ」に差し替える RAII ガード。
+    ///
+    /// `~` 展開のテストは `assert!(!suggestions.is_empty())` を主張するため、
+    /// 実行環境の実 `$HOME` に可視エントリが 1 つも無いと落ちる（最小構成の
+    /// コンテナや新規作成ユーザなど）。ここでは tempdir に既知のエントリを
+    /// 作ってそこを `HOME` として使い、環境非依存にする。復元は `Drop` で
+    /// 行うためパニック時も漏れない。
+    struct TildeHomeFixture {
+        _tmpdir: tempfile::TempDir,
+        original_home: Option<std::ffi::OsString>,
+    }
+
+    impl TildeHomeFixture {
+        fn new() -> Self {
+            let tmpdir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(tmpdir.path().join("Documents")).unwrap();
+            std::fs::write(tmpdir.path().join("readme.txt"), "x").unwrap();
+            let original_home = env::var_os("HOME");
+            unsafe {
+                env::set_var("HOME", tmpdir.path());
+            }
+            Self {
+                _tmpdir: tmpdir,
+                original_home,
+            }
+        }
+    }
+
+    impl Drop for TildeHomeFixture {
+        fn drop(&mut self) {
+            unsafe {
+                match self.original_home.take() {
+                    Some(home) => env::set_var("HOME", home),
+                    None => env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
     #[test]
     #[serial]
     fn complete_tilde_alone_expands_home() {
+        let _home = TildeHomeFixture::new();
         let mut completer = test_completer();
         let line = "cd ~";
         let pos = line.len();
@@ -495,6 +494,7 @@ mod tests {
     #[test]
     #[serial]
     fn complete_tilde_slash_expands_home() {
+        let _home = TildeHomeFixture::new();
         let mut completer = test_completer();
         let line = "cd ~/";
         let pos = line.len();
@@ -1248,10 +1248,26 @@ mod tests {
             },
         )));
         let commands = CompletionConfig::default().git_branch_commands;
+        // 配列指定の設定で `new()` が構築できること自体がここでの主張の半分。
+        let _completer_with_array_order = JarvishCompleter::new(
+            Arc::new(RwLock::new(commands.clone())),
+            Arc::new(RwLock::new(HashMap::new())),
+            settings,
+            new_shared_daemon_slot(),
+            Arc::new(RwLock::new(CompletionRegistry::new())),
+        );
+
+        // フォールバック検証用は外部補完を無効化した設定で組む（下のコメント参照）。
+        let no_external = Arc::new(RwLock::new(ExternalCompletionSettings::resolve(
+            &CompletionConfig {
+                external: ExternalSetting::Single("none".to_string()),
+                ..CompletionConfig::default()
+            },
+        )));
         let mut completer = JarvishCompleter::new(
             Arc::new(RwLock::new(commands)),
             Arc::new(RwLock::new(HashMap::new())),
-            settings,
+            no_external,
             new_shared_daemon_slot(),
             Arc::new(RwLock::new(CompletionRegistry::new())),
         );
@@ -1261,6 +1277,20 @@ mod tests {
         let pos = line.len();
         let suggestions = completer.complete(&line, pos);
 
+        // 実機に zsh / carapace がインストールされていると、外部補完
+        // プロバイダが「自分が担当」と判断してチェーンを短絡し、
+        // PathProvider まで到達しない（`is_responsible` が true なら
+        // その時点で dispatch は打ち切られる）。さらに高負荷環境では
+        // zsh の `compinit` が予算を超えて**候補ゼロ**で返るため、
+        // `suggestions` が空になりこのテストだけが落ちる — 実装は正しく
+        // タイムアウト縮退しているのに、である（実測で再現）。
+        //
+        // このテストの主張は「配列指定の優先順を渡しても `new()` が構築でき、
+        // 補完呼び出しがパニックせずに完了し、PathProvider へフォール
+        // バックできる」ことなので、外部バイナリを実際に叩く必要はない。
+        // 上の `settings` は「配列指定が構築を壊さない」ことの検証に使い、
+        // フォールバック検証は外部補完を無効化した設定で行うことで、
+        // 実機の zsh/carapace の有無・速度から完全に独立させる。
         let values: Vec<&str> = suggestions.iter().map(|s| s.value.as_str()).collect();
         assert!(
             values.contains(&format!("{path}/readme.txt").as_str()),
@@ -1671,8 +1701,15 @@ mod tests {
         // p0 が is_responsible=true で None を返した時点で以降は一切
         // 呼ばれないはず。
         assert_eq!(*call_order.lock().unwrap(), vec!["p0"]);
+        // 短絡の本質的な証拠は上の `call_order == ["p0"]`（後続プロバイダが
+        // 一度も呼ばれていない）であり、この時間計測は「短絡していれば
+        // ブロックしない」ことの補助的な確認にすぎない。全プロバイダは
+        // インプロセスのフェイクなので本来マイクロ秒級だが、飽和した CI
+        // ランナー上の絶対 200ms 境界はフレーク源になりうるため、
+        // 十分に緩い 5s を上限にする（短絡が壊れて実際にブロックすれば
+        // それでも検出できる）。
         assert!(
-            elapsed < std::time::Duration::from_millis(200),
+            elapsed < std::time::Duration::from_secs(5),
             "dispatch should short-circuit quickly once a responsible provider fails, took {elapsed:?}"
         );
     }

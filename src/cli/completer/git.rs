@@ -161,57 +161,14 @@ mod tests {
     }
 
     fn create_test_git_repo() -> tempfile::TempDir {
-        use std::process::Command;
-
         let tmpdir = tempfile::tempdir().unwrap();
-        let dir = tmpdir.path();
-
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["branch", "test-feature"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-
+        super::super::test_git::init_repo_with_test_feature_branch(tmpdir.path());
         tmpdir
     }
 
     fn create_test_git_repo_with_aliases() -> tempfile::TempDir {
-        use std::process::Command;
-
-        let tmpdir = create_test_git_repo();
-        let dir = tmpdir.path();
-
-        Command::new("git")
-            .args(["config", "alias.co", "checkout"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "alias.nb", "checkout -b"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-
+        let tmpdir = tempfile::tempdir().unwrap();
+        super::super::test_git::init_repo_with_aliases(tmpdir.path());
         tmpdir
     }
 
@@ -251,7 +208,13 @@ mod tests {
         }
     }
 
+    // このモジュールの他テストは `set_current_dir` でプロセス全体の cwd を
+    // 変更する。`#[serial]` は serial 同士しか排他しないため、非 serial の
+    // このテストは他テストが cwd を一時ディレクトリへ移した最中に走りうる。
+    // 現状はどの cwd でも空を返すため実害は出ていないが、serialization の
+    // 契約に空いた穴なので明示的に直列化しておく。
     #[test]
+    #[serial]
     fn complete_git_branch_nonexistent_prefix_returns_empty() {
         let candidates = complete_git_branch("zzz_no_such_branch_");
         assert!(candidates.is_empty());
@@ -317,11 +280,12 @@ mod tests {
             candidates.len() >= 2,
             "should have at least 2 branches (main/master + test-feature): {candidates:?}"
         );
+        // `create_test_git_repo` が初期ブランチを `main` に固定するため
+        // （実行環境の `init.defaultBranch` に依存しない）、決め打ちで検証する。
         let first = &candidates[0].value;
-        let current = &["main", "master"];
-        assert!(
-            current.contains(&first.as_str()),
-            "first suggestion should be the current branch (main or master), got: {first}"
+        assert_eq!(
+            first, "main",
+            "first suggestion should be the current branch (main), got: {first}"
         );
     }
 

@@ -592,7 +592,6 @@ mod tests {
     use crate::cli::completer::context::extract_context;
     use serial_test::serial;
     use std::env;
-    use std::process::Command;
 
     // ── JSON 固定文字列パーステスト（実機キャプチャ, carapace-bin 1.7.3） ──
 
@@ -1743,9 +1742,19 @@ mod tests {
 
         // reload: `Shell::reload_config` と同じ書き込み経路で、同じ Arc の
         // 中身を "auto"（carapace 検出込み）へ丸ごと置き換える。
-        let resolved = ExternalCompletionSettings::resolve(&config_with_external(
+        //
+        // このテストは reload 後に**実際に carapace を spawn する**ため、
+        // `integration_settings()` と同じ理由でタイムアウトを 5s に広げる:
+        // 本番既定の 400ms は、`cargo test --all-targets` で host が飽和した
+        // 状態では carapace のコールドスタートに足りず、`provide()` が正しく
+        // `None` に縮退した結果テストだけが落ちる（負荷起因のフレークであり
+        // 製品・テストロジックのバグではない）。ここでの検証対象は
+        // 「同じ Arc 経由で reload 後の設定が読み直されること」であって
+        // 応答速度ではないので、緩めても検出力は落ちない。
+        let mut resolved = ExternalCompletionSettings::resolve(&config_with_external(
             ExternalSetting::Single("auto".to_string()),
         ));
+        resolved.timeout = Duration::from_secs(5);
         {
             let mut guard = shared.write().unwrap();
             *guard = resolved;
@@ -1788,34 +1797,7 @@ mod tests {
 
     fn create_test_git_repo() -> tempfile::TempDir {
         let tmpdir = tempfile::tempdir().unwrap();
-        let dir = tmpdir.path();
-
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["branch", "test-feature"])
-            .current_dir(dir)
-            .output()
-            .unwrap();
-
+        crate::cli::completer::test_git::init_repo_with_test_feature_branch(tmpdir.path());
         tmpdir
     }
 

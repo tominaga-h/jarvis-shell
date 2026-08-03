@@ -1360,7 +1360,7 @@ mod tests {
         let child_pid_before = daemon.child_pid_for_test();
 
         let first = daemon
-            .request("jarvishtestcmd ", Duration::from_secs(3))
+            .request("jarvishtestcmd ", Duration::from_secs(15))
             .expect("first request should succeed");
         assert!(
             daemon.is_alive(),
@@ -1369,7 +1369,7 @@ mod tests {
 
         let start = Instant::now();
         let second = daemon
-            .request("jarvishtestcmd ", Duration::from_secs(3))
+            .request("jarvishtestcmd ", Duration::from_secs(15))
             .expect("second request should succeed");
         let elapsed = start.elapsed();
 
@@ -1395,9 +1395,13 @@ mod tests {
         );
 
         eprintln!("warm second-request latency: {elapsed:?}");
+        // ウォーム経路の主張は「デーモンを使い回すので compinit のコールド
+        // コストを再度払わない」こと。コールド spawn は実測で秒オーダー
+        // なので、2s を上限にしても回帰（使い回しが壊れて毎回 compinit）は
+        // 検出できる。旧 500ms は負荷下での PTY ラウンドトリップでフレークした。
         assert!(
-            elapsed < Duration::from_millis(500),
-            "warm second request should be well under 500ms (compute-only), took {elapsed:?}"
+            elapsed < Duration::from_secs(2),
+            "warm second request should not pay the cold compinit cost, took {elapsed:?}"
         );
 
         // テストフィクスチャ teardown（S5 修正）: Drop に任せず明示的に
@@ -1434,7 +1438,7 @@ mod tests {
 
         // request A: long/different line.
         let out_a = daemon
-            .request("jarvishtestcmd al", Duration::from_secs(3))
+            .request("jarvishtestcmd al", Duration::from_secs(15))
             .expect("request A should succeed");
         let candidates_a = parse_capture_output(&out_a);
         let values_a: Vec<&str> = candidates_a.iter().map(|c| c.value.as_str()).collect();
@@ -1442,7 +1446,7 @@ mod tests {
 
         // request B: a DIFFERENT command entirely -- must reflect only B.
         let out_b = daemon
-            .request("jarvishtestcmd2 ", Duration::from_secs(3))
+            .request("jarvishtestcmd2 ", Duration::from_secs(15))
             .expect("request B should succeed");
         let candidates_b = parse_capture_output(&out_b);
         let values_b: Vec<&str> = candidates_b.iter().map(|c| c.value.as_str()).collect();
@@ -1492,8 +1496,12 @@ mod tests {
         let result1 = daemon.request("jarvishtesthang ", request_timeout);
         let elapsed1 = start1.elapsed();
         assert_eq!(result1, None, "hung completion should time out to None");
+        // epsilon は 250ms -> 1s に緩和。回帰の実測値は「500ms タイムアウトに
+        // 対して 2.86 秒」であり、1s の epsilon（= 上限 1.5s）でも十分に検出
+        // できる一方、負荷の高いランナー上での PTY ラウンドトリップの揺れは
+        // 吸収できる。
         assert!(
-            elapsed1 < request_timeout + Duration::from_millis(250),
+            elapsed1 < request_timeout + Duration::from_secs(1),
             "request() must return within timeout + small epsilon, took {elapsed1:?}"
         );
         assert!(
@@ -1515,7 +1523,7 @@ mod tests {
         // — 実測 2.86 秒 vs 500ms タイムアウト。この下限を厳しくすること
         // 自体が「reap を呼び出し元スレッドから追い出せた」ことの直接証拠）。
         assert!(
-            elapsed2 < request_timeout + Duration::from_millis(250),
+            elapsed2 < request_timeout + Duration::from_secs(1),
             "request() must return within timeout + small epsilon (reap must not block \
              the caller thread), timeout={request_timeout:?}, took {elapsed2:?}"
         );
@@ -1817,13 +1825,16 @@ mod tests {
         assert!(!daemon.is_alive());
 
         let start = Instant::now();
-        let result = daemon.request("jarvishtestcmd ", Duration::from_secs(3));
+        let result = daemon.request("jarvishtestcmd ", Duration::from_secs(15));
         let elapsed = start.elapsed();
 
         assert_eq!(result, None);
+        // full timeout (15s) を待たずに早期 return することの検証。絶対速度では
+        // なく質的な差が主張なので、負荷に強い 1s を境界にする。
         assert!(
-            elapsed < Duration::from_millis(200),
-            "request on a dead daemon should return immediately, took {elapsed:?}"
+            elapsed < Duration::from_secs(1),
+            "request on a dead daemon should return immediately (not wait the full timeout), \
+             took {elapsed:?}"
         );
     }
 
@@ -1888,10 +1899,15 @@ mod tests {
             result, None,
             "request on an externally-killed daemon should yield None"
         );
+        // 主張は「full timeout (5s) を待たずに早期 return する」という質的な
+        // 差であって、絶対的な速度ではない。旧 150ms は負荷の高い CI ランナー
+        // （2 コア）でスケジューラに 1 回プリエンプトされるだけで超過しうる
+        // フレーク源だったため、timeout との差が十分に出る 1s まで緩める
+        // （5s の 1/5 — try_wait() プローブが無ければ 5s 掛かるので検出力は保たれる）。
         assert!(
-            elapsed < Duration::from_millis(150),
-            "liveness probe should detect external kill fast (< 150ms), took {elapsed:?} \
-             (a full-timeout wait would indicate the try_wait() probe is missing)"
+            elapsed < Duration::from_secs(1),
+            "liveness probe should detect external kill without waiting the full 5s timeout, \
+             took {elapsed:?} (a full-timeout wait would indicate the try_wait() probe is missing)"
         );
         assert!(
             !daemon.is_alive(),
@@ -1929,23 +1945,35 @@ mod tests {
         .expect("daemon should spawn");
         let child_pid = daemon.child_pid_for_test();
 
-        let start = Instant::now();
-        // 上限判定はタイムアウトより先に効くはずなので、タイムアウト自体は
-        // 余裕を持たせて「上限超過検知が先に効いた」ことを立証する。
-        let result = daemon.request("jarvishtestflood ", Duration::from_secs(10));
-        let elapsed = start.elapsed();
+        // 上限判定がタイムアウトより先に効くことを立証したいので、タイムアウト
+        // 自体は「絶対に先に発火しない」水準まで広く取る。
+        let request_timeout = Duration::from_secs(120);
+        let result = daemon.request("jarvishtestflood ", request_timeout);
 
         assert_eq!(
             result, None,
             "oversized response must be treated as desync and yield None"
         );
-        assert!(
-            elapsed < Duration::from_secs(10),
-            "buffer cap should trip well before the full 10s timeout, took {elapsed:?}"
-        );
+
+        // 「バッファ上限が効いた（タイムアウトではない）」ことの証明には
+        // **経過時間を使わない**。このテストは 200,000 行 × 32 バイト =
+        // 6.4MB を zsh に生成させる重い処理で、CPU が飽和すると実測で
+        // 14.9s → 28.6s と大きく揺れる。ストップウォッチによる区別は
+        // 「上限で落ちたのか、タイムアウトで落ちたのか」を確率的にしか
+        // 判定できず、実装が正しくても落ちるフレークになっていた。
+        //
+        // 代わりに因果関係で判定する: `BufferOverflow` は desync 相当として
+        // **グレース対象外で即 kill** されるのに対し、クリーンなタイムアウトは
+        // `MAX_CONSECUTIVE_TIMEOUTS`（= 2）に達するまでデーモンを生かしたまま
+        // にする。したがって「1回のリクエスト後に死んでいる」こと自体が
+        // 「タイムアウト経路ではなくバッファ上限経路を通った」ことの決定的な
+        // 証拠であり、経過時間より厳密な検証になっている。
         assert!(
             !daemon.is_alive(),
-            "daemon must be marked dead after exceeding the response buffer cap"
+            "daemon must be marked dead after ONE oversized response — a mere timeout \
+             would have left it alive for the grace round (MAX_CONSECUTIVE_TIMEOUTS = {}), \
+             so this also proves the buffer cap tripped rather than the {request_timeout:?} timeout",
+            MAX_CONSECUTIVE_TIMEOUTS
         );
 
         // テストフィクスチャ teardown（S5 修正）: バッファ上限超過は
@@ -2009,7 +2037,7 @@ mod tests {
             Duration::from_secs(10),
         )
         .expect("daemon should spawn");
-        let result = daemon.request("jarvishtestcmd ", Duration::from_secs(3));
+        let result = daemon.request("jarvishtestcmd ", Duration::from_secs(15));
         assert!(result.is_some(), "daemon should still serve completions");
         // テストフィクスチャ teardown（S5 修正、`spawn_reaches_ready_marker`
         // のコメント参照）。

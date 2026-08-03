@@ -1,5 +1,9 @@
 # CLAUDE.md
 
+応答は焦点を絞り、手短かつ簡潔に。免責事項や注意書きは短くし、
+応答の大部分を本題の回答に使うこと。何かの説明を求められたときは、
+詳細な説明が明示的に要求されない限り、高レベルの要約を返すこと。
+
 ## Project Overview
 
 **jarvish** — Next Generation AI Integrated Shell written in Rust, inspired by J.A.R.V.I.S. from Iron Man.
@@ -24,7 +28,7 @@ CI mirrors `make check`: `cargo fmt --check`, `cargo check --all-targets`, `carg
 Four core components — keep them well-separated:
 
 | Component | Module | Role |
-|---|---|---|
+| --- | --- | --- |
 | Line Editor | `src/cli/` | reedline REPL, prompt, syntax highlighting, autocomplete |
 | Execution Engine | `src/engine/` | builtins, external commands via PTY, I/O capture (tee), AI dispatch |
 | Black Box | `src/storage/` | SQLite (`history.db`) + SHA-256/zstd blob store (`~/.local/share/jarvish/`) |
