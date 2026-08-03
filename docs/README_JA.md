@@ -2,6 +2,7 @@
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
 [![version](https://img.shields.io/badge/version-1.15.4-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.15.4)
+![jarvish-demo](../images/demo.gif)
 
 > 🌐 [English README](../README.md)
 
@@ -14,8 +15,6 @@
 既存のシェル（BashやZsh）の単なるラッパーや外部ツールではありません。ターミナルのワークフローそのものにAIを深く統合し、**「通常のコマンド」と「自然言語」を息をするようにシームレスに行き来できる**これまでにない体験を提供します。
 
 エラーをブラウザにコピペしてAIに聞く時代は終わりました。Jarvish に聞くだけです。
-
-[![jarvish-demo](../images/jarvish-demo.gif)](https://asciinema.org/a/806755)
 
 ## 📑 目次
 
@@ -49,11 +48,14 @@
 `awk` や `sed`、`jq` の複雑なシンタックスを思い出す必要はもうありません。
 
 - **AI パイプ (`| ai "..."`)**: コマンドの出力を自然言語で直接フィルタリング・整形します。
+
   ```bash
   ls -la | ai "一番重いファイルは？"
   docker ps | ai "コンテナIDとイメージ名をJSONで出力して"
   ```
+
 - **AI リダイレクト (`> ai "..."`)**: コマンドの出力をJarvishのコンテキストに送り、対話的な分析を依頼します。
+
   ```bash
   git log --oneline -10 > ai "最近のコミットの変更意図を要約して"
   eza --help > ai "--treeオプションに追加で指定できるオプションは？"
@@ -236,15 +238,17 @@ Jarvish の Tab 補完は [carapace](https://github.com/carapace-sh/carapace-bin
 
 - **ブリッジ用 zshrc**: ブリッジ zsh は、あなたの実 `~/.zshrc` ではなく `~/.config/jarvish/zsh-bridge/.zshrc` を読み込みます。そのため対話シェルの設定から隔離されています。このファイルが存在しない場合、ブリッジ初回実行時にコメント付きテンプレートとして Jarvish が自動生成します — 以後は一切上書きされないため、自分で加えた変更は安全です。
 - **補完の追加方法**: ブリッジ用 zshrc には普通の zsh 構文がそのまま書けます。例えば Homebrew でインストールした [`zsh-completions`](https://github.com/zsh-users/zsh-completions) を取り込むには:
+
   ```sh
   # ~/.config/jarvish/zsh-bridge/.zshrc
   fpath=(/opt/homebrew/share/zsh-completions $fpath)
   ```
+
   通常の `~/.zshrc` と同じように `compdef` 行を追加して、特定コマンドに補完関数を紐付けることもできます。
 - **タイムアウト + フォールバック**: carapace と同様、各ブリッジ呼び出しはタイムアウトで保護されています（`external_timeout_ms` と共有しつつ、zsh の `compinit` 起動コストを見込んだ下限値を設けています）。ブリッジがハング・エラー・候補なしを返した場合は、ビルトインのパス補完へフォールバックします — Tab キーが UI をブロックすることはありません。
 - **常駐デーモン（`external_zsh_daemon`）**: ワンショット方式（Tab のたびに新しい zsh を起動し、`compinit` を走らせ、補完して終了する）は、実測でおよそ 700〜1100ms かかります — その大半はプロセス/PTY の起動コストで、補完の計算自体ではありません。`external_zsh_daemon = true`（既定）のとき、Jarvish は `zsh -i` を **Jarvish の素の子プロセスとして**1本だけ spawn し、以後の Tab 押下ではそれを使い回します。これはシステムサービスではなく、`launchd`/`launchctl` も一切使いません — Jarvish シェルが生きている間だけ存在する per-session の子プロセスです。このデーモンは**シェル起動直後にバックグラウンドで事前ウォームアップ**されるため、通常は最初の Tab 押下の時点で既にウォーム状態になっています。プリウォームがまだ完了していない（または zsh が見つからない等の理由でスキップされた）場合は、代わりに最初に必要になった Tab 押下で遅延 spawn されます。ウォーム状態になった後、リクエストは補完の計算コストのみを払います（目安として数ミリ秒）。`tmuxinator` の Ruby 製補完のように、遅いインタプリタを起動する補完関数も許容されます — ウォームリクエストのタイムアウトは 2000ms を下限とし、1回のタイムアウト（=遅い補完）だけではデーモンを kill しません。遅れて届いた応答は次の Tab 押下時に読み飛ばして破棄する（drain）だけに留めます。**連続2回**タイムアウトした場合のみ本当にハングしたと判定し、デーモンをバックグラウンドで kill したうえで、次の Tab 押下で新しいデーモンが遅延 spawn されます。ブリッジ用 zshrc（下記参照）を編集すると、そのファイルの更新時刻の変化を自動検知して次の Tab 押下で透過的にデーモンを再起動するため、`fpath`/`compdef` を書き換えた後に Jarvish 自体を再起動する必要はありません。`external_zsh_daemon = false` にすると常にワンショット方式を使います（ブリッジのトラブルシューティング時の手動エスケープハッチとしても使えます）。`source` によるホットリロードに対応しており、off にすると稼働中のデーモンは**その `source` 実行時点で**即座に shutdown され、on に戻すと次回の zsh 補完リクエストで遅延 spawn されます。稼働中のデーモンは Jarvish の終了時・再起動時（`restart` ビルトイン経由を含む）にも必ず明示的に shutdown され、Jarvish のセッションより長生きすることはありません。
 
-**トラブルシューティング: `fpath` を編集したらブリッジ補完が全コマンドで何も返さなくなった。** 上記の例のようにブリッジ用 zshrc の `fpath` にディレクトリを追加した結果、ブリッジ補完が*すべての*コマンドで候補を返さなくなった場合、原因はほぼ確実に zsh の `compinit` セキュリティ検査です。`compinit` は内部で `compaudit` を実行しますが、これは `fpath` に追加したディレクトリだけでなく、その**親ディレクトリ**も検査対象にします。いずれかが group-writable だと安全でないと判定され、`Ignore insecure directories and continue [ny]?` という対話的プロンプトを表示します。ブリッジ用の zsh は不可視の `zpty` セッション内で動いているため、このプロンプトに誰も答えられず `compinit` がハングし、補完が全滅したように見えます。これは Intel Mac で特によく起こります（Homebrew の `/usr/local/share` が既定で group-writable なため）。Apple Silicon の `/opt/homebrew` ではこの問題はほとんど発生しません。`compaudit` コマンドで該当ディレクトリを確認し、Homebrew 公式が推奨するのと同じ対処 `chmod g-w /usr/local/share` を行ってください。
+**トラブルシューティング: `fpath` を編集したらブリッジ補完が全コマンドで何も返さなくなった。** 上記の例のようにブリッジ用 zshrc の `fpath` にディレクトリを追加した結果、ブリッジ補完が_すべての_コマンドで候補を返さなくなった場合、原因はほぼ確実に zsh の `compinit` セキュリティ検査です。`compinit` は内部で `compaudit` を実行しますが、これは `fpath` に追加したディレクトリだけでなく、その**親ディレクトリ**も検査対象にします。いずれかが group-writable だと安全でないと判定され、`Ignore insecure directories and continue [ny]?` という対話的プロンプトを表示します。ブリッジ用の zsh は不可視の `zpty` セッション内で動いているため、このプロンプトに誰も答えられず `compinit` がハングし、補完が全滅したように見えます。これは Intel Mac で特によく起こります（Homebrew の `/usr/local/share` が既定で group-writable なため）。Apple Silicon の `/opt/homebrew` ではこの問題はほとんど発生しません。`compaudit` コマンドで該当ディレクトリを確認し、Homebrew 公式が推奨するのと同じ対処 `chmod g-w /usr/local/share` を行ってください。
 
 ### カスタム補完（`complete` ビルトイン）
 
@@ -264,11 +268,12 @@ complete            # これまでに登録した全補完を一覧表示
 complete -e -c mycmd  # mycmd の補完を消去
 ```
 
-登録後は、`mycmd `（または `mycmd -`）の後で Tab を押すと、対応するフラグや候補語が Jarvish の他の補完ソースと並んで表示されます。前方一致（フラグ・`-a` 引数語のいずれも）は**大文字小文字を区別します** — `mycmd B` と入力しても `build` として登録した候補には一致しません。
+登録後は、`mycmd`（または `mycmd -`）の後で Tab を押すと、対応するフラグや候補語が Jarvish の他の補完ソースと並んで表示されます。前方一致（フラグ・`-a` 引数語のいずれも）は**大文字小文字を区別します** — `mycmd B` と入力しても `build` として登録した候補には一致しません。
 
-**動的候補（`-a "$(...)"`）**: `-a` の値が（前後の空白を除いて）ちょうど `$(コマンド)` の形をしている場合、Jarvish はそれを静的な単語リストではなく*動的*ソースとして扱います。`コマンド` は Tab を押すたびに `/bin/sh -c` 経由で実行され、その標準出力が候補になります。出力の各行は `値<TAB>説明文` としてパースされます（タブと説明文は省略可 — `値` だけの行でもよく、その場合は spec の `-d` にフォールバックします）。空行はスキップされ、末尾の `\r` は取り除かれます。実行時間は `[completion] external_timeout_ms`（下限 200ms）で打ち切られ、タイムアウト・非ゼロ終了・spawn 失敗はいずれもエラーではなく「この spec からは 0 候補」として扱われます — 同じコマンドの他の spec は引き続き有効で、全体として一致がなければ他の補完ソースにフォールスルーします。1 個の `-a` 文字列の中で静的な単語と `$(...)` を混在させることは**サポートしていません** — `-a` は「静的な単語リスト」か「単一の `$(...)`」のどちらか一方です。
+**動的候補（`-a "$(...)"`）**: `-a` の値が（前後の空白を除いて）ちょうど `$(コマンド)` の形をしている場合、Jarvish はそれを静的な単語リストではなく_動的_ソースとして扱います。`コマンド` は Tab を押すたびに `/bin/sh -c` 経由で実行され、その標準出力が候補になります。出力の各行は `値<TAB>説明文` としてパースされます（タブと説明文は省略可 — `値` だけの行でもよく、その場合は spec の `-d` にフォールバックします）。空行はスキップされ、末尾の `\r` は取り除かれます。実行時間は `[completion] external_timeout_ms`（下限 200ms）で打ち切られ、タイムアウト・非ゼロ終了・spawn 失敗はいずれもエラーではなく「この spec からは 0 候補」として扱われます — 同じコマンドの他の spec は引き続き有効で、全体として一致がなければ他の補完ソースにフォールスルーします。1 個の `-a` 文字列の中で静的な単語と `$(...)` を混在させることは**サポートしていません** — `-a` は「静的な単語リスト」か「単一の `$(...)`」のどちらか一方です。
 
 **条件式（`-n`）**: 評価されるのは次の 2 形式のみで、いずれもサブプロセスを起動せずに判定します。
+
 - `__fish_use_subcommand` — コマンド名の後ろにまだフラグ以外の単語（サブコマンド相当）が現れていない間は true（`mycmd -v <Tab>` はフラグのみなので依然として「サブコマンド未出現」扱いです）。
 - `__fish_seen_subcommand_from w1 w2 ...` — 挙げた単語のいずれかがコマンド名より後ろに一度でも出現していれば true。
 
@@ -281,7 +286,7 @@ complete -c mycmd -n '__fish_use_subcommand' -a 'start stop'
 complete -c mycmd -n '__fish_seen_subcommand_from start' -a "$(mycmd --list-targets)"
 ```
 
-`mycmd ` の直後で Tab を押すと `start`/`stop` が候補になり、`mycmd start ` の後では `mycmd --list-targets` が実行され、その出力が候補として提示されます。
+`mycmd` の直後で Tab を押すと `start`/`stop` が候補になり、`mycmd start` の後では `mycmd --list-targets` が実行され、その出力が候補として提示されます。
 
 **再起動をまたいで永続化するには**: プロンプトで直接登録した `complete` の spec はメモリ上にのみ存在し、Jarvish を終了すると失われます。これ（と他の初期設定）を再起動をまたいで永続化するには、同じコマンドを下記の [`rc.jsh`](#-起動スクリプトrcjsh) に書いてください。
 
