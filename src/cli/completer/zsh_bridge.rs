@@ -35,7 +35,7 @@
 //! 3. 最初の `" -- "` で `value` / `description` に分割（区切りなしなら
 //!    description は `None`）
 //!
-//! # ユーザー拡張点（zsh-bridge ブリッジディレクトリ、Task 2b.2）
+//! # ユーザー拡張点（zsh-bridge ブリッジディレクトリ）
 //! `capture.zsh` は `zpty z zsh -f -i` で内側の zsh を起動していたが
 //! （vendor 元のまま）、`-f`（`NO_RCS`）は zshrc を一切読ませないフラグ
 //! のため、これではユーザーが `fpath` に `zsh-completions` を追加したり
@@ -225,23 +225,23 @@ fn is_symlink(path: &Path) -> io::Result<bool> {
 const MIN_TIMEOUT_MS: u64 = 2000;
 
 /// 温存デーモン（[`ZshDaemon`]）を使ったウォームリクエストの実効タイムアウトに
-/// 適用する下限値（Task 2b.3 / Fix D, #89）。
+/// 適用する下限値。
 ///
-/// **Fix D 以前は 100ms だった。** これは死のループを引き起こしていた:
+/// **以前は 100ms だった。** これは死のループを引き起こしていた:
 /// 実機計測で、ありふれた補完関数（例: `_tmuxinator` は `tmuxinator
 /// commands zsh` を毎回 exec する）が内部で Ruby 等のインタプリタ起動を
 /// 伴う場合、460〜910ms かかることが確認されている。ウォームフロアが
 /// この現実的なコストを下回っていると、そうした補完関数を持つコマンドは
 /// **デフォルト設定（`external_timeout_ms = 400`）のもとで毎回タイムアウト
-/// する** → 旧実装（Fix B 以前）ではタイムアウト = ハング扱いでデーモンを
+/// する** → 旧実装ではタイムアウト = ハング扱いでデーモンを
 /// 即 kill → 次の Tab はコールド再 spawn となり、コールド予算
-/// （[`MIN_TIMEOUT_MS`] = spawn + init + 初回リクエストの合計、Fix D3 以前）
+/// （[`MIN_TIMEOUT_MS`] = spawn + init + 初回リクエストの合計）
 /// もこの重い初回リクエストを賄いきれず `None` → `PathProvider` フォール
 /// バック（「最初の Tab がパス補完になる」症状）。以後の Tab もこの
 /// キル/再spawnループを繰り返す。
 ///
 /// そのため、[`MIN_TIMEOUT_MS`] と同じ計測値（460〜910ms）に余裕を
-/// 持たせた 2000ms をウォームフロアにも適用する。Fix D2（グレースドレイン）
+/// 持たせた 2000ms をウォームフロアにも適用する。（グレースドレイン）
 /// と組み合わせることで、遅いが正常な補完関数はタイムアウトしても
 /// デーモンを即座に殺さなくなるため、このフロア自体は「あからさまに
 /// ハングした補完を検知するまでの猶予」としての役割になる。
@@ -251,7 +251,7 @@ const MIN_TIMEOUT_MS: u64 = 2000;
 /// `min_timeout` 引数を参照）。
 const WARM_MIN_TIMEOUT_MS: u64 = 2000;
 
-/// ウォームリクエストの実効タイムアウトを計算する（Fix D1 のロジックを
+/// ウォームリクエストの実効タイムアウトを計算する（ロジックを
 /// 独立した純粋関数として切り出したもの — ユニットテストで
 /// `raw_timeout_ms` → 実効タイムアウトの対応を直接検証するため）。
 ///
@@ -269,12 +269,12 @@ fn compute_warm_timeout(raw_timeout: Duration) -> Duration {
 /// `Some` を返すかどうかに一本化されている — `[completion] external` の
 /// 値（`"auto"` / `"zsh"` / 配列での明示指定など）に応じて `resolve()` が
 /// このプロバイダを優先順リストに含めるかどうか・zsh バイナリを検出するか
-/// どうかを決める（Task 2b.4）。timeout も同じ共有設定から取得する。
+/// どうかを決める。timeout も同じ共有設定から取得する。
 ///
-/// # 温存デーモン配線（Task 2b.3, #89、Fix D で更新）
+/// # 温存デーモン配線
 /// `[completion] external_zsh_daemon`（`settings.zsh_daemon_enabled`）が
 /// `true` の間、[`ZshDaemon`] を使い回す。**主経路は起動時の事前ウォーム
-/// アップ**（[`prewarm_zsh_daemon`]、Fix D4）——`Shell::new` がバックグラウンド
+/// アップ**（[`prewarm_zsh_daemon`]）——`Shell::new` がバックグラウンド
 /// スレッドから spawn 済みにしておくため、通常は最初の `provide()` 呼び
 /// 出し時点で `daemon` スロットが既に埋まっている。プリウォームが間に
 /// 合わなかった場合（または zsh 未検出等でスキップされた場合）は、
@@ -286,16 +286,16 @@ fn compute_warm_timeout(raw_timeout: Duration) -> Duration {
 /// [`prewarm_zsh_daemon`] のドキュメント参照）。
 /// - **コールド**（デーモン未 spawn、または直前のリクエストで dead 化した
 ///   直後の再 spawn）: `MIN_TIMEOUT_MS`（2000ms）フロアを spawn + init の
-///   レディマーカー待ちのみに適用する（Fix D3）。spawn 直後に送る最初の
+///   レディマーカー待ちのみに適用する。spawn 直後に送る最初の
 ///   実補完リクエスト自体はこの予算に含めず、常にウォーム側の
 ///   `warm_timeout` を使う——spawn+init 自体は速くても補完関数の初回呼び
 ///   出しが重い（`tmuxinator` 等）ケースで、初回 Tab だけコールド予算を
 ///   使い切って `None` になっていた不具合の修正。
 /// - **ウォーム**（既に生きているデーモンへの2回目以降のリクエスト、および
-///   spawn 直後の初回リクエスト、Fix D3）: 設定された `external_timeout_ms`
-///   と [`WARM_MIN_TIMEOUT_MS`]（2000ms、Fix D1 で 100ms から引き上げ）の
+///   spawn 直後の初回リクエスト）: 設定された `external_timeout_ms`
+///   と [`WARM_MIN_TIMEOUT_MS`]（2000ms）の
 ///   大きい方を使う。
-/// - **失敗時（グレースドレイン + サーキットブレーカー、Fix D2）**:
+/// - **失敗時（グレースドレイン + サーキットブレーカー）**:
 ///   1回のクリーンなタイムアウト（遅いが正常な補完関数、例:
 ///   インタプリタ起動を伴う `tmuxinator` 補完）では、もはやデーモンを
 ///   即座に kill しない——[`ZshDaemon`] は残留フレームを次回リクエストで
@@ -327,7 +327,7 @@ fn compute_warm_timeout(raw_timeout: Duration) -> Duration {
 ///   長生きすることはない。
 pub(super) struct ZshBridgeProvider {
     settings: Arc<RwLock<ExternalCompletionSettings>>,
-    /// 温存デーモン本体（`Shell` と共有する `Arc<Mutex<_>>`、Task A, #89）。
+    /// 温存デーモン本体（`Shell` と共有する `Arc<Mutex<_>>`）。
     /// `None` は「未 spawn」または「直前のリクエストで dead 化して捨てた」、
     /// あるいは `Shell` 側がライフサイクルイベント（reload/exit/restart）で
     /// shutdown 済みであることを意味する（次回リクエストで遅延 respawn）。
@@ -385,13 +385,13 @@ impl DaemonSlot {
 /// `Shell` はこのハンドルを経由して、`reload_config`（設定変更の**その場**）
 /// や exit / restart 経路など、`provide()` が次に呼ばれるとは限らない
 /// ライフサイクルイベント上でもデーモンを確実に shutdown できる
-/// （A1〜A4, #89 レビュー指摘 — `Drop` にのみ依存すると `Command::exec`
+/// （`Drop` にのみ依存すると `Command::exec`
 /// や `std::process::exit` では一切実行されないため）。
 pub type SharedDaemonSlot = Arc<Mutex<Option<DaemonSlot>>>;
 
 /// 終端 shutdown（exit/exec 経路）が起きたことを示す tombstone フラグ。
 ///
-/// # 背景: `-c` 単体実行での孤児 zsh デーモン（S5 実機 E2E で検出）
+/// # 背景: `-c` 単体実行での孤児 zsh デーモン
 /// `Shell::new` は起動直後に**デタッチしたバックグラウンドスレッド**から
 /// [`prewarm_zsh_daemon`] を起動する（[`prewarm_zsh_daemon`] のドキュメント
 /// 参照）。`jarvish -c '<command>'` のような非対話実行は数ミリ秒で完走し、
@@ -466,13 +466,13 @@ impl DaemonGate {
 /// （poison 状態から shutdown を試みても panic を伝播させるだけで
 /// 状況が改善しないため）。
 ///
-/// # ノンブロッキング（B1/B2, #89）
+/// # ノンブロッキング
 /// kill/reap は [`ZshDaemon::shutdown`] がバックグラウンドスレッドへ
 /// 委譲するため、この関数は「スロットの所有権を取り出して手放す」以上の
 /// 待ちを一切行わずすぐ戻る。reedline の completer 呼び出し元（UI スレッド）
 /// から呼ばれうる経路 — `Shell::reload_config`（設定変更の**その場**での
-/// shutdown, A3/A4）、`ZshBridgeProvider::provide()` の `gate()`-None 早期
-/// パス（A4）、mtime トリガによるデーモン再起動（`request_via_daemon`）—
+/// shutdown）、`ZshBridgeProvider::provide()` の `gate()`-None 早期
+/// パス、mtime トリガによるデーモン再起動（`request_via_daemon`）—
 /// はすべてこちらを使う。プロセスが直後に exec/exit で消える経路
 /// （`Shell::exec_restart` 手前、`main.rs` の正常終了経路手前）は、
 /// バックグラウンドスレッドに reap を委ねても実行される保証がないため
@@ -486,7 +486,7 @@ pub fn shutdown_shared_daemon(slot: &SharedDaemonSlot) {
     }
 }
 
-/// [`shutdown_shared_daemon`] の有界同期版（B1/B2, #89）。
+/// [`shutdown_shared_daemon`] の有界同期版。
 ///
 /// `deadline` の範囲内で kill/reap の完了を**呼び出し元スレッド上で**
 /// 待つ。`Command::exec` 直前・`std::process::exit` 直前など、この行の
@@ -496,7 +496,7 @@ pub fn shutdown_shared_daemon(slot: &SharedDaemonSlot) {
 /// （UI スレッド）から通常のリクエスト処理中に呼んではならない
 /// （その場合は必ず [`shutdown_shared_daemon`] を使うこと）。
 ///
-/// # tombstone（S5 修正、[`DaemonGate`] 参照）
+/// # tombstone（[`DaemonGate`] 参照）
 /// `gate` を渡した場合、実際の shutdown 処理の**前に** `gate.close()` を
 /// 呼ぶ。以後 [`prewarm_zsh_daemon_with`] がこのタイミングより後にスロット
 /// へ書き込もうとしても、closed を検知して即座に shutdown する（プロセス
@@ -525,7 +525,7 @@ pub fn new_shared_daemon_slot() -> SharedDaemonSlot {
     Arc::new(Mutex::new(None))
 }
 
-/// Shell 起動時のバックグラウンド事前ウォームアップ（Fix D4, #89）。
+/// Shell 起動時のバックグラウンド事前ウォームアップ。
 ///
 /// `Shell::new` がこの関数を**デタッチしたバックグラウンドスレッド**から
 /// 呼ぶことで、ユーザーの最初の Tab 押下時に温存デーモンが既に spawn 済み
@@ -562,7 +562,7 @@ pub fn new_shared_daemon_slot() -> SharedDaemonSlot {
 ///    が捨てるデーモンも通常の `ZshDaemon::shutdown`/`Drop` 経路で確実に
 ///    kill/reap される）。
 ///
-/// # tombstone チェック（S5 修正、[`DaemonGate`] 参照）
+/// # tombstone チェック（[`DaemonGate`] 参照）
 /// `gate` が既に closed（= 終端 shutdown が既に起きた）の場合は、そもそも
 /// 重い spawn 処理に入る前に即座に諦める。呼び出し元は `-c` 単体実行の
 /// ように起動直後に完走してしまうケースを想定しており、この早期リターンは
@@ -646,7 +646,7 @@ fn prewarm_zsh_daemon_with(
         }
     };
 
-    // S5 tombstone: spawn（重い処理、数百ms かかりうる）の間に終端
+    // spawn（重い処理、数百ms かかりうる）の間に終端
     // shutdown が起きていた場合、このデーモンをスロットに書き込む前に
     // 即座に破棄する。`Mutex` の外で行う軽量チェックだが、実際に決定的な
     // 保証を作るのは次の「Mutex の中でのもう一度のチェック」の方
@@ -654,7 +654,7 @@ fn prewarm_zsh_daemon_with(
     // 単独では不十分 — 二重チェックのうち片方に過ぎない）。
     //
     // ここでの破棄には非ブロッキング版ではなく `shutdown_blocking` を使う
-    // （S5 追加修正）: `shutdown()`（非ブロッキング）は kill/reap を
+    // `shutdown()`（非ブロッキング）は kill/reap を
     // さらに別のバックグラウンドスレッドへ委譲するため、この関数が
     // return した時点では子プロセスがまだ生きている可能性がある。
     // 呼び出し元（`Shell::shutdown_zsh_daemon`）はこの関数自体の完了を
@@ -676,7 +676,7 @@ fn prewarm_zsh_daemon_with(
         return;
     };
 
-    // S5 tombstone（決定的保証の本体）: `Mutex` を握った**まま**もう一度
+    // （決定的保証の本体）: `Mutex` を握った**まま**もう一度
     // closed を確認する。`shutdown_shared_daemon_blocking` は
     // `gate.close()` を必ず `slot.lock()` より**前**に呼ぶ契約になって
     // いるため、この時点で3通りのタイミングしかあり得ない。
@@ -708,7 +708,7 @@ fn prewarm_zsh_daemon_with(
         // したデーモンは不要なので破棄する（二重デーモン防止）。
         //
         // tombstone 経路ではなく通常の二重 spawn 防止だが、こちらも
-        // shutdown_blocking を使う（S5 追加修正）: `shutdown_zsh_daemon`
+        // shutdown_blocking を使う: `shutdown_zsh_daemon`
         // の完了待ちチャネルは `prewarm_zsh_daemon_with` 関数全体の
         // return（= このスレッドの終了）をもって「prewarm 完了」と
         // 判定するため、この破棄された方の子プロセスの kill/reap も
@@ -866,7 +866,7 @@ impl ZshBridgeProvider {
         }
 
         if slot_guard.is_none() {
-            // Fix D3: `cold_timeout`（[`MIN_TIMEOUT_MS`]）は spawn + init
+            // `cold_timeout`（[`MIN_TIMEOUT_MS`]）は spawn + init
             // レディマーカー待ちのみを賄う予算であり、その直後に送る最初の
             // 実補完リクエストはこの中に含めない（`ZshDaemon::spawn` 内部の
             // `initialize()` が既に「レディマーカーを待つだけ」の実装に
@@ -876,7 +876,7 @@ impl ZshBridgeProvider {
             // いたため、spawn+init 自体は速くても実測 460〜910ms かかる
             // 重い補完関数（tmuxinator 等）の初回リクエストが cold budget を
             // 使い切ってしまい、初回 Tab だけ `None`（PathProvider
-            // フォールバック）になっていた（Fix D, #89 実機報告）。
+            // フォールバック）になっていた（実機報告）。
             let extra_envs = self.extra_envs();
             match ZshDaemon::spawn(zsh, bridge_dir, &extra_envs, cold_timeout) {
                 Ok(daemon) => {
@@ -894,14 +894,13 @@ impl ZshBridgeProvider {
 
         let line = escaped_spans.join(" ");
         let slot = slot_guard.as_mut()?;
-        // Fix D3: spawn 直後の初回リクエストも含め、常に warm_timeout を
+        // spawn 直後の初回リクエストも含め、常に warm_timeout を
         // 使う（cold_timeout は spawn()/initialize() 内部の準備段階専用）。
         let result = slot.daemon.request(&line, warm_timeout);
 
         if !slot.daemon.is_alive() {
             // request() 内部で timeout/desync により kill 済み。次回リクエスト
-            // で遅延 respawn できるようスロットを空にする（Task 2b.3 の
-            // 「デーモンは kill され、この Tab は None、次の Tab で遅延
+            // で遅延 respawn できるようスロットを空にする（「デーモンは kill され、この Tab は None、次の Tab で遅延
             // respawn」という仕様どおり）。
             *slot_guard = None;
         }
@@ -916,7 +915,7 @@ impl ZshBridgeProvider {
     /// タスク指示: "turning it off shuts the daemon down"）。デーモンが
     /// 元々無ければ no-op。[`shutdown_shared_daemon`] への薄い委譲
     /// （`Shell::reload_config` / exit / restart 経路と同じ shutdown 経路を
-    /// 使うことで実装を1箇所に保つ — A1〜A4, #89）。
+    /// 使うことで実装を1箇所に保つ）。
     fn shutdown_daemon_if_running(&self) {
         shutdown_shared_daemon(&self.daemon);
     }
@@ -994,8 +993,7 @@ impl CompletionProvider for ZshBridgeProvider {
         // carapace のみが指定されている等）場合は `gate` が `None` を返す。
         // その場合でも、直前まで zsh が有効だった名残で温存デーモンが
         // 生きたまま残っている可能性があるため（例: `external` を配列で
-        // `["carapace"]` に変更して `source` した直後 — A4, #89 レビュー
-        // 指摘）、`None` で早期 return する前に必ず shutdown しておく
+        // `["carapace"]` に変更して `source` した直後）、`None` で早期 return する前に必ず shutdown しておく
         // （既に空なら no-op、冪等）。`MIN_TIMEOUT_MS` フロアはワンショット
         // 経路/デーモンのコールド経路専用（compinit の重さ対策 — 定数の
         // ドキュメント参照）なので `Some(...)` で渡す。
@@ -1170,7 +1168,7 @@ fn zsh_escape_span(span: &str) -> Option<String> {
 /// 各行は ANSI 除去 → バックスラッシュ unquote → 最初の `" -- "` で
 /// value/description に分割、の順で処理する。
 ///
-/// `pub(super)` なのは [`super::zsh_daemon::ZshDaemon`]（Task 2b.3、#89）が
+/// `pub(super)` なのは [`super::zsh_daemon::ZshDaemon`] が
 /// 温存デーモンから読み取った候補行ブロック（NUL センチネル間、
 /// `assets/zsh/daemon_init.zsh` の `compadd` オーバーライドが
 /// `assets/zsh/capture.zsh` と同一の "value -- description" 形式で出力する）
@@ -1390,8 +1388,6 @@ mod tests {
     fn strip_ansi_no_escape_is_unchanged() {
         assert_eq!(strip_ansi("plain text"), "plain text");
     }
-
-    // ── zsh_escape_span / escape_spans（B1: 複数語 span のスペース結合対策） ──
 
     #[test]
     fn zsh_escape_span_escapes_space_and_specials_table() {
@@ -1824,7 +1820,7 @@ mod tests {
 
     #[test]
     fn timeout_budget_is_at_least_min_timeout() {
-        // MIN_TIMEOUT_MS 未満の設定 timeout でも、`gate`（C2 で共有ヘルパー化）
+        // MIN_TIMEOUT_MS 未満の設定 timeout でも、`gate`（共有ヘルパー化）
         // 経由の実効タイムアウトが MIN_TIMEOUT_MS を下回らないことを保証する
         // （compinit の重さ対策）。zsh を有効化した settings で `gate` 自体を
         // 呼び、`ZshBridgeProvider::provide` が実際に使う経路をそのまま検証する。
@@ -1850,13 +1846,11 @@ mod tests {
         assert!(effective >= Duration::from_millis(MIN_TIMEOUT_MS));
     }
 
-    // ── Fix D1: ウォームタイムアウトの床（compute_warm_timeout）──
-
     #[test]
     fn compute_warm_timeout_floors_low_configured_value_to_2000ms() {
         // 実機計測: tmuxinator 等の重い補完関数は Ruby インタプリタ起動で
         // 460〜910ms かかる。デフォルト設定（external_timeout_ms = 400）が
-        // そのまま使われると必ずタイムアウトする——Fix D の核心の回帰防止。
+        // そのまま使われると必ずタイムアウトする——核心の回帰防止。
         let effective = compute_warm_timeout(Duration::from_millis(400));
         assert_eq!(effective, Duration::from_millis(2000));
     }
@@ -1926,7 +1920,6 @@ mod tests {
         assert_eq!(first, second);
     }
 
-    // ── B2: シンボリックリンク攻撃防御（ensure_bridge_zshrc） ──
     //
     // 攻撃シナリオ: 攻撃者が ~/.config/jarvish/zsh-bridge を（存在する前に）
     // 事前に自分が制御するディレクトリへのシンボリックリンクとして作成して
@@ -2105,7 +2098,6 @@ mod tests {
         assert!(contents.contains("fpath=("));
     }
 
-    // ── E2E (B1): 複数語 span がスペース結合で分裂しないこと ──
     //
     // `git commit -m "hello world"` のような、空白を含む1つの span を
     // ctx.spans() 経由で渡した場合、capture.zsh の `"$*"` 単純スペース結合
@@ -2205,7 +2197,6 @@ mod tests {
         );
     }
 
-    // ── 温存デーモン配線テスト (Task 2b.3 Task 2, #89) ──
     //
     // `disabled_external_completion` / `zsh_enabled_external_completion` は
     // `CompletionConfig::default()` を土台にしており、そのデフォルトは
@@ -2346,10 +2337,10 @@ mod tests {
     #[test]
     #[serial]
     fn cold_spawn_budget_does_not_starve_a_slow_first_request() {
-        // Fix D3: cold_timeout（MIN_TIMEOUT_MS = 2000ms）は spawn + init の
+        // cold_timeout（MIN_TIMEOUT_MS = 2000ms）は spawn + init の
         // レディマーカー待ちのみを賄う予算であり、初回の実補完リクエストは
         // 別枠（warm_timeout）で走る。ここでは spawn+init 自体は速いが、
-        // 最初の補完関数呼び出し自体が「旧実装なら cold budget の残りを
+        // 最初の補完関数呼び出し自体が「cold budget の残りを
         // 使い切っていたはずの長さ」だけ遅い（900ms）フィクスチャを使い、
         // それでも最初の Tab が候補を返すことを証明する（実機報告の
         // tmuxinator シナリオの直接再現）。
@@ -2365,8 +2356,7 @@ mod tests {
         )
         .unwrap();
 
-        // デフォルト相当の設定（external_timeout_ms=400 → warm floor 2000ms、
-        // Fix D1）。
+        // デフォルト相当の設定（external_timeout_ms=400 → warm floor 2000ms）。
         let settings = zsh_enabled_external_completion();
         let provider = ZshBridgeProvider::with_zsh_binary_bridge_dir_and_envs(
             settings, zsh, zdotdir, home_envs,
@@ -2392,11 +2382,11 @@ mod tests {
     #[test]
     #[serial]
     fn realistic_interpreter_startup_proxy_survives_three_tabs_same_pid() {
-        // Fix D 全体の実測ベース受け入れテスト: `_tmuxinator` の実測値
+        // 実測ベース受け入れテスト: `_tmuxinator` の実測値
         // （Ruby インタプリタ起動込みで 460〜910ms）を模した、サブプロセス
         // を exec して ~600ms かかる補完関数フィクスチャを、デフォルト
         // 相当の設定（external_timeout_ms 未指定 = 400ms → warm floor
-        // 2000ms、Fix D1）で3回連続 Tab 押下し、いずれも None でも
+        // 2000ms）で3回連続 Tab 押下し、いずれも None でも
         // PathProvider フォールバック相当でもなく実際の候補を返し、かつ
         // 同じデーモン pid のまま生き続けることを検証する。
         let Some(zsh) = zsh_binary() else {
@@ -2573,7 +2563,7 @@ mod tests {
     #[test]
     #[serial]
     fn daemon_survives_zshrc_deletion_after_spawn_mtime_none_is_treated_as_unchanged() {
-        // C2: 「両側 None => 変化なしとして扱い、スプリアスな再起動をしない」
+        // 「両側 None => 変化なしとして扱い、スプリアスな再起動をしない」
         // の片側 — spawn 時点では mtime が取れていた（Some）が、その後
         // ブリッジ .zshrc 自体が削除されて current_mtime が None になる
         // ケース。`(Some(a), Some(b)) if a != b` という一致条件は片方が
@@ -2674,7 +2664,7 @@ mod tests {
     #[test]
     #[serial]
     fn daemon_reused_when_spawn_time_mtime_was_none_and_file_now_present() {
-        // C2: 「両側 None => 変化なし」のもう片側 — spawn 時点では mtime が
+        // 「両側 None => 変化なし」のもう片側 — spawn 時点では mtime が
         // 取れなかった（意図的に spawn 前に .zshrc を削除しておくケース）が、
         // 次のリクエスト時には .zshrc が（再）存在し current_mtime が Some
         // になっているケース。`(Some(a), Some(b))` のパターンは spawn 側が
@@ -2764,7 +2754,7 @@ mod tests {
     #[test]
     #[serial]
     fn daemon_failure_after_two_consecutive_timeouts_respawns_lazily_next_tab() {
-        // Fix D2 サーキットブレーカーの provide() 経由 E2E: 完全ハングする
+        // サーキットブレーカーの provide() 経由 E2E: 完全ハングする
         // 補完関数に対して1回目の Tab は None（グレース、デーモンはまだ
         // 生存）、2回目の Tab（=1回目の残留フレームのドレイン失敗 + 2回目
         // 自体もハング）でサーキットブレーカーが作動しデーモンが kill
@@ -2797,7 +2787,7 @@ mod tests {
         //   （compinit）が完了する余裕が要る。
         // - ハングフェーズ: 短いタイムアウトで確実に timeout させたい。
         //
-        // 単一の短い値（旧実装の 500ms 固定）だとセットアップ側が高負荷環境で
+        // 単一の短い値（500ms 固定）だとセットアップ側が高負荷環境で
         // 予算不足になり、実装が正しいのに `cold-spawn request should succeed`
         // で落ちる。設定は `Arc<RwLock<_>>` でホットリロード可能なので、
         // フェーズごとに切り替えて両方の要求を満たす。
@@ -2952,9 +2942,6 @@ mod tests {
         assert!(settings.read().unwrap().zsh_daemon_enabled);
     }
 
-    // ── 共有デーモンスロット (Task A, #89): shutdown_shared_daemon /
-    //    new_shared_daemon_slot / provide() の gate()-None 早期 shutdown ──
-
     /// pid が実際に ESRCH になる（プロセスが死んでいる）まで短時間・
     /// 有界回数ポーリングする（`zsh_daemon.rs` / `external.rs` の既存
     /// テストと同じ考え方）。
@@ -2990,7 +2977,7 @@ mod tests {
         // Shell::exec_restart / main.rs の exit 経路が呼ぶのと同じ
         // shutdown_shared_daemon() を直接呼び、実際に子プロセスが ESRCH に
         // なる（本当に死ぬ）ことと、スロットが None に戻ることの両方を
-        // 実機で証明する（A1/A2 の unit テスト — exec() 自体はテストしない）。
+        // 実機で証明する（unit テスト — exec() 自体はテストしない）。
         let Some(zsh) = zsh_binary() else {
             eprintln!("skipping: zsh not found on PATH");
             return;
@@ -3032,7 +3019,7 @@ mod tests {
     #[test]
     #[serial]
     fn provide_shuts_down_daemon_when_gate_returns_none() {
-        // A4: zsh が enabled-kinds リストから外れる（gate() が None を
+        // zsh が enabled-kinds リストから外れる（gate() が None を
         // 返す）と、provide() は早期 return する前に生きているデーモンを
         // shutdown しなければならない。まず zsh 有効設定でデーモンを
         // spawn させ、その後 settings を carapace のみへ丸ごと差し替えて
@@ -3097,8 +3084,6 @@ mod tests {
         );
     }
 
-    // ── Fix D4: 起動時のバックグラウンド事前ウォームアップ ──
-
     /// [`prewarm_zsh_daemon_with`] 用の poll ヘルパー: 生成された総合的な
     /// 猶予時間内でスロットが埋まるのを待つ（バックグラウンドスレッド経由
     /// の spawn は非同期なので、テスト側は寛容にポーリングする）。
@@ -3116,7 +3101,7 @@ mod tests {
     #[test]
     #[serial]
     fn prewarm_populates_slot_when_daemon_enabled_without_provide_call() {
-        // Fix D4 の核心保証: settings がデーモン有効を示している状態で
+        // 核心保証: settings がデーモン有効を示している状態で
         // prewarm を呼ぶと、`provide()` を一度も呼ばなくてもスロットが
         // 埋まる。
         let Some(zsh) = zsh_binary() else {
@@ -3263,7 +3248,7 @@ mod tests {
     #[test]
     #[serial]
     fn prewarm_and_provide_race_yields_exactly_one_daemon_process() {
-        // Fix D4 のレース回避保証: prewarm をトリガーした直後（そのスレッドが
+        // レース回避保証: prewarm をトリガーした直後（そのスレッドが
         // 実際に Mutex を取るより前）に provide() を呼び、両方が spawn を
         // 試みうる状況を作る。最終的にプロセスは1つだけ生き残ることを、
         // スロットの pid と実際のプロセス生存確認の両方で検証する。
@@ -3361,8 +3346,6 @@ mod tests {
         );
     }
 
-    // ── S5 修正: 終端 shutdown tombstone（DaemonGate） ──
-
     #[test]
     fn daemon_gate_starts_open() {
         let gate = DaemonGate::new();
@@ -3382,7 +3365,7 @@ mod tests {
     #[test]
     #[serial]
     fn prewarm_after_gate_closed_never_populates_slot_and_kills_spawned_child() {
-        // S5 の核心保証（決定的ユニットテスト）: `shutdown_shared_daemon_blocking`
+        // 核心保証（決定的ユニットテスト）: `shutdown_shared_daemon_blocking`
         // 相当（= gate を close してからスロットを shutdown）が**先に**
         // 起きたあとで `prewarm_zsh_daemon_with` を呼んでも、スロットは
         // 空のまま保たれ、かつ prewarm が実際に spawn した子プロセスは

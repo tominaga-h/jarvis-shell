@@ -281,8 +281,6 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    // ── 高速パス ──
-
     #[test]
     fn no_substitution_fast_path() {
         let result = expand_command_subst("hello", SubstQuoting::Unquoted).unwrap();
@@ -295,8 +293,6 @@ mod tests {
         let result = expand_command_subst("$VAR", SubstQuoting::Unquoted).unwrap();
         assert_eq!(result, vec!["$VAR".to_string()]);
     }
-
-    // ── 基本展開 ──
 
     #[test]
     fn basic_command_subst() {
@@ -325,8 +321,6 @@ mod tests {
         assert_eq!(result, vec!["a   b".to_string()]);
     }
 
-    // ── trailing newline ──
-
     #[test]
     fn trailing_newlines_all_stripped() {
         // printf 'x\n\n' → 末尾改行を全除去 → "x"
@@ -342,8 +336,6 @@ mod tests {
             expand_command_subst("$(printf 'a\\nb\\n')", SubstQuoting::DoubleQuoted).unwrap();
         assert_eq!(result, vec!["a\nb".to_string()]);
     }
-
-    // ── 空出力 ──
 
     #[test]
     #[serial]
@@ -361,8 +353,6 @@ mod tests {
         assert_eq!(result, vec![String::new()]);
     }
 
-    // ── 埋め込み連結 ──
-
     #[test]
     fn embedded_concatenation() {
         let result =
@@ -370,23 +360,17 @@ mod tests {
         assert_eq!(result, vec!["prefix-mid-suffix".to_string()]);
     }
 
-    // ── backtick ──
-
     #[test]
     fn backtick_basic() {
         let result = expand_command_subst("`echo hi`", SubstQuoting::Unquoted).unwrap();
         assert_eq!(result, vec!["hi".to_string()]);
     }
 
-    // ── ネスト ──
-
     #[test]
     fn nested_command_subst() {
         let result = expand_command_subst("$(echo $(echo deep))", SubstQuoting::Unquoted).unwrap();
         assert_eq!(result, vec!["deep".to_string()]);
     }
-
-    // ── 未終端 ──
 
     #[test]
     fn unterminated_paren_errors() {
@@ -403,15 +387,13 @@ mod tests {
     #[test]
     #[serial]
     fn literal_paren_inside_inner_quote_closes_span_early() {
-        // V1 既知限界: span スキャナはクォート非認識のため、内側のクォート文字列に
+        // span スキャナはクォート非認識のため、内側のクォート文字列に
         // 含まれるリテラル `)` で span が早期クローズする（`$(echo ")` で閉じ、
         // 残りの `")` がサブシェルのパース時に未終端ダブルクォートになる）。
         // panic せず安全にエラー停止することを固定する。
         let err = expand_command_subst("$(echo \")\")", SubstQuoting::Unquoted).unwrap_err();
         assert!(matches!(err, CmdSubstError::Exec(_)));
     }
-
-    // ── 起動失敗 ──
 
     #[test]
     #[serial]
@@ -427,8 +409,6 @@ mod tests {
         let err = expand_command_subst("$(false)", SubstQuoting::Unquoted).unwrap_err();
         assert!(matches!(err, CmdSubstError::Exec(_)));
     }
-
-    // ── 深さ超過 ──
 
     #[test]
     fn depth_guard_blocks_excessive_nesting() {
@@ -465,8 +445,6 @@ mod tests {
             other => panic!("expected nesting-related error, got: {other:?}"),
         }
     }
-
-    // ── word_split ヘルパ ──
 
     #[test]
     fn word_split_helper_behavior() {

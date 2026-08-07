@@ -113,7 +113,7 @@ pub struct ExternalCompletionSettings {
     /// 解決済みの有効プロバイダ列（優先順）。`resolve()` が構築する。
     /// `"none"` の場合は空。
     pub(crate) enabled: Vec<ResolvedExternal>,
-    /// `[completion] external_zsh_daemon`（Task 2b.3, #89）。`true` なら
+    /// `[completion] external_zsh_daemon`。`true` なら
     /// [`super::zsh_bridge::ZshBridgeProvider`] は温存デーモン
     /// （[`super::zsh_daemon::ZshDaemon`]）経由でリクエストを処理し、
     /// `false` なら常にワンショット経路（`zsh --no-rcs -c capture.zsh`）を
@@ -159,8 +159,8 @@ impl ExternalCompletionSettings {
             .and_then(|entry| entry.binary.as_ref())
     }
 
-    /// この設定の下で温存 zsh 補完デーモンが稼働してよいかどうか（Task A,
-    /// #89）。`false` を返す条件は2つ:
+    /// この設定の下で温存 zsh 補完デーモンが稼働してよいかどうか。
+    /// `false` を返す条件は2つ:
     /// - `[completion] external_zsh_daemon = false`（デーモン機能自体が
     ///   フラグで無効化されている）
     /// - `zsh` が `enabled`（優先順リスト）に存在しない（`external =
@@ -171,7 +171,7 @@ impl ExternalCompletionSettings {
     ///   使う機会がないため）。
     ///
     /// `Shell::reload_config` が `source` 実行の**その場**でデーモンを
-    /// shutdown すべきかどうかを判定するために使う（A3/A4 レビュー指摘:
+    /// shutdown すべきかどうかを判定するために使う:
     /// 「フラグ off」と「zsh が enabled-kinds から外れる」の両方を
     /// reload 時点で確実に検知する）。
     pub(crate) fn should_run_zsh_daemon(&self) -> bool {
@@ -191,8 +191,8 @@ impl ExternalCompletionSettings {
 /// （短命な read ロックを取り、`kind` が優先順リストに含まれ、かつバイナリが
 /// 検出済みか確認し、実効タイムアウトを求める）を踏む。以前はこの手順が
 /// 両ファイルにコピペされており、`zsh_bridge.rs` 側にだけ `MIN_TIMEOUT_MS`
-/// フロアが後付けされた結果 2 箇所の実装が drift していた（#89 レビュー
-/// 指摘）。このヘルパーに一本化することで、今後どちらかを変更すれば
+/// フロアが後付けされた結果 2 箇所の実装が drift していた。
+/// このヘルパーに一本化することで、今後どちらかを変更すれば
 /// もう一方にも自動的に反映される。
 ///
 /// `min_timeout` に `Some(floor)` を渡すと、共有設定の `timeout` と `floor`
@@ -319,7 +319,7 @@ fn resolve_enabled_kinds(external: &crate::config::ExternalSetting) -> Vec<Resol
 ///   （例: `auto (未対応の値 "bogus" のため auto を使用)`）。
 ///
 /// `Shell` 全体を組み立てずにユニットテストできるよう、`&str` と
-/// `ExternalCompletionSettings` のみを引数に取る形にしている（#88 / #89）。
+/// `ExternalCompletionSettings` のみを引数に取る形にしている。
 ///
 /// [`ExternalCompletionSettings`] と同じ理由（`mod.rs` の `pub use` 経由で
 /// `Shell::reload_config` から利用するため）で `pub` にしている。
@@ -343,7 +343,7 @@ pub fn format_external_summary(raw: &str, settings: &ExternalCompletionSettings)
 /// 空文字列を返す（サマリーに空行を出さないため）。
 ///
 /// `Shell::reload_config` の中でインラインに組み立てられていたロジックを
-/// 切り出したもの（D1, #89 レビュー指摘）。`Shell` を構築せずに
+/// 切り出したもの。`Shell` を構築せずに
 /// `ExternalCompletionSettings` だけでユニットテストできるようにする狙いは
 /// [`format_external_summary`] と同じ。
 pub fn format_external_binaries_display(settings: &ExternalCompletionSettings) -> String {
@@ -458,7 +458,7 @@ impl CarapaceProvider {
         }
 
         if ctx.head_command() == Some("cd") {
-            // 防御的ガード（#88 / #89）: carapace-bin 1.7.3 は cd 用の spec を
+            // 防御的ガード: carapace-bin 1.7.3 は cd 用の spec を
             // 同梱しておらず、`values` は事実上 PathProvider の dirs_only
             // フィルタだけを頼りに空になる（=フォールスルー）。しかし将来の
             // carapace/bridge バージョンが cd 補完（ファイルを含みうる）を
@@ -873,7 +873,7 @@ mod tests {
 
     #[test]
     fn provide_returns_none_for_cd_even_when_binary_would_emit_files() {
-        // 防御的ガード（#88 / #89）の証明: たとえ carapace（または将来の
+        // 防御的ガードの証明: たとえ carapace（または将来の
         // ブリッジ実装）が cd 用の spec を持ち、ファイル + ディレクトリ混在の
         // JSON を返す状況になっても、CarapaceProvider は cd を一切担当せず
         // 即座に None を返す（PathProvider の dirs_only フィルタに完全に
@@ -1193,9 +1193,6 @@ mod tests {
         );
     }
 
-    // ── should_run_zsh_daemon（Task A, #89: reload 時点でのデーモン
-    //    shutdown 要否判定の核心ロジック）──
-
     #[test]
     fn should_run_zsh_daemon_true_when_flag_on_and_zsh_enabled() {
         let settings = ExternalCompletionSettings {
@@ -1211,7 +1208,7 @@ mod tests {
 
     #[test]
     fn should_run_zsh_daemon_false_when_flag_off_even_if_zsh_enabled() {
-        // A3: external_zsh_daemon = false のとき、zsh 自体は enabled-kinds
+        // external_zsh_daemon = false のとき、zsh 自体は enabled-kinds
         // リストに残っていても稼働禁止でなければならない。
         let settings = ExternalCompletionSettings {
             zsh_daemon_enabled: false,
@@ -1226,7 +1223,7 @@ mod tests {
 
     #[test]
     fn should_run_zsh_daemon_false_when_zsh_not_in_enabled_kinds() {
-        // A4: フラグは on のままでも、zsh が優先順リストから外れていれば
+        // フラグは on のままでも、zsh が優先順リストから外れていれば
         // （例: external = "carapace"）稼働禁止。
         let settings = ExternalCompletionSettings {
             zsh_daemon_enabled: true,
@@ -1269,7 +1266,7 @@ mod tests {
 
     // ── gate（carapace / zsh ブリッジ共通の read-lock/有効化/timeout ゲート）──
     //
-    // C2 (#89): 以前は同じ手順が CarapaceProvider::provide と
+    // 以前は同じ手順が CarapaceProvider::provide と
     // ZshBridgeProvider::provide にコピペされ、MIN_TIMEOUT_MS フロアの
     // 有無で drift していた。ここでは共有ヘルパー自体の契約
     // （無効化 kind -> None、フロアは Some のときのみ適用）を直接検証する。
@@ -1493,7 +1490,7 @@ mod tests {
 
     // ── format_external_binaries_display（`source` サマリーのバイナリパス一覧行）──
     //
-    // D1 (#89): `Shell::reload_config` にインラインで組み立てられていた
+    // `Shell::reload_config` にインラインで組み立てられていた
     // ロジックを切り出した純粋関数。`Shell` を構築せずに
     // `ExternalCompletionSettings` だけで検証する。
 

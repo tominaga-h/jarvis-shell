@@ -131,7 +131,7 @@ pub struct CompletionConfig {
     pub external: ExternalSetting,
     /// 外部補完プロセスのタイムアウト（ミリ秒）
     pub external_timeout_ms: u64,
-    /// zsh 補完ブリッジを常駐デーモン化するかどうか（Task 2b.3, #89）。
+    /// zsh 補完ブリッジを常駐デーモン化するかどうか。
     ///
     /// `true`（デフォルト）: `zsh -i` を jarvish の子プロセスとして 1 本
     /// spawn し、以後のセッション中は使い回す（Tab ごとの `zsh --no-rcs`
@@ -146,7 +146,7 @@ pub struct CompletionConfig {
     /// を許容するため）、1回のタイムアウトでは kill しない（次の Tab で
     /// 残留応答を排水するグレースドレイン）。連続2回のタイムアウトで
     /// 初めてハングと判定し、デーモンをバックグラウンドで kill して次の
-    /// Tab で遅延 respawn する（Fix D2 サーキットブレーカー）。
+    /// Tab で遅延 respawn する（サーキットブレーカー）。
     /// `false`: 常に [`ExternalKind::Zsh`](crate::cli::completer::ExternalKind)
     /// のワンショット経路（`zsh --no-rcs -c capture.zsh`）を使う（従来動作）。
     ///
@@ -580,8 +580,6 @@ external = "bogus"
         assert_eq!(config.completion.external, "bogus");
     }
 
-    // ── ExternalSetting: 文字列 / 配列両対応 (Task 2b.4) ──
-
     #[test]
     fn parse_completion_config_external_zsh_string() {
         let toml = r#"
@@ -683,8 +681,6 @@ external_timeout_ms = 1500
         assert_eq!(config.completion.external_timeout_ms, 1500);
     }
 
-    // ── external_zsh_daemon (Task 2b.3, #89) ──
-
     #[test]
     fn external_zsh_daemon_defaults_to_true() {
         assert!(CompletionConfig::default().external_zsh_daemon);
@@ -730,8 +726,6 @@ external_timeout_ms = 1500
         let config = load_from_str("");
         assert!(config.completion.external_zsh_daemon);
     }
-
-    // ── startup ──
 
     #[test]
     fn parse_startup_commands() {

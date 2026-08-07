@@ -1,4 +1,4 @@
-//! rc.jsh — シェル起動時に実行されるスクリプトファイル（Phase 4）
+//! rc.jsh — シェル起動時に実行されるスクリプトファイル
 //!
 //! `~/.config/jarvish/rc.jsh` は、対話起動のたびに `[startup].commands`
 //! （config.toml）より前に読み込まれるプレーンテキストのコマンドスクリプト。
@@ -10,14 +10,14 @@
 //! `try_shell_builtins` → `try_builtin` → `execute` の順に試すだけの
 //! 純粋なコマンド実行パスであり、自然言語行が誤って AI に送られることはない。
 //! エイリアス展開があるため、スクリプトの早い行で定義した `alias` を
-//! 同じスクリプトの後の行から使うことができる（Fix B1）。
+//! 同じスクリプトの後の行から使うことができる。
 //!
 //! この実行器（[`Shell::run_rc_script_sync`]）はファイルパス・表示名・
-//! ネスト深さをパラメータ化しているため、Phase 4.3 の `source` ビルトイン
+//! ネスト深さをパラメータ化しているため、`source` ビルトイン
 //! 統合（`.toml` 以外の拡張子を rc スクリプトとして実行する）からもそのまま
 //! 再利用できる。
 //!
-//! ## Phase 4.3: `source` からの再利用と同期実行
+//! ## `source` からの再利用と同期実行
 //!
 //! `try_shell_builtins`（`src/shell/input.rs`）は同期メソッドであり、
 //! rc.jsh 行の実行器（[`Shell::run_rc_line`]）からも同期的に呼ばれる
@@ -43,7 +43,7 @@ use crate::engine::{execute, try_builtin, CommandResult, LoopAction};
 
 use super::Shell;
 
-/// CLI から渡される rc スクリプトの読み込みオプション（Phase 4.2）。
+/// CLI から渡される rc スクリプトの読み込みオプション。
 ///
 /// `--rcfile <PATH>` と `--no-rc` は clap 側で `conflicts_with` により
 /// 同時指定を拒否されるため、ここでは両方 unset（デフォルト）/
@@ -94,8 +94,7 @@ impl RcOptions {
 /// `Shell` 抜きでは呼べないが、「そもそも実行が必要か・自動生成が必要か」
 /// の分岐判断そのものは `ResolvedRc` の値だけから決まる純粋なロジックで
 /// あり、ここへ切り出すことで `Shell` を構築せずにテストできる
-/// （`--no-rc` によるブートストラップ抑制の対話コードパスの回帰防止、
-/// Fix C4）。
+/// （`--no-rc` によるブートストラップ抑制の対話コードパスの回帰防止）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RcBootstrapPlan {
     /// 何もしない —— テンプレート自動生成も含め、rc スクリプトには一切
@@ -153,13 +152,13 @@ pub(super) struct RcLine {
 pub(super) enum RcOutcome {
     /// 全行を実行し終え、REPL ループを継続してよい。
     /// `had_failure`: 1行以上が非ゼロ終了コードで終わっていれば `true`
-    /// （`source` ビルトインが exit code 0/1 を決めるために使う、Phase 4.3）。
+    /// （`source` ビルトインが exit code 0/1 を決めるために使う）。
     Continue { had_failure: bool },
     /// `exit` / goodbye 相当の行によりシェル終了が要求された
     ExitRequested,
 }
 
-/// `source` によるネストしたスクリプト実行の最大深さ（Phase 4.3）。
+/// `source` によるネストしたスクリプト実行の最大深さ。
 ///
 /// トップレベルの rc.jsh / `--rcfile` 実行は深さ 0。`source other.jsh` は
 /// 深さを 1 加算して再帰する。自己 source（`a.jsh` が `a.jsh` を
@@ -293,7 +292,7 @@ pub(super) fn rc_path() -> PathBuf {
 /// シェルの起動は継続する（`config.toml` の `create_default_config` と
 /// 同じ warn-and-continue 方針）。
 ///
-/// 明示的な `--rcfile` パス（Phase 4.2）に対しては呼び出さないこと —
+/// 明示的な `--rcfile` パスに対しては呼び出さないこと —
 /// この関数はデフォルトパスの初回起動時ブートストラップ専用。
 ///
 /// # シンボリックリンク防御（TOCTOU/symlink 攻撃対策）
@@ -420,7 +419,7 @@ fn is_symlink(path: &Path) -> io::Result<bool> {
 }
 
 /// `source <path>` の拡張子が `.toml`（大文字小文字を区別しない）かどうかを
-/// 判定する（Phase 4.3）。真なら `reload_config`（config.toml 再読み込み）、
+/// 判定する。真なら `reload_config`（config.toml 再読み込み）、
 /// 偽なら rc スクリプトとしての実行（[`Shell::dispatch_source`]）に回す。
 ///
 /// 拡張子なし（例: `source myrc`）は `.toml` ではない側、つまり
@@ -483,7 +482,7 @@ impl Shell {
     ///
     /// - `path`: 実行するファイルの実パス
     /// - `display_name`: エラー表示に使うファイル名（例: `rc.jsh`）。
-    ///   `source` 経由のネストしたスクリプト（Phase 4.3）でも同じ実行器を
+    ///   `source` 経由のネストしたスクリプトでも同じ実行器を
     ///   再利用できるよう、ファイルパスと表示名を分離している。
     /// - `depth`: ネスト深さ。トップレベル呼び出しは 0。`source` ビルトイン
     ///   （`try_shell_builtins` の `"source"` 分岐）が非 TOML ファイルを
@@ -549,7 +548,7 @@ impl Shell {
                     // 「失敗したコマンド」ではなく意図的なアクションなので、
                     // 非ゼロ終了コードであっても
                     // "command exited with status N" の失敗プレフィックスは
-                    // 出さない（Fix B3）。この判定は `result.exit_code != 0`
+                    // 出さない。この判定は `result.exit_code != 0`
                     // ではなく `result.action` を見て行う ——
                     // `exit 3` は exit_code == 3 かつ action ==
                     // LoopAction::Exit であり、値だけでは失敗コマンドと
@@ -620,9 +619,9 @@ impl Shell {
         }
     }
 
-    /// `source <path>` ビルトインの本体（Phase 4.3）。
+    /// `source <path>` ビルトインの本体。
     ///
-    /// **ディレクトリ判定が拡張子ディスパッチより先**（Fix B4）:
+    /// **ディレクトリ判定が拡張子ディスパッチより先**:
     /// 拡張子で分岐する前に `fs::metadata` でディレクトリかどうかを見る。
     /// これにより `foo.toml` という名前の**ディレクトリ**を source しても
     /// `reload_config`（ひいては生の `read_to_string` の OS エラー）には
@@ -630,8 +629,8 @@ impl Shell {
     ///
     /// ディレクトリでなければ拡張子で分岐する:
     /// - `.toml`（大文字小文字を区別しない） → 既存の `reload_config`
-    ///   （config.toml の再読み込み）を **そのまま** 呼ぶ。挙動は Phase 4.3
-    ///   より前と完全に同一。
+    ///   （config.toml の再読み込み）を **そのまま** 呼ぶ。挙動は従来と
+    ///   完全に同一。
     /// - それ以外（拡張子なし含む） → このファイルを rc スクリプトとして
     ///   実行する（[`Shell::run_rc_script_sync`]、分類器バイパス・
     ///   行番号付きエラー・continue-on-error・`exit` 伝播はすべて
@@ -647,7 +646,7 @@ impl Shell {
     /// 戻り値の `exit_code`: ファイルが読めない場合は 1
     /// （`jarvish: source: no such file` を報告、`reload_config` 側は
     /// 既存の `jarvish: source: {msg}` 形式を維持）。パスがディレクトリ
-    /// である場合（拡張子が `.toml` かどうかに関わらず、Fix B4）は
+    /// である場合（拡張子が `.toml` かどうかに関わらず）は
     /// 拡張子ディスパッチより前段の `fs::metadata` チェックで即座に
     /// "is a directory" エラーとして検出される（`reload_config` /
     /// `run_rc_script_sync` のどちらにも到達しない）。FIFO 等の非通常
@@ -665,7 +664,7 @@ impl Shell {
     /// おり、`source` 経由でも対話時の `exit` と全く同じ形でシェル終了が
     /// 伝播する。
     pub(super) fn dispatch_source(&mut self, path_str: &str) -> CommandResult {
-        // Fix B4: 拡張子ディスパッチ（`is_toml_source_path`）より前に、
+        // 拡張子ディスパッチ（`is_toml_source_path`）より前に、
         // パスが「通常ファイルではないもの」（ディレクトリ等）でないかを
         // 判定する。誤った順序（拡張子チェック → reload_config）だと、
         // `.toml` という名前の**ディレクトリ**を source した場合に
@@ -751,7 +750,7 @@ impl Shell {
     /// `try_shell_builtins` → `try_builtin` → `execute`。`handle_input`
     /// と違い `InputClassifier::classify` は一切呼ばれない。
     ///
-    /// エイリアス展開（Fix B1）: `handle_input`（`src/shell/input.rs`
+    /// エイリアス展開: `handle_input`（`src/shell/input.rs`
     /// ステップ0）と全く同じ `expand::expand_aliases_in_line` を、同じ
     /// 優先順位（各パイプライン/コネクタセグメントの先頭トークンが一致
     /// すれば置換、それ以外は無変換）で先頭に適用する。これを怠ると、
@@ -761,7 +760,7 @@ impl Shell {
     /// alias 展開の有無が食い違ってはならない（`|` `&&` `||` `;` の
     /// どのセグメントでも同じ規則が両モードで一致する）。
     ///
-    /// ## DESIGN CONTRACT（Fix B5）: rc/source 行は Black Box に記録しない
+    /// ## DESIGN CONTRACT: rc/source 行は Black Box に記録しない
     /// `handle_input`（対話 / `-c` の通常経路）は各行の実行後に
     /// `record_history`（`src/shell/input.rs`）を呼び、Black Box
     /// （`history.db`）へ記録する。この `run_rc_line` は意図的に
@@ -805,8 +804,6 @@ enum RcLineOutcome {
 mod tests {
     use super::*;
     use serial_test::serial;
-
-    // ── parse_rc_lines ──
 
     #[test]
     fn parse_rc_lines_skips_blank_lines() {
@@ -890,8 +887,6 @@ mod tests {
         assert!(parse_rc_lines(content).is_empty());
     }
 
-    // ── TEMPLATE ──
-
     #[test]
     fn template_parses_to_zero_executable_lines() {
         let lines = parse_rc_lines(TEMPLATE);
@@ -900,8 +895,6 @@ mod tests {
             "TEMPLATE must be comments-only, got executable lines: {lines:?}"
         );
     }
-
-    // ── rc_path ──
 
     #[test]
     #[serial]
@@ -922,8 +915,6 @@ mod tests {
             }
         }
     }
-
-    // ── RcOptions::resolve (Phase 4.2) ──
 
     #[test]
     fn resolve_no_rc_wins_regardless_of_rcfile() {
@@ -980,8 +971,6 @@ mod tests {
         }
     }
 
-    // ── plan_rc_bootstrap（Fix C4: --no-rc の対話コードパス回帰防止）──
-    //
     // `Shell::run_configured_rc`（対話 `run()` / `-c` の両方から呼ばれる、
     // rc.jsh 起動のエントリポイント）は `plan_rc_bootstrap` の結果を
     // そのまま実行に落とし込むだけの薄いラッパーである。ここでは
@@ -1077,8 +1066,6 @@ mod tests {
         );
     }
 
-    // ── ensure_default_rc ──
-
     #[test]
     fn ensure_default_rc_creates_file_and_parent_dirs() {
         let tmpdir = tempfile::tempdir().unwrap();
@@ -1121,8 +1108,6 @@ mod tests {
         assert_eq!(second, "export EDITED=1\n");
     }
 
-    // ── ensure_default_rc: シンボリックリンク攻撃防御（Fix A2）──
-    //
     // `ensure_bridge_zshrc`（src/cli/completer/zsh_bridge.rs）のシンボリックリンク
     // 防御テスト群と同じスタイル: symlink_metadata で作った症状を用意し、
     // 「書き込みが一切起きない」ことをリンク先の非存在で証明する。
@@ -1185,8 +1170,8 @@ mod tests {
     fn ensure_default_rc_symlink_to_regular_file_read_path_still_works() {
         // 書き込み経路（ensure_default_rc）は symlink を弾くが、"symlink-to-
         // regular-file" 自体は正当な dotfiles 管理構成であり、**読み込み**
-        // 経路（read_rc_file_guarded）は引き続き動く必要がある（A1 の
-        // 要件: stat は symlink をたどる）。ensure_default_rc は実ファイルが
+        // 経路（read_rc_file_guarded）は引き続き動く必要がある（要件:
+        // stat は symlink をたどる）。ensure_default_rc は実ファイルが
         // 既に存在する（symlink 先が実体を持つ）ケースでは path.exists() ==
         // true の時点で早期 return するため、symlink 先を書き換えない。
         #[cfg(unix)]
@@ -1212,8 +1197,6 @@ mod tests {
             assert_eq!(read_back, "alias viaSymlink=echo\n");
         }
     }
-
-    // ── read_rc_file_guarded（Fix A1）──
 
     #[test]
     fn read_rc_file_guarded_reads_normal_file() {
@@ -1321,8 +1304,6 @@ mod tests {
         assert!(!is_symlink(&missing).unwrap());
     }
 
-    // ── RcOutcome / RcLineOutcome の判別ロジック（Shell 構築なしのユニット部分）──
-    //
     // `run_rc_line` / `run_rc_script` はメソッドのため `Shell` の構築を要するが、
     // その中核の分岐判断（goodbye 検出 → try_builtin の exit 検出 →
     // 通常継続）は、依拠する各関数（`InputClassifier::is_goodbye_pattern`,
@@ -1372,8 +1353,6 @@ mod tests {
         assert_ne!(result.exit_code, 0);
     }
 
-    // ── is_toml_source_path（Phase 4.3: source の拡張子ディスパッチ）──
-
     #[test]
     fn is_toml_source_path_lowercase_toml() {
         assert!(is_toml_source_path("config.toml"));
@@ -1407,8 +1386,6 @@ mod tests {
         assert!(!is_toml_source_path("archive.toml.bak"));
     }
 
-    // ── MAX_SOURCE_DEPTH / 深さガードのカウンタロジック（Phase 4.3）──
-    //
     // `dispatch_source` / `run_rc_script_sync` はメソッドのため `Shell` の
     // 構築を要するが、ガードそのものは単純な整数比較
     // (`next_depth > MAX_SOURCE_DEPTH`) であり、その定数値と境界条件は

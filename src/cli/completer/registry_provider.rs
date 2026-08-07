@@ -126,7 +126,7 @@ impl CompletionProvider for RegistryProvider {
             return None;
         }
 
-        // '-' 分岐: フラグ候補の後ろに `-a`（静的/動的）候補も連結する（B2）。
+        // '-' 分岐: フラグ候補の後ろに `-a`（静的/動的）候補も連結する。
         // fish は非ダッシュ分岐では引数のみを出すが、'-' 分岐だけの場合
         // 「フラグに前方一致しない `-a` 語（例: `--custom`）が到達不能」に
         // なる不具合があったため、フラグ候補優先でマージする。非ダッシュ
@@ -298,7 +298,7 @@ fn confirmed_command_words(ctx: &CompletionContext) -> Vec<&str> {
     words
 }
 
-/// 候補列を `value` で重複排除する（B1）。
+/// 候補列を `value` で重複排除する。
 ///
 /// fish の `complete` は「同じコマンドに対する複数回の `complete` 呼び出し
 /// が蓄積される」ドキュメント化された挙動であり、`-a` の値が spec 間で
@@ -349,7 +349,7 @@ fn flag_candidates(specs: &[&CompletionSpec], partial: &str) -> Vec<Candidate> {
 /// 動的候補（`$(...)`）1 spec あたりの最小実行タイムアウト。
 ///
 /// [`static_candidates`] の集約予算が尽きかけていても、少なくともこの時間
-/// だけは各動的 spec に与える（B4）。あまりに小さい残り予算で spawn しても
+/// だけは各動的 spec に与える。あまりに小さい残り予算で spawn しても
 /// ほぼ確実に失敗するだけなので、フロアを設けて「1個も試さず全部スキップ」
 /// を避けつつ、全体予算を大きく超えないバランスを取る。
 const MIN_PER_SPEC_DYNAMIC_TIMEOUT_MS: u64 = 50;
@@ -357,7 +357,7 @@ const MIN_PER_SPEC_DYNAMIC_TIMEOUT_MS: u64 = 50;
 /// `-a` の候補（静的または動的）を展開し、`partial` に前方一致するものを返す。
 ///
 /// 動的候補（`$(...)`）を持つ spec が複数ある場合、[`RegistryProvider::provide`]
-/// 1 回の呼び出し全体で 1 個の集約デッドラインを共有する（B4）。spec ごとに
+/// 1 回の呼び出し全体で 1 個の集約デッドラインを共有する。spec ごとに
 /// フルタイムアウトを与えると N 個の hang しうる spec が UI スレッドを
 /// N倍ブロックしてしまうため、`dynamic_timeout`（呼び出し全体の予算）を
 /// 起点に「残り時間」を都度計算し、各 spec にはその残り時間（下限
@@ -418,7 +418,7 @@ fn static_candidates(
 /// これにより `$(foo) $(bar)`（2 個の $(...) の並び）のような紛らわしい
 /// 入力を「単一の動的ソース」と誤認しない。
 ///
-/// 深さの走査はクォート状態を意識する（B5）: シングル/ダブルクォート内の
+/// 深さの走査はクォート状態を意識する: シングル/ダブルクォート内の
 /// `)` は括弧として数えない。これにより `$(awk '{print ")"}')` のような
 /// 「クォートされた `)` が中に含まれる」正当な単一動的ソースを、誤って
 /// 「途中で深さ 0 に戻った」= 複数の $(...) の並びと誤認しない。バック
@@ -434,7 +434,7 @@ fn dynamic_source_command(raw: &str) -> Option<&str> {
     // $(...) で全体を包んでいる」とは言えないため弾く
     // （例: "$(foo) $(bar)" → strip して得た inner は "foo) $(bar" で、
     // 最初の `)` で深さ 0 に戻ってしまう）。クォート内の括弧はカウント
-    // 対象外（B5）。
+    // 対象外。
     let mut depth = 0i32;
     let mut in_single = false;
     let mut in_double = false;
@@ -496,7 +496,7 @@ fn dynamic_candidates(
             None => (line, fallback_description.map(str::to_string)),
         };
 
-        // B3: ユーザーが任意コマンドを登録できる動的候補ソースの stdout は
+        // ユーザーが任意コマンドを登録できる動的候補ソースの stdout は
         // 信頼できない出力として扱い、reedline に渡す前に必ずサニタイズする
         // （sibling の zsh_bridge の ANSI 除去方針をミラーする — 本モジュールは
         // zsh_bridge の private ヘルパーを再利用できない配置のため、同等の
@@ -519,7 +519,7 @@ fn dynamic_candidates(
 }
 
 /// 動的候補（`$(...)`）の 1 フィールド（value または description）を
-/// サニタイズする（B3）。
+/// サニタイズする。
 ///
 /// 1. ANSI エスケープシーケンス（CSI: `ESC [ ... final byte`、OSC:
 ///    `ESC ] ... (BEL または ESC \)`）を除去する。
@@ -1101,7 +1101,6 @@ mod tests {
         );
     }
 
-    // ── -n 条件: フラグ分岐（'-' 始まり）でも同じくゲートされる（#89 C2）──
     //
     // `condition_is_active` によるフィルタは `provide()` の冒頭で
     // `active_specs` を求める際に一度だけ適用され、フラグ候補
@@ -1189,8 +1188,6 @@ mod tests {
         );
     }
 
-    // ── 統合: git-branch 風の2段階サブコマンド例（issue #89 3.3 worked example）──
-
     #[test]
     #[serial]
     fn two_spec_subcommand_example_completes_start_stop_then_dynamic_values() {
@@ -1235,8 +1232,6 @@ mod tests {
         assert_eq!(values2, vec!["server", "db"]);
     }
 
-    // ── B1: 候補の重複排除 ──
-
     #[test]
     fn dedup_collapses_overlapping_specs_to_single_entry() {
         // ドキュメント化された「累積される複数回の complete 呼び出し」パターン:
@@ -1276,8 +1271,6 @@ mod tests {
         assert_eq!(candidates[0].description.as_deref(), Some("first"));
     }
 
-    // ── B2: '-' 分岐でのフラグ+静的/動的候補のマージ ──
-
     #[test]
     fn dash_branch_also_offers_matching_static_argument_words() {
         // `-a` に "--custom" のような '-' 始まりの語がある場合、'-' 分岐でも
@@ -1304,7 +1297,7 @@ mod tests {
     #[test]
     fn dash_branch_merge_is_still_deduplicated() {
         // フラグ候補と静的候補の両方が同じ値 "--verbose" を生成しうる場合でも
-        // B1 のデデュープが '-' 分岐のマージ結果にも適用される。
+        // デデュープが '-' 分岐のマージ結果にも適用される。
         let spec = CompletionSpec {
             long: vec!["verbose".to_string()],
             arguments: Some("--verbose".to_string()),
@@ -1341,8 +1334,6 @@ mod tests {
         let values: Vec<&str> = candidates.iter().map(|c| c.value.as_str()).collect();
         assert_eq!(values, vec!["build"]);
     }
-
-    // ── B3: 動的候補のサニタイズ ──
 
     #[test]
     fn sanitize_dynamic_value_strips_ansi_csi_sequence() {
@@ -1399,8 +1390,6 @@ mod tests {
         assert_eq!(candidates[0].description.as_deref(), Some("colored desc"));
     }
 
-    // ── B4: 動的 spec 全体で 1 個の集約タイムアウト予算 ──
-
     #[test]
     #[serial]
     fn two_hanging_dynamic_specs_share_a_single_aggregate_budget() {
@@ -1427,7 +1416,7 @@ mod tests {
         // 直列にフルタイムアウトを与えると 2 * 1000ms = 2000ms 掛かるはずだが、
         // 集約予算なら 1000ms + 若干のオーバーヘッドで収まるはず。
         //
-        // 旧実装は予算 300ms / 上限 900ms だったが、これは 2 回分の
+        // 予算 300ms / 上限 900ms だったが、これは 2 回分の
         // fork+exec+kill に 600ms しか余裕がなく、負荷の高いランナーでは
         // フレークしていた。予算を上げて「直列なら 2000ms・集約なら 1000ms」
         // という差を広げることで、判別力（集約かどうか）を落とさずに
@@ -1455,8 +1444,6 @@ mod tests {
             "two hanging specs must share ONE aggregate budget, not stack sequentially, took {elapsed:?}"
         );
     }
-
-    // ── B5: dynamic_source_command のクォート対応括弧スキャン ──
 
     #[test]
     fn dynamic_source_command_accepts_quoted_paren_as_single_source() {

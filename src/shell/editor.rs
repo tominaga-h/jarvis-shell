@@ -26,7 +26,7 @@ use crate::storage::BlackBoxHistory;
 /// `db_path` は BlackBox と共有する `history.db` へのパス。
 ///
 /// `zsh_daemon` は温存 zsh 補完デーモンのスロットを `Shell` と共有する
-/// `Arc`（Task A, #89）。`Shell` はこれを経由して reload/exit/restart など
+/// `Arc`。`Shell` はこれを経由して reload/exit/restart など
 /// `provide()` が次に呼ばれるとは限らないライフサイクルイベント上でも
 /// デーモンを確実に shutdown できる。
 ///

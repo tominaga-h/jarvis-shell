@@ -146,7 +146,7 @@ pub(crate) fn run_external_capped(
 /// 収集 → kill の順序が必須）。
 ///
 /// `pub(crate)` なのは [`super::zsh_daemon::ZshDaemon`] のタイムアウト/Drop
-/// 経路が同じロジックを再利用するため（Task 2b.3、#89）。`ZshDaemon` は
+/// 経路が同じロジックを再利用するため。`ZshDaemon` は
 /// `run_external_capped` を経由しない独自の PTY セッションを直接管理する
 /// ため、このヘルパー単体を呼べる必要がある。
 #[cfg(unix)]

@@ -505,8 +505,6 @@ mod tests {
         assert!(result.stdout.contains("done"));
     }
 
-    // ── グロブ / ブレース展開 E2E テスト (#126) ──
-
     #[test]
     fn execute_brace_expansion_via_echo() {
         let result = execute("echo {a,b,c}");
@@ -632,8 +630,6 @@ mod tests {
         assert!(try_builtin("echo {a,b}").is_none());
     }
 
-    // ── コマンド置換 E2E テスト (#266) ──
-
     #[test]
     fn cmdsubst_basic() {
         let result = execute("echo $(echo hello)");
@@ -738,9 +734,6 @@ mod tests {
         assert_eq!(result.stdout.trim(), "foo");
     }
 
-    // ── complete ビルトイン: dispatch_builtin スタブ経由での data-loss 修正
-    // (#89 A1) ──
-    //
     // `try_shell_builtins`（実レジストリ）を経由しないルート（`;` を含む
     // コマンドリスト、パイプライン内の非先頭コマンド、ai_pipe 経由）では
     // `complete` の register/list/erase は「使い捨てレジストリへ静かに
@@ -750,9 +743,7 @@ mod tests {
     fn complete_register_in_semicolon_list_surfaces_error_not_silent_noop() {
         // `complete -c x -a y; ls` 形式: `;` を含むため
         // try_shell_builtins が None を返し、execute() → dispatch_builtin
-        // スタブ経由になる。修正前はここで register が「成功」し
-        // データが消えるだけだった（観測不能な data loss）。
-        // 修正後は complete 呼び出し自体がエラー終了として観測できる。
+        // スタブ経由になる。
         let result = execute("complete -c x -a y ; echo after");
         // 最終的な終了コードは最後のコマンド（echo）の結果で上書きされるが、
         // complete 単体の失敗は stderr に必ず現れる（無音の成功ではない）。

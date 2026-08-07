@@ -474,8 +474,6 @@ mod tests {
         assert_eq!(toks, vec![t(r#"hello "world""#, true)]);
     }
 
-    // ── コマンド置換 span のトークナイズ (#266) ──
-
     #[test]
     fn command_subst_span_is_atomic() {
         // `echo $(echo a b)` は 2 トークン。span 内の空白で分断しない。
@@ -582,8 +580,6 @@ mod tests {
         assert_eq!(toks, vec![t("echo", false), t("$VAR", false)]);
     }
 
-    // ── operator_prefix_len / operator_at 整合性 (#Phase1 Task1.1) ──
-
     #[test]
     fn operator_prefix_len_matches_table() {
         // 演算子表が operator_prefix_len に一本化されたことのピン留め。
@@ -600,8 +596,6 @@ mod tests {
         assert_eq!(operator_prefix_len("|foo"), 1);
         assert_eq!(operator_prefix_len(">>foo"), 2);
     }
-
-    // ── split_quoted_spans バイト range 検証 ──
 
     #[test]
     fn spans_cover_exact_source_substrings_unquoted() {

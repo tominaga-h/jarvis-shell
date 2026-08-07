@@ -193,8 +193,6 @@ fn run_source_pipeline(
 mod tests {
     use super::*;
 
-    // ── try_extract_ai_redirect ──
-
     #[test]
     fn redirect_ai_simple() {
         let tokens: Vec<String> = vec!["echo", "hello", ">", "ai", "要約して"]
@@ -272,8 +270,6 @@ mod tests {
             .collect();
         assert!(try_extract_ai_redirect(&tokens).is_none());
     }
-
-    // ── グロブ展開と AI パイプの相互作用 (#126) ──
 
     use serial_test::serial;
     use std::env;
