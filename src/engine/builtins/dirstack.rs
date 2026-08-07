@@ -163,8 +163,6 @@ mod tests {
     use crate::engine::LoopAction;
     use serial_test::serial;
 
-    // ── pushd ──
-
     #[test]
     #[serial]
     fn pushd_changes_directory_and_pushes_old() {
@@ -232,8 +230,6 @@ mod tests {
         assert!(result.stdout.contains("pushd"));
     }
 
-    // ── popd ──
-
     #[test]
     #[serial]
     fn popd_changes_to_stack_top() {
@@ -267,8 +263,6 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("popd"));
     }
-
-    // ── dirs ──
 
     #[test]
     #[serial]

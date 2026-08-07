@@ -58,7 +58,7 @@
 //!
 //! プロバイダ単位（コマンド単位）のオーバーライド（例:
 //! `[completion.overrides] git = "zsh"` で特定コマンドだけ優先順を変える）は
-//! Task 2b.4 の時点ではスコープ外。将来必要になれば `CompletionContext` に
+//! はスコープ外。将来必要になれば `CompletionContext` に
 //! コマンド名を渡して `external_provider_chain` の走査順を動的に切り替える
 //! 形で追加できる（既存の `enabled` 優先順リストとは別に、コマンド名 →
 //! 優先種別のマップを resolve() 側に持たせる設計が有力）。
@@ -735,7 +735,7 @@ mod tests {
         );
     }
 
-    // ── 新規テスト (Task 1.3) ──
+    // ── 新規テスト ──
 
     #[test]
     #[serial]
@@ -882,7 +882,7 @@ mod tests {
         );
     }
 
-    // ── 新規テスト (Task 1.5: alias 対応補完) ──
+    // ── 新規テスト（alias 対応補完） ──
 
     #[test]
     #[serial]
@@ -1149,7 +1149,7 @@ mod tests {
         );
     }
 
-    // ── external_provider_chain 順序テスト (Task 2b.4) ──
+    // ── external_provider_chain 順序テスト ──
     //
     // 実際の carapace/zsh バイナリには依存せず、fake スクリプトを両方
     // 「バイナリ」として settings に注入し、`[completion] external` の配列
@@ -1298,7 +1298,6 @@ mod tests {
         );
     }
 
-    // ── D2 (#89): provider-chain フォールスルーの dispatch レベル証明 ──
     //
     // 実際の carapace/zsh バイナリに依存せず、テストローカルの FAKE
     // CompletionProvider 2 個を直接 `JarvishCompleter.providers` に積んで、
@@ -1746,7 +1745,6 @@ mod tests {
         );
     }
 
-    // ── RegistryProvider の dispatch レベル統合テスト（Task 3.2, #89） ──
     //
     // JarvishCompleter::new が組み立てる実際のプロバイダチェーン
     // （CommandProvider → RegistryProvider → GitProvider → 外部補完チェーン →
@@ -1839,7 +1837,6 @@ mod tests {
         );
     }
 
-    // ── Plant-the-regression チェック（D2, #89） ──
     //
     // `complete()` の dispatch ループ（`self.providers.iter().find_map(...)`）
     // の `Some(vec![])` 短絡意味論を一時的に反転させ（`Some(v) if v.is_empty()

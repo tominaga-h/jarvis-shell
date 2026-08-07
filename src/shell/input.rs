@@ -430,8 +430,6 @@ impl Shell {
     }
 }
 
-// ── complete ビルトイン (try_shell_builtins の "complete" 分岐) ──
-
 /// `try_shell_builtins` の `"complete"` 分岐本体。
 ///
 /// `Shell` が保持する実共有 `Arc<RwLock<CompletionRegistry>>`
@@ -444,7 +442,7 @@ impl Shell {
 /// `Shell` を構築しないとテストできないが、この関数は `Arc<RwLock<_>>` と
 /// 引数配列だけで直接呼び出せるため、`Shell` 構築コストなしに「実共有
 /// registry を実際に mutate する」経路と「poisoned lock から復旧できる」
-/// 経路の両方をユニットテストできる（#89 C1）。
+/// 経路の両方をユニットテストできる。
 fn run_complete_builtin(
     registry: &Arc<RwLock<CompletionRegistry>>,
     args: &[&str],
@@ -456,8 +454,6 @@ fn run_complete_builtin(
     };
     complete::execute_with_registry(args, &mut guard)
 }
-
-// ── Goodbye 判定 ──
 
 /// 実行結果を受けてシェルを goodbye 終了すべきかを判定する。
 ///
@@ -474,8 +470,6 @@ fn run_complete_builtin(
 fn should_exit_on_goodbye(is_ai_response: bool, from_tool_call: bool, stdout: &str) -> bool {
     is_ai_response && !from_tool_call && is_ai_goodbye_response(stdout)
 }
-
-// ── タイポ補正 ──
 
 /// タイポ補正チェックの結果
 enum TypoCorrectionOutcome {
@@ -578,10 +572,8 @@ mod tests {
         );
     }
 
-    // ── run_complete_builtin (try_shell_builtins の "complete" 分岐, #89 C1) ──
-
     /// register 呼び出しが `Shell::complete_registry` と同じ実共有 Arc を
-    /// 実際に mutate することを証明する（#89 C1）。
+    /// 実際に mutate することを証明する。
     #[test]
     fn run_complete_builtin_register_mutates_shared_registry() {
         let registry = Arc::new(RwLock::new(CompletionRegistry::new()));

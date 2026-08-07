@@ -478,8 +478,6 @@ mod tests {
         c.tokens.iter().map(|t| t.value.as_str()).collect()
     }
 
-    // ── パイプライン切断 ──
-
     #[test]
     fn pipeline_cut_head_is_git() {
         let line = "ls | git checkout ";
@@ -538,8 +536,6 @@ mod tests {
         assert_eq!(tok_values(&c), vec!["ls", ">", "out"]);
     }
 
-    // ── クォート ──
-
     #[test]
     fn double_quote_partial_strips_quote_span_starts_at_quote() {
         let line = r#"echo "fo"#;
@@ -576,8 +572,6 @@ mod tests {
         assert!(!c.is_first_token);
     }
 
-    // ── trailing space vs escaped trailing space ──
-
     #[test]
     fn trailing_space_is_boundary() {
         let line = "git checkout ";
@@ -596,8 +590,6 @@ mod tests {
         assert_eq!(c.span, Span::new(0, line.len()));
     }
 
-    // ── is_first_token 特殊系 ──
-
     #[test]
     fn empty_line_is_first_token() {
         let c = ctx("", 0);
@@ -605,8 +597,6 @@ mod tests {
         assert_eq!(c.span, Span::new(0, 0));
         assert_eq!(c.partial, "");
     }
-
-    // ── command_words / head_command ──
 
     #[test]
     fn command_words_skips_operators_and_partial_included() {
@@ -627,7 +617,7 @@ mod tests {
     #[test]
     fn command_words_uses_expanded_head_when_present() {
         let mut c = ctx("g checkout fo", "g checkout fo".len());
-        // Phase 1.5 が alias 展開結果を格納する想定のフィールドを直接セットして検証。
+        // alias 展開結果を格納する想定のフィールドを直接セットして検証。
         c.expanded_head = Some(vec!["git".to_string(), "checkout".to_string()]);
         assert_eq!(c.command_words(), vec!["git", "checkout"]);
         assert_eq!(c.head_command(), Some("git"));
@@ -670,8 +660,6 @@ mod tests {
         assert_eq!(c.span, Span::new(line.len(), line.len()));
     }
 
-    // ── UTF-8 ──
-
     #[test]
     fn utf8_partial_exact_byte_start() {
         let line = "vim 日本語ファ";
@@ -690,8 +678,6 @@ mod tests {
         assert_eq!(c.span.end, 4);
         assert_eq!(c.partial, "");
     }
-
-    // ── $( ) ──
 
     #[test]
     fn closed_dollar_paren_is_atomic_single_token() {
@@ -738,8 +724,6 @@ mod tests {
         assert_eq!(tok_values(&c), vec!["echo", "`git", "checkout", "fo"]);
     }
 
-    // ── PARITY: 整形式コーパスで lex_lenient と split_quoted が一致 ──
-
     #[test]
     fn parity_with_split_quoted_on_well_formed_corpus() {
         let corpus = [
@@ -777,8 +761,6 @@ mod tests {
             assert_eq!(actual, expected, "parity mismatch for line {line:?}");
         }
     }
-
-    // ── spans() (nushell 型 spans プロトコル、Task 2a.2) ──
 
     #[test]
     fn spans_table_driven_cases() {

@@ -1,5 +1,4 @@
 //! 温存 zsh 補完デーモン — `zsh -i` を常駐させ Tab ごとの起動コストを消す
-//! （Task 2b.3, #89）
 //!
 //! [`super::zsh_bridge::ZshBridgeProvider`]（ワンショット版）は Tab 押下
 //! ごとに `zsh --no-rcs -c <capture.zsh>` を新規 spawn する。実機計測では
@@ -50,11 +49,11 @@
 //! 再武装するラッパー ZLE widget**（`jarvish-complete-word`）を `^I` に
 //! 束縛することで解決している（詳細は同ファイルのコメント参照）。
 //!
-//! # `JarvishCompleter` への配線（Task 2b.3 の Task 2、Fix D4 で更新）
+//! # `JarvishCompleter` への配線
 //! [`super::zsh_bridge::ZshBridgeProvider`] が `Mutex<Option<ZshDaemon>>` を
 //! 保持し、`[completion] external_zsh_daemon` が有効な間は**シェル起動直後に
 //! バックグラウンドスレッドから事前ウォームアップ**される
-//! （[`super::zsh_bridge::prewarm_zsh_daemon`]、Fix D4）ため、通常は最初の
+//! （[`super::zsh_bridge::prewarm_zsh_daemon`]）ため、通常は最初の
 //! 補完リクエストの時点で既にこのスロットが埋まっている。プリウォームが
 //! 間に合わなかった場合（または zsh 未検出等でスキップされた場合）は、
 //! 最初にデーモンを必要とするリクエストで遅延 spawn する経路がフォール
@@ -78,7 +77,7 @@ use nix::sys::termios::{self, LocalFlags, SetArg};
 
 use super::external::kill_tree;
 
-/// [`ZshDaemon::request`] のレスポンスバッファ上限（B4, #89）。
+/// [`ZshDaemon::request`] のレスポンスバッファ上限。
 ///
 /// ハング/バグった補完関数が延々と出力し続けるケース（無限ループの
 /// `compadd`、巨大ファイルの誤 cat 等）に対して、タイムアウトまで
@@ -110,7 +109,7 @@ const SENTINEL_BYTE: u8 = 0;
 pub(crate) struct ZshDaemon {
     /// `None` になるのは kill/reap の所有権をバックグラウンドスレッドへ
     /// 渡した後（[`mark_dead_and_kill`](Self::mark_dead_and_kill) 系メソッド
-    /// が呼ばれた後）のみ（B1/B2, #89）。`alive == true` の間は常に `Some`。
+    /// が呼ばれた後）のみ。`alive == true` の間は常に `Some`。
     child: Option<Child>,
     master: fs::File,
     /// PTY slave 側の fd。子プロセスの生存中は親側で保持しておく必要は
@@ -122,7 +121,7 @@ pub(crate) struct ZshDaemon {
     /// 所有権譲渡と同時にこのパスも移譲する（`None` になったら既に
     /// バックグラウンドスレッド or 呼び出し元が削除責任を持つ）。
     init_script_path: Option<PathBuf>,
-    /// Fix D2（グレースドレイン）: 直前のリクエストがタイムアウトし、
+    /// 直前のリクエストがタイムアウトし、
     /// まだ完了していない応答フレームが PTY 側に残っている可能性がある
     /// （zsh 側は補完関数の実行を継続しており、いずれセンチネルに挟まれた
     /// 出力を送ってくる）ことを示すフラグ。`true` の間、次の `request()`
@@ -130,7 +129,7 @@ pub(crate) struct ZshDaemon {
     /// （[`drain_pending_frame`](Self::drain_pending_frame)）。
     pending_frame: bool,
     /// [`read_framed_response`](Self::read_framed_response) の呼び出しを
-    /// またいで持ち越す部分読み取り状態（Fix D2）。
+    /// またいで持ち越す部分読み取り状態。
     ///
     /// 1つの論理フレームの**開始センチネル**は `_main_complete` が
     /// `compprefuncs` を呼んだ直後（補完関数本体が実行される**前**）に
@@ -147,7 +146,7 @@ pub(crate) struct ZshDaemon {
     /// `ZshDaemon` インスタンスに持たせ、`request()` の呼び出しをまたいで
     /// 引き継ぐ。
     partial_read: PartialRead,
-    /// Fix D2（サーキットブレーカー）: 直近の「成功したフレーム読み取り」
+    /// 直近の「成功したフレーム読み取り」
     /// 以降に連続したタイムアウト回数。ドレイン自体のタイムアウトも
     /// 1回とカウントする。2 に達した時点でデーモンをハングとみなし
     /// kill する（[`mark_dead_and_kill`](Self::mark_dead_and_kill)）。
@@ -170,7 +169,7 @@ pub(crate) struct ZshDaemon {
 }
 
 /// [`ZshDaemon`] がハングと判定してデーモンを kill するまでに許容する
-/// 連続タイムアウト回数（Fix D2 サーキットブレーカー）。
+/// 連続タイムアウト回数。
 ///
 /// 「1回のタイムアウト」は遅いが正常な補完関数（例: インタプリタ起動を
 /// 伴う `tmuxinator` 補完）でも普通に起こりうるため即座には殺さない。
@@ -223,13 +222,13 @@ enum FramedRead {
     /// `deadline` までにセンチネルが2個揃わなかった（純粋なタイムアウト、
     /// またはセンチネルが1個も来ないまま `deadline` に達した場合を含む）。
     Timeout,
-    /// 応答バッファが [`MAX_RESPONSE_BYTES`] を超えた（B4）。プロトコル
+    /// 応答バッファが [`MAX_RESPONSE_BYTES`] を超えた。プロトコル
     /// desync 相当として扱う——グレースの対象外。
     BufferOverflow,
 }
 
 /// [`ZshDaemon::read_framed_response`] が `request()`/`drain_pending_frame`
-/// の呼び出しをまたいで持ち越す部分読み取り状態（Fix D2）。
+/// の呼び出しをまたいで持ち越す部分読み取り状態。
 ///
 /// `ZshDaemon::partial_read` フィールドのドキュメント参照——1つの論理
 /// フレームの開始・終了センチネルが異なる呼び出し（元のリクエストと、
@@ -257,7 +256,7 @@ impl PartialRead {
 }
 
 /// kill/reap をバックグラウンドスレッドまたは有界同期待ちへ委譲するために
-/// 必要な所有権一式（B1/B2, #89）。
+/// 必要な所有権一式。
 ///
 /// `mark_dead_and_kill` / `shutdown_blocking` はどちらも「`alive` を
 /// `false` にし、この束を取り出してから実際の kill 処理へ渡す」という
@@ -435,7 +434,7 @@ impl ZshDaemon {
     /// [`super::zsh_bridge::parse_capture_output`] にそのまま渡せる形式
     /// （PTY 由来の `\r\n` 区切り、ANSI・バックスラッシュ未処理）。
     ///
-    /// # Fix D2: グレースドレイン + サーキットブレーカー
+    /// # グレースドレイン + サーキットブレーカー
     ///
     /// **クリーンなタイムアウト**（センチネルが1個も来ない、または1個しか
     /// 来ないまま `timeout` に達した場合）はもはや即座にデーモンを kill
@@ -456,9 +455,9 @@ impl ZshDaemon {
     /// `FramedRead::Timeout` 以外の失敗として扱うことはない——現行の
     /// フレーミング実装はタイムアウトと desync を区別しないため、
     /// **desync も「クリーンなタイムアウト」と同じグレース経路を通る**）
-    /// と応答バッファ上限超過（[`FramedRead::BufferOverflow`]、B4）は
+    /// と応答バッファ上限超過（[`FramedRead::BufferOverflow`]）は
     /// 従来どおり**グレースの対象外**——即座に子プロセスとその子孫ツリーの
-    /// kill/reap を**バックグラウンドスレッドへ委譲**し（B1、呼び出し元
+    /// kill/reap を**バックグラウンドスレッドへ委譲**し（呼び出し元
     /// スレッドはブロックしない）、`alive = false` に遷移して `None` を
     /// 返す。
     pub(crate) fn request(&mut self, line: &str, timeout: Duration) -> Option<String> {
@@ -466,7 +465,7 @@ impl ZshDaemon {
             return None;
         }
 
-        // B3: 書き込み前の安価な生存確認。外部要因（OOM killer、手動
+        // 書き込み前の安価な生存確認。外部要因（OOM killer、手動
         // kill 等）で子プロセスが既に死んでいる場合、フルタイムアウトを
         // 待たずに即座に None を返す（次の Tab での遅延 respawn に任せる
         // — ここでインラインに respawn はしない、タスク指示どおり）。
@@ -488,7 +487,7 @@ impl ZshDaemon {
             }
         }
 
-        // Fix D2: 前回リクエストがタイムアウトして残留フレームがある場合、
+        // 前回リクエストがタイムアウトして残留フレームがある場合、
         // 新しい行を送る前にまずそれを排水する。ドレイン自体が失敗した
         // 場合はサーキットブレーカーのカウンタを進めたうえで即座に
         // `None` を返す（新しいリクエストは送らない——2つのリクエストの
@@ -605,7 +604,7 @@ impl ZshDaemon {
     }
 
     /// [`request`](Self::request) 冒頭で前回タイムアウト分の残留フレームを
-    /// 排水する（Fix D2）。`timeout` 予算内でセンチネル2個の対を読み切れ
+    /// 排水する。`timeout` 予算内でセンチネル2個の対を読み切れ
     /// れば `pending_frame` を降ろして `true` を返す（読み取った内容自体は
     /// 破棄する——この Tab のリクエストに対応する応答ではないため）。
     /// 読み切れなければ（タイムアウト/オーバーフローいずれも）サーキット
@@ -639,7 +638,7 @@ impl ZshDaemon {
 
     /// クリーンなタイムアウト（ドレイン中・通常リクエスト中いずれも）を
     /// 1回記録し、[`MAX_CONSECUTIVE_TIMEOUTS`] に達していればデーモンを
-    /// ハングと判定して kill する（Fix D2 サーキットブレーカー）。
+    /// ハングと判定して kill する。
     /// 達していなければ `pending_frame` を立てて次回に排水を持ち越す。
     fn register_timeout_and_maybe_kill(&mut self) {
         self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
@@ -656,10 +655,10 @@ impl ZshDaemon {
 
     /// PTY master から `timeout` 予算内でセンチネル2個に挟まれた1フレーム分
     /// を読み取る（[`request`](Self::request) / [`drain_pending_frame`]
-    /// 共通のフレーミングロジック、Fix D2 で切り出し）。バッファ上限
-    /// （[`MAX_RESPONSE_BYTES`]、B4）超過はタイムアウトより優先して検知する。
+    /// 共通のフレーミングロジックを切り出したもの）。バッファ上限
+    /// （[`MAX_RESPONSE_BYTES`]）超過はタイムアウトより優先して検知する。
     ///
-    /// # 呼び出しをまたぐ状態の持ち越し（Fix D2、[`PartialRead`] 参照）
+    /// # 呼び出しをまたぐ状態の持ち越し（[`PartialRead`] 参照）
     /// 読み取り状態（`buf`/`toggles`/`frame_start`）は `self.partial_read`
     /// に保持し、呼び出しごとにリセットしない。開始センチネルが前回の
     /// 呼び出し（元のリクエスト）内で既に届いていた場合、この呼び出しは
@@ -701,7 +700,7 @@ impl ZshDaemon {
                         }
                         idx += 1;
                     }
-                    // B4: 上限超過はプロトコル desync 相当として扱い、
+                    // 上限超過はプロトコル desync 相当として扱い、
                     // タイムアウトを待たず即座に打ち切る。
                     if self.partial_read.buf.len() > MAX_RESPONSE_BYTES {
                         self.partial_read.reset();
@@ -716,8 +715,7 @@ impl ZshDaemon {
     }
 
     /// 子プロセスとその子孫ツリーの kill + reap + 一時ファイル削除を
-    /// **バックグラウンドスレッドへ委譲**し、`alive` を `false` にする
-    /// （B1/B2, #89）。
+    /// **バックグラウンドスレッドへ委譲**し、`alive` を `false` にする。
     ///
     /// 以前の実装は `kill_tree` 呼び出し後、`try_wait()` を最大 40 回
     /// （25ms 間隔 = 最大 1000ms）呼び出し元スレッド上でポーリングして
@@ -756,7 +754,7 @@ impl ZshDaemon {
     /// デーモンを明示的に終了させる（`Drop` から呼ばれる既定の冪等操作）。
     ///
     /// [`mark_dead_and_kill`](Self::mark_dead_and_kill) と同じくバック
-    /// グラウンド委譲でノンブロッキング（B1/B2）。呼び出し元スレッドが
+    /// グラウンド委譲でノンブロッキング。呼び出し元スレッドが
     /// kill/reap の完了を待つ必要がある場合（プロセス終了直前の決定的な
     /// shutdown）は [`shutdown_blocking`](Self::shutdown_blocking) を使う。
     pub(crate) fn shutdown(&mut self) {
@@ -764,7 +762,7 @@ impl ZshDaemon {
     }
 
     /// デーモンを終了させ、`deadline` の範囲内で kill/reap の完了を
-    /// **呼び出し元スレッド上で**待つ有界同期版（B1/B2, #89）。
+    /// **呼び出し元スレッド上で**待つ有界同期版。
     ///
     /// UI スレッド（reedline の completer 呼び出し元）から呼んではならない
     /// — 通常経路は常に非ブロッキングな [`shutdown`](Self::shutdown) を
@@ -792,7 +790,7 @@ impl ZshDaemon {
 
 impl Drop for ZshDaemon {
     fn drop(&mut self) {
-        // 通常経路は非ブロッキング shutdown（B1/B2）。`ZshDaemon` を保持する
+        // 通常経路は非ブロッキング shutdown。`ZshDaemon` を保持する
         // 側（`DaemonSlot`）は、プロセス終了直前など有界同期待ちが必要な
         // 経路では明示的に `shutdown_blocking` を先に呼んでから drop する
         // ことで、この Drop は既に `alive == false` かつ所有権移譲済みの
@@ -823,7 +821,7 @@ fn create_daemon_pty() -> io::Result<(fs::File, OwnedFd)> {
     Ok((master_file, pty.slave))
 }
 
-/// PTY slave の line discipline から ECHO を無効化する（B5, #89）。
+/// PTY slave の line discipline から ECHO を無効化する。
 ///
 /// デフォルトでは PTY の line discipline が slave 側への書き込みをそのまま
 /// 読み取り側へもエコーバックする。[`ZshDaemon::request`] が `^U` + 補完行 +
@@ -858,9 +856,9 @@ fn disable_echo(slave_fd: &OwnedFd) {
 /// プロセス pid + ランダムな 64bit 値を混ぜたファイル名にすることで、
 /// 同一ホストで複数の jarvish セッションが同時にデーモンを spawn しても
 /// 衝突しない（pid だけでは "確実に予測できるファイル名" になってしまい
-/// C1 の症状そのものになるため、ランダム成分が本質的に必要）。
+/// 攻撃対象になりうるため、ランダム成分が本質的に必要）。
 ///
-/// # シンボリックリンク防御（C1, #89）
+/// # シンボリックリンク防御
 /// 以前の実装は `fs::write` を使っており、パスが予測可能（`bridge_dir` は
 /// 固定パス `~/.config/jarvish/zsh-bridge/`、ファイル名は pid のみで決まる）
 /// なうえ `fs::write` はシンボリックリンクをそのままたどって書き込む
@@ -1237,7 +1235,7 @@ mod tests {
     }
 
     /// pid が実際に ESRCH になる（プロセスが死んでいる）まで短時間・有界
-    /// 回数ポーリングする（S5 修正: テストフィクスチャ teardown 用共通
+    /// 回数ポーリングする（テストフィクスチャ teardown 用共通
     /// ヘルパー、`zsh_bridge.rs` / `shell/mod.rs` の同名パターンと同じ
     /// 考え方）。
     ///
@@ -1324,7 +1322,7 @@ mod tests {
         );
         let mut daemon = daemon.expect("daemon should spawn and reach ready marker");
         assert!(daemon.is_alive());
-        // テストフィクスチャ teardown（S5 修正）: `shutdown()`（非ブロッキング、
+        // テストフィクスチャ teardown: `shutdown()`（非ブロッキング、
         // kill/reap をバックグラウンドスレッドへ委譲）はテストプロセスの
         // 終了と競合しうる ── 単体テスト実行（1テストのみ）だとテスト
         // 関数を抜けた直後にテストバイナリごと終了し、バックグラウンド
@@ -1404,7 +1402,7 @@ mod tests {
             "warm second request should not pay the cold compinit cost, took {elapsed:?}"
         );
 
-        // テストフィクスチャ teardown（S5 修正）: Drop に任せず明示的に
+        // テストフィクスチャ teardown: Drop に任せず明示的に
         // 有界同期 shutdown する（`spawn_reaches_ready_marker` のコメント
         // 参照）。
         daemon.shutdown_blocking(Duration::from_secs(2));
@@ -1456,7 +1454,7 @@ mod tests {
             "request B must not bleed candidates from request A: {values_b:?}"
         );
 
-        // テストフィクスチャ teardown（S5 修正、`spawn_reaches_ready_marker`
+        // テストフィクスチャ teardown（`spawn_reaches_ready_marker`
         // のコメント参照）。
         daemon.shutdown_blocking(Duration::from_secs(2));
     }
@@ -1464,7 +1462,7 @@ mod tests {
     #[test]
     #[serial]
     fn hung_completion_first_timeout_stays_alive_second_kills_descendants() {
-        // Fix D2 サーキットブレーカー: `sleep 30` の完全ハング補完関数に
+        // サーキットブレーカー: `sleep 30` の完全ハング補完関数に
         // 対して、1回目のタイムアウトではまだデーモンを殺さず（グレース）、
         // 同じハング状態が続く2回目のリクエスト（= 1回目の残留フレームの
         // ドレインがタイムアウトし、それ自体が「2回連続」の2回目としてカウント
@@ -1515,7 +1513,7 @@ mod tests {
         let result2 = daemon.request("jarvishtesthang ", request_timeout);
         let elapsed2 = start2.elapsed();
         assert_eq!(result2, None);
-        // B1: kill_tree + reap は request() のタイムアウト/desync 経路から
+        // kill_tree + reap は request() のタイムアウト/desync 経路から
         // バックグラウンドスレッドへ委譲されるようになったため、
         // request() 自体は「タイムアウト値 + 小さな epsilon」以内に戻る
         // はず（以前は kill_tree + 40x25ms 有界ポーリングがこの呼び出し元
@@ -1556,7 +1554,7 @@ mod tests {
     #[test]
     #[serial]
     fn grace_drain_recovers_slow_first_call_and_serves_second_request_correctly() {
-        // Fix D2 の核心保証: 1回目の呼び出しだけ遅く（テスト用タイムアウトを
+        // 1回目の呼び出しだけ遅く（テスト用タイムアウトを
         // 超えて）、2回目以降は速く応答する補完関数フィクスチャで、
         // 1回目は None（グレースで daemon は生存継続）、2回目は 1回目の
         // 残留フレームをドレインしたうえで、正しい候補（2回目のリクエスト
@@ -1632,7 +1630,7 @@ mod tests {
             "the same daemon process must still be serving requests (no respawn)"
         );
 
-        // テストフィクスチャ teardown（S5 修正、`spawn_reaches_ready_marker`
+        // テストフィクスチャ teardown（`spawn_reaches_ready_marker`
         // のコメント参照）。
         daemon.shutdown_blocking(Duration::from_secs(2));
     }
@@ -1640,7 +1638,7 @@ mod tests {
     #[test]
     #[serial]
     fn success_between_timeouts_resets_consecutive_counter() {
-        // Fix D2: timeout → success → timeout という並びでは、途中の success
+        // timeout → success → timeout という並びでは、途中の success
         // がカウンタをリセットするため、2回目の timeout だけではサーキット
         // ブレーカーは作動せず、デーモンは生きたままである。
         let Some(zsh) = zsh_binary() else {
@@ -1706,7 +1704,7 @@ mod tests {
             "no respawn should have happened throughout"
         );
 
-        // テストフィクスチャ teardown（S5 修正、`spawn_reaches_ready_marker`
+        // テストフィクスチャ teardown（`spawn_reaches_ready_marker`
         // のコメント参照）。デーモンはまだ生存中（pending_frame が残った
         // 状態）のため、明示的な有界同期 shutdown が必須。
         daemon.shutdown_blocking(Duration::from_secs(2));
@@ -1733,7 +1731,7 @@ mod tests {
         .expect("daemon should spawn");
         let child_pid = daemon.child_pid_for_test();
 
-        // Drop 自体はバックグラウンド委譲でノンブロッキング（B1/B2）になった
+        // Drop 自体はバックグラウンド委譲でノンブロッキングになった
         // ため、`drop()` 呼び出し自体の所要時間ではなく、その後の
         // バックグラウンドスレッドがいずれ確実に reap することを証明する
         // （elapsed の主張は不要 — 「drop() が速く戻ること」は
@@ -1780,7 +1778,7 @@ mod tests {
         drop(daemon);
 
         // 一時ファイル削除もバックグラウンドスレッド側の reap_bundle が
-        // 行うようになったため（B1/B2）、`drop()` が戻った直後の同期確認
+        // 行うようになったため、`drop()` が戻った直後の同期確認
         // ではなく短時間ポーリングで確認する。
         let mut removed = false;
         for _ in 0..80 {
@@ -1816,7 +1814,7 @@ mod tests {
         )
         .expect("daemon should spawn");
 
-        // テストフィクスチャ teardown（S5 修正）: このテストの主張（shutdown
+        // テストフィクスチャ teardown: このテストの主張（shutdown
         // 後の request() が即座に None を返すこと）自体は shutdown の
         // ブロッキング/非ブロッキングに依存しないため、有界同期版に置き換えて
         // 子プロセスの確実な reap を保証する（`spawn_reaches_ready_marker`
@@ -1851,15 +1849,13 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── B3: 書き込み前の安価な生存確認（外部要因での kill を高速検知） ──
-
     #[test]
     #[serial]
     fn request_after_external_sigkill_returns_none_fast_without_full_timeout() {
         // OOM killer や手動 `kill -9` のような外部要因でデーモン子プロセスが
         // 死んでいるケースを模す: テストから直接 SIGKILL を送ってから
         // request() を呼び、フルタイムアウトを待たず高速に None が返る
-        // ことを確認する（B3 の核心保証）。
+        // ことを確認する。
         let Some(zsh) = zsh_binary() else {
             eprintln!("skipping: zsh not found on PATH");
             return;
@@ -1914,8 +1910,6 @@ mod tests {
             "daemon must be marked dead after detecting the external kill"
         );
     }
-
-    // ── B4: 応答バッファの上限（暴走補完でのメモリ増大対策） ──
 
     #[test]
     #[serial]
@@ -1976,7 +1970,7 @@ mod tests {
             MAX_CONSECUTIVE_TIMEOUTS
         );
 
-        // テストフィクスチャ teardown（S5 修正）: バッファ上限超過は
+        // テストフィクスチャ teardown: バッファ上限超過は
         // `request()` 内部で `mark_dead_and_kill`（非ブロッキング、kill/reap
         // をバックグラウンドスレッドへ委譲）を経由するため、テスト関数を
         // 抜けた時点では reap が完了している保証がない（`spawn_reaches_
@@ -1988,13 +1982,11 @@ mod tests {
         );
     }
 
-    // ── B5: PTY ECHO が無効化されていること ──
-
     #[test]
     #[serial]
     fn echo_is_disabled_on_daemon_pty_slave() {
         // termios レベルで直接、ECHO が実際にオフになっていることを検証する
-        // （B5 の核心保証）。`daemon_init.zsh` の `zsh -i` は ZLE
+        // 。`daemon_init.zsh` の `zsh -i` は ZLE
         // （zsh のインタラクティブ行編集システム）を使っており、ZLE は
         // 端末の ECHO フラグとは独立に、入力バッファの再描画を自前で
         // 常に行う（実機検証済み: `tcsetattr` で ECHO を明示的に消しても
@@ -2039,7 +2031,7 @@ mod tests {
         .expect("daemon should spawn");
         let result = daemon.request("jarvishtestcmd ", Duration::from_secs(15));
         assert!(result.is_some(), "daemon should still serve completions");
-        // テストフィクスチャ teardown（S5 修正、`spawn_reaches_ready_marker`
+        // テストフィクスチャ teardown（`spawn_reaches_ready_marker`
         // のコメント参照）。
         daemon.shutdown_blocking(Duration::from_secs(2));
     }
@@ -2047,7 +2039,7 @@ mod tests {
     #[test]
     #[serial]
     fn echo_off_reduces_duplicate_marker_occurrences_vs_echo_on() {
-        // B5 の実測可能な保証: ECHO を切ると、送信ペイロードのカーネル側
+        // 実測可能な保証: ECHO を切ると、送信ペイロードのカーネル側
         // 生エコー（tty line discipline による即時反響）は消える。ZLE 自身
         // の再描画は ECHO 設定に関わらず残る（上のテストのコメント参照）
         // ため、"0 回" を主張することはできないが、"ECHO オフ時の出現回数は
@@ -2189,7 +2181,6 @@ mod tests {
         );
     }
 
-    // ── write_init_script: シンボリックリンク防御 (C1, #89) ──
     //
     // 実 zsh を一切必要としない純粋なファイルシステムテスト。ランダムな
     // ファイル名成分のおかげでテスト同士が衝突しないため #[serial] も不要。

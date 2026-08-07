@@ -172,8 +172,6 @@ fn parse_simple_command(tokens: &[String]) -> Result<SimpleCommand, ParseError> 
 mod tests {
     use super::*;
 
-    // ── parse_pipeline: 基本 ──
-
     #[test]
     fn single_command_no_args() {
         let tokens = vec!["ls".into()];

@@ -138,8 +138,6 @@ mod tests {
         (tmpdir, path)
     }
 
-    // ── split_path_prefix テスト ──
-
     #[test]
     fn split_relative_path() {
         let (search_dir, prefix, original_dir) = split_path_prefix("src/ma");
@@ -193,8 +191,6 @@ mod tests {
         assert_eq!(prefix, "te");
         assert_eq!(original_dir, "/tmp/");
     }
-
-    // ── complete_path テスト ──
 
     #[test]
     fn complete_path_absolute_with_trailing_slash() {

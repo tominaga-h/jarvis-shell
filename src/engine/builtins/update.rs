@@ -470,8 +470,6 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // ── is_newer_version ──
-
     #[test]
     fn newer_version_detected() {
         assert!(is_newer_version("1.6.3", "1.7.0"));
@@ -490,8 +488,6 @@ mod tests {
         assert!(!is_newer_version("2.0.0", "1.9.9"));
         assert!(!is_newer_version("1.7.1", "1.7.0"));
     }
-
-    // ── flag file ──
 
     #[test]
     fn update_flag_path_returns_some() {
@@ -558,8 +554,6 @@ mod tests {
         assert!(msg.unwrap().contains("v1.9.0"));
     }
 
-    // ── is_homebrew_path ──
-
     #[test]
     fn homebrew_intel_mac_path() {
         assert!(is_homebrew_path(
@@ -598,8 +592,6 @@ mod tests {
         ));
     }
 
-    // ── is_newer_version edge cases ──
-
     #[test]
     fn newer_version_major_bump_from_zero() {
         assert!(is_newer_version("0.9.9", "1.0.0"));
@@ -617,8 +609,6 @@ mod tests {
         assert!(is_newer_version("1.0.0", "2.0.0"));
     }
 
-    // ── perform_update error path (mock なし、ユニットレベル) ──
-
     #[test]
     fn write_update_flag_creates_file() {
         let _lock = FLAG_FILE_LOCK.lock().unwrap();
@@ -632,8 +622,6 @@ mod tests {
 
         cleanup_flag_file();
     }
-
-    // ── --local option ──
 
     #[test]
     fn local_option_parses() {
@@ -653,8 +641,6 @@ mod tests {
         let path = resolve_local_binary_path(Some("/tmp/my-jarvish"));
         assert_eq!(path, PathBuf::from("/tmp/my-jarvish"));
     }
-
-    // ── parse_version_from_output ──
 
     #[test]
     fn parse_version_standard_format() {
@@ -690,8 +676,6 @@ mod tests {
         assert_eq!(result, Some("1.8.0".to_string()));
     }
 
-    // ── check_for_local_updates ──
-
     #[test]
     fn check_local_binary_not_found() {
         let result = check_for_local_updates(Path::new("/nonexistent/jarvish"));
@@ -707,8 +691,6 @@ mod tests {
         assert_ne!(result.exit_code, 0);
         assert!(result.stderr.contains("not found"));
     }
-
-    // ── replace_binary ──
 
     #[test]
     fn replace_binary_with_valid_files() {
@@ -737,8 +719,6 @@ mod tests {
         assert!(result.unwrap_err().contains("Failed to copy"));
     }
 
-    // ── get_local_binary_version ──
-
     #[test]
     fn get_local_binary_version_nonexistent() {
         let result = get_local_binary_version(Path::new("/nonexistent/jarvish"));
@@ -754,14 +734,10 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── DEFAULT_LOCAL_BINARY ──
-
     #[test]
     fn default_local_binary_path_is_release() {
         assert_eq!(DEFAULT_LOCAL_BINARY, "target/release/jarvish");
     }
-
-    // ── Fury 監査指摘: 追加テスト ──
 
     #[test]
     fn get_local_binary_version_success_with_mock_binary() {

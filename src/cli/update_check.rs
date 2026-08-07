@@ -166,8 +166,6 @@ fn build_notification(current: &str, latest: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    // ── build_notification ──
-
     #[test]
     fn notification_newer_version_available() {
         let result = build_notification("1.6.3", "1.7.0");
@@ -213,8 +211,6 @@ mod tests {
         assert!(build_notification("1.7.1", "1.7.0").is_none());
     }
 
-    // ── cache_path ──
-
     #[test]
     fn cache_path_returns_some() {
         let path = cache_path();
@@ -223,8 +219,6 @@ mod tests {
         assert!(path.to_str().unwrap().contains("jarvish"));
         assert!(path.to_str().unwrap().contains("update_check.json"));
     }
-
-    // ── write_cache / read_cache roundtrip ──
 
     #[test]
     fn cache_write_and_read_roundtrip() {
@@ -309,8 +303,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── build_notification edge cases ──
-
     #[test]
     fn notification_with_v_prefix_on_both() {
         // current は v プレフィックスなし（CARGO_PKG_VERSION 由来）
@@ -335,8 +327,6 @@ mod tests {
         // 空文字列 → パーツなし → latest_parts <= current_parts → None
         assert!(build_notification("1.0.0", "").is_none());
     }
-
-    // ── cache serialization ──
 
     #[test]
     fn cache_serialization_roundtrip() {
@@ -365,14 +355,10 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // ── CACHE_TTL_SECS ──
-
     #[test]
     fn cache_ttl_is_24_hours() {
         assert_eq!(CACHE_TTL_SECS, 86400);
     }
-
-    // ── fetch_latest_version（GitHub API 依存 → ignore）──
 
     #[test]
     #[ignore]

@@ -63,8 +63,8 @@ struct CompleteArgs {
 ///
 /// これらの経路には `Shell` が保持する実 [`CompletionRegistry`] への
 /// アクセスがなく、`&mut CompletionRegistry::new()` のような使い捨て
-/// レジストリに対して register/list/erase を行うと、変更が静かに消える
-/// （#89 レビュー指摘 A1）。よってここでは **`--help`/`-h` 以外は
+/// レジストリに対して register/list/erase を行うと、変更が静かに消える。
+/// よってここでは **`--help`/`-h` 以外は
 /// すべて拒否**し、実データに触れず明確なエラーを返す。
 ///
 /// `--help` だけは `help complete`（`help.rs` が
@@ -149,7 +149,7 @@ fn register(parsed: &CompleteArgs, registry: &mut CompletionRegistry) -> Command
 
     // round-trip 不能な値（改行 / NUL）は `list_all` の「1 spec = 1 行」
     // 契約を壊す（埋め込み改行は行を分断し、NUL はそもそも文字列として
-    // 扱えない）ため、登録時点で拒否する（#89 A2）。
+    // 扱えない）ため、登録時点で拒否する。
     for (flag, value) in [
         ("-c", Some(command)),
         ("-a", parsed.arguments.as_deref()),
@@ -181,7 +181,7 @@ fn register(parsed: &CompleteArgs, registry: &mut CompletionRegistry) -> Command
 /// クォート文字（`'` `"`）・空白・バックスラッシュを許すと、`list_all` が
 /// 出力する行を `split_quoted` で再パースしたときに `-s` の値が
 /// クォート/エスケープなしでそのまま埋め込まれる（`format_spec_line` 参照）
-/// ため、行全体の構造を破壊できてしまう（#89 A2）。
+/// ため、行全体の構造を破壊できてしまう。
 fn validate_short(s: &str) -> Result<(), String> {
     let mut chars = s.chars();
     let (Some(c), None) = (chars.next(), chars.next()) else {
@@ -336,15 +336,13 @@ mod tests {
     use super::*;
     use crate::engine::expand::split_quoted;
 
-    // ── 登録・一覧の round-trip ──
-
     /// `list_all` が出力した行を、実シェルが使うのと同じ
     /// [`split_quoted`] で再トークナイズし、`complete` に再投入するための
     /// 引数列（先頭の `complete` トークンを除く）を返す。
     ///
     /// テスト専用の簡易パーサではなく実物のトークナイザを使うことで、
     /// 「一覧表示 → 実シェルでの再パース → 再登録」という実際の利用者の
-    /// フローを検証する（#89 A2: round-trip fidelity は `split_quoted`
+    /// フローを検証する（round-trip fidelity は `split_quoted`
     /// に対して証明されなければならない）。
     fn retokenize_listed_line(line: &str) -> Vec<String> {
         let tokens = split_quoted(line).expect("listed line must be valid shell syntax");
@@ -412,8 +410,6 @@ mod tests {
         assert_eq!(registry.specs_for("othercmd").len(), 1);
     }
 
-    // ── エラーパス（全て exit 2） ──
-
     #[test]
     fn register_without_command_is_error() {
         let mut registry = CompletionRegistry::new();
@@ -438,8 +434,6 @@ mod tests {
         assert!(result.stderr.contains("single character"));
         assert!(registry.specs_for("mycmd").is_empty());
     }
-
-    // ── クォート処理 ──
 
     #[test]
     fn listing_quotes_values_with_spaces_and_embedded_single_quote() {
@@ -484,8 +478,6 @@ mod tests {
         assert!(lines[1].starts_with("complete -c zeta"));
     }
 
-    // ── --help ──
-
     #[test]
     fn help_returns_success() {
         let mut registry = CompletionRegistry::new();
@@ -494,13 +486,8 @@ mod tests {
         assert!(result.stdout.contains("complete"));
     }
 
-    // ── バックスラッシュを含む値の round-trip（#89 A2, 修正前は corruption）──
-
     #[test]
     fn backslash_containing_value_round_trips_through_split_quoted() {
-        // 修正前は quote_if_needed がバックスラッシュを検出せず無クォートで
-        // 出力していたため、split_quoted による再パースで `\U` `\n` 等が
-        // エスケープとして消費され "C:Usersname" に化けていた（-n 値で最悪）。
         let mut registry = CompletionRegistry::new();
         execute_with_registry(&["-c", "mycmd", "-n", r"C:\Users\name"], &mut registry);
 
@@ -525,8 +512,6 @@ mod tests {
         assert_eq!(listed.stdout.trim(), r"complete -c mycmd -d 'a\b'");
     }
 
-    // ── PROPERTY: 拷問テーブル round-trip（#89 A2）──
-    //
     // register -> list_all -> split_quoted で再パース -> 新しいレジストリへ
     // 再登録 -> spec が完全一致することを、多様な値のテーブルに対して検証する。
     // 改行 / NUL は登録時点で拒否されるため別テスト（reject_*）で扱う。
@@ -614,8 +599,6 @@ mod tests {
         }
     }
 
-    // ── 改行 / NUL は登録時点で拒否される（round-trip 不能, #89 A2）──
-
     #[test]
     fn newline_in_argument_value_is_rejected() {
         let mut registry = CompletionRegistry::new();
@@ -648,8 +631,6 @@ mod tests {
         assert_eq!(result.exit_code, 2);
         assert!(registry.specs_for("my\ncmd").is_empty());
     }
-
-    // ── -s / -l 検証の強化（#89 A2）──
 
     #[test]
     fn short_option_with_quote_char_is_rejected() {

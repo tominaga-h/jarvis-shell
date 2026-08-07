@@ -191,8 +191,6 @@ impl Drop for TerminalForegroundGuard {
 mod tests {
     use super::*;
 
-    // ── should_enable_job_control 真理値表 ──
-
     #[test]
     fn job_control_disabled_when_not_tty_and_not_test() {
         assert!(!should_enable_job_control(false, false));
@@ -213,8 +211,6 @@ mod tests {
         assert!(!should_enable_job_control(true, true));
     }
 
-    // ── pipeline_pgid 純粋関数 ──
-
     #[test]
     fn pipeline_pgid_returns_first_pid() {
         assert_eq!(pipeline_pgid(12345), 12345);
@@ -228,8 +224,6 @@ mod tests {
         let second_stage = pipeline_pgid(first);
         assert_eq!(first, second_stage);
     }
-
-    // ── 実ビルドでの整合性 ──
 
     #[test]
     fn job_control_enabled_is_false_in_test_build() {
