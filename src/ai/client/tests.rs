@@ -21,10 +21,40 @@ impl Drop for ApiKeyGuard {
 
 #[test]
 #[serial]
-fn new_fails_without_api_key() {
+fn new_succeeds_with_openai_key() {
+    let _guard = ApiKeyGuard(std::env::var("OPENAI_API_KEY").ok());
+    std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+
+    assert!(JarvisAI::new(&AiConfig::default()).is_ok());
+}
+
+#[test]
+#[serial]
+fn new_fails_without_openai_key() {
     let _guard = ApiKeyGuard(std::env::var("OPENAI_API_KEY").ok());
     std::env::remove_var("OPENAI_API_KEY");
 
     let result = JarvisAI::new(&AiConfig::default());
     assert!(result.is_err());
+}
+
+#[test]
+#[serial]
+fn update_config_does_not_rebuild_client() {
+    let _guard = ApiKeyGuard(std::env::var("OPENAI_API_KEY").ok());
+    std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+
+    let mut ai = JarvisAI::new(&AiConfig::default()).unwrap();
+    let backend_address = &ai.backend as *const _;
+    let config = AiConfig {
+        model: "another-model".to_string(),
+        temperature: 0.2,
+        ..AiConfig::default()
+    };
+
+    ai.update_config(&config);
+
+    assert_eq!(backend_address, &ai.backend as *const _);
+    assert_eq!(ai.model, "another-model");
+    assert_eq!(ai.temperature, 0.2);
 }

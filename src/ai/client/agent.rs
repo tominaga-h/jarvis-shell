@@ -1,13 +1,9 @@
 //! エージェントループ — ツールコール付き複数ステップ処理
 
 use anyhow::Result;
-use async_openai::types::{
-    ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestToolMessage,
-    ChatCompletionRequestToolMessageContent, CreateChatCompletionRequest,
-};
 use tracing::{debug, info, warn};
 
+use crate::ai::provider::types::{ChatMessage, ChatRequest};
 use crate::ai::stream::process_stream;
 use crate::ai::tools;
 use crate::ai::types::AiResponse;
@@ -20,7 +16,7 @@ impl super::JarvisAI {
     /// （会話継続のため）。
     pub(super) async fn run_agent_loop(
         &self,
-        messages: &mut Vec<ChatCompletionRequestMessage>,
+        messages: &mut Vec<ChatMessage>,
     ) -> Result<AiResponse> {
         let model = self.model.clone();
         let tool_defs = tools::build_tools();
@@ -32,13 +28,12 @@ impl super::JarvisAI {
                 "Agent loop round"
             );
 
-            let request = CreateChatCompletionRequest {
+            let request = ChatRequest {
                 model: model.clone(),
                 messages: messages.clone(),
                 tools: Some(tool_defs.clone()),
-                stream: Some(true),
                 temperature: Some(self.temperature),
-                ..Default::default()
+                max_tokens: None,
             };
 
             debug!(
@@ -51,7 +46,7 @@ impl super::JarvisAI {
             );
 
             let stream_result =
-                process_stream(&self.client, request, round == 0, self.markdown_rendering).await?;
+                process_stream(&self.backend, request, round == 0, self.markdown_rendering).await?;
 
             if stream_result.interrupted {
                 info!(
@@ -116,26 +111,10 @@ impl super::JarvisAI {
                 return Ok(AiResponse::Command(cmd));
             }
 
-            let assistant_tool_calls =
-                tools::call::build_assistant_tool_calls(&stream_result.tool_calls);
-
-            messages.push(ChatCompletionRequestMessage::Assistant(
-                ChatCompletionRequestAssistantMessage {
-                    content: if stream_result.full_text.is_empty() {
-                        None
-                    } else {
-                        Some(ChatCompletionRequestAssistantMessageContent::Text(
-                            stream_result.full_text,
-                        ))
-                    },
-                    refusal: None,
-                    name: None,
-                    audio: None,
-                    tool_calls: Some(assistant_tool_calls),
-                    #[allow(deprecated)]
-                    function_call: None,
-                },
-            ));
+            messages.push(ChatMessage::Assistant {
+                text: (!stream_result.full_text.is_empty()).then_some(stream_result.full_text),
+                tool_calls: tools::call::build_assistant_tool_calls(&stream_result.tool_calls),
+            });
 
             for tc in &stream_result.tool_calls {
                 let result = tools::executor::execute_tool(&tc.function_name, &tc.arguments);
@@ -148,12 +127,10 @@ impl super::JarvisAI {
                     "Tool executed locally"
                 );
 
-                messages.push(ChatCompletionRequestMessage::Tool(
-                    ChatCompletionRequestToolMessage {
-                        content: ChatCompletionRequestToolMessageContent::Text(result),
-                        tool_call_id: tc.id.clone(),
-                    },
-                ));
+                messages.push(ChatMessage::ToolResult {
+                    tool_call_id: tc.id.clone(),
+                    content: result,
+                });
             }
         }
 

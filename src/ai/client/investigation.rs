@@ -1,12 +1,8 @@
 use anyhow::Result;
-use async_openai::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
-    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent,
-};
 use tracing::debug;
 
 use crate::ai::prompts::ERROR_INVESTIGATION_PROMPT;
+use crate::ai::provider::types::ChatMessage;
 use crate::ai::types::{ConversationOrigin, ConversationResult, ConversationState};
 use crate::engine::CommandResult;
 
@@ -48,15 +44,9 @@ impl JarvisAI {
             format!("{ERROR_INVESTIGATION_PROMPT}\n\n{context}")
         };
 
-        let mut messages: Vec<ChatCompletionRequestMessage> = vec![
-            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                content: ChatCompletionRequestSystemMessageContent::Text(system_content),
-                name: None,
-            }),
-            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(error_details),
-                name: None,
-            }),
+        let mut messages = vec![
+            ChatMessage::System(system_content),
+            ChatMessage::User(error_details),
         ];
 
         let response = self.run_agent_loop(&mut messages).await?;

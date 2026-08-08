@@ -1,15 +1,13 @@
 use anyhow::{Context, Result};
-use async_openai::types::{
-    ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage,
-};
-use async_openai::{config::OpenAIConfig, Client};
 
+use crate::ai::provider::openai_compat::OpenAiCompatBackend;
+use crate::ai::provider::types::ChatMessage;
+use crate::ai::provider::AiBackend;
 use crate::config::AiConfig;
 
 /// J.A.R.V.I.S. AI クライアント
 pub struct JarvisAI {
-    pub(crate) client: Client<OpenAIConfig>,
+    pub(crate) backend: AiBackend,
     /// 使用する AI モデル名
     pub(crate) model: String,
     /// エージェントループの最大ラウンド数
@@ -25,16 +23,11 @@ pub struct JarvisAI {
 }
 
 /// テキストのみのアシスタントメッセージを構築する。
-pub(crate) fn build_text_assistant_message(text: String) -> ChatCompletionRequestMessage {
-    ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-        content: Some(ChatCompletionRequestAssistantMessageContent::Text(text)),
-        refusal: None,
-        name: None,
-        audio: None,
-        tool_calls: None,
-        #[allow(deprecated)]
-        function_call: None,
-    })
+pub(crate) fn build_text_assistant_message(text: String) -> ChatMessage {
+    ChatMessage::Assistant {
+        text: Some(text),
+        tool_calls: Vec::new(),
+    }
 }
 
 impl JarvisAI {
@@ -47,10 +40,9 @@ impl JarvisAI {
             anyhow::bail!("OPENAI_API_KEY is not configured. Please set a valid API key in .env");
         }
 
-        let config = OpenAIConfig::new().with_api_key(&api_key);
-        let client = Client::with_config(config);
+        let backend = AiBackend::OpenAiCompat(OpenAiCompatBackend::new(&api_key));
         Ok(Self {
-            client,
+            backend,
             model: ai_config.model.clone(),
             max_rounds: ai_config.max_rounds,
             markdown_rendering: ai_config.markdown_rendering,

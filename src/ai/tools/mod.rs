@@ -6,10 +6,10 @@ pub mod call;
 pub mod definitions;
 pub mod executor;
 
-use async_openai::types::ChatCompletionTool;
+use crate::ai::provider::types::ToolSpec;
 
 /// すべてのツール定義を構築する
-pub fn build_tools() -> Vec<ChatCompletionTool> {
+pub fn build_tools() -> Vec<ToolSpec> {
     vec![
         definitions::shell_command_tool(),
         definitions::read_file_tool(),

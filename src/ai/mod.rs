@@ -1,6 +1,7 @@
 pub mod client;
 pub mod markdown;
 mod prompts;
+pub mod provider;
 mod stream;
 mod tools;
 mod types;
