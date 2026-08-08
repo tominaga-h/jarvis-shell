@@ -13,7 +13,7 @@ impl super::JarvishConfig {
 # You can write setting like this:
 
 [ai]
-# provider = "openai"       # "openai" or "anthropic"
+# provider = "openai"       # "openai", "anthropic", "opencode-zen", or "opencode-go"
 # model = "gpt-4o"
 # max_tokens = 8192          # Anthropic defaults to 16384 when omitted
 # base_url = "https://..."   # Optional provider endpoint override

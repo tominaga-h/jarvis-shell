@@ -30,6 +30,17 @@ impl Drop for AnthropicApiKeyGuard {
     }
 }
 
+struct OpencodeApiKeyGuard(Option<String>);
+
+impl Drop for OpencodeApiKeyGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(key) => std::env::set_var("OPENCODE_API_KEY", key),
+            None => std::env::remove_var("OPENCODE_API_KEY"),
+        }
+    }
+}
+
 #[test]
 #[serial]
 fn new_succeeds_with_openai_key() {
@@ -100,4 +111,89 @@ fn new_fails_without_anthropic_key() {
     };
 
     assert!(JarvisAI::new(&config).is_err());
+}
+
+#[test]
+#[serial]
+fn new_selects_opencode_zen_defaults() {
+    let _guard = OpencodeApiKeyGuard(std::env::var("OPENCODE_API_KEY").ok());
+    std::env::set_var("OPENCODE_API_KEY", "test-opencode-key");
+    let config = AiConfig {
+        provider: "opencode-zen".to_string(),
+        ..AiConfig::default()
+    };
+
+    let ai = JarvisAI::new(&config).unwrap();
+    let crate::ai::provider::AiBackend::OpenAiCompat(backend) = &ai.backend else {
+        panic!("expected OpenAI-compatible backend");
+    };
+    assert_eq!(backend.base_url, "https://opencode.ai/zen/v1");
+    assert_eq!(backend.user_agent.as_deref(), Some("jarvish/1.15.6"));
+    assert_eq!(ai.max_tokens, 8192);
+}
+
+#[test]
+#[serial]
+fn new_selects_opencode_go_default_url() {
+    let _guard = OpencodeApiKeyGuard(std::env::var("OPENCODE_API_KEY").ok());
+    std::env::set_var("OPENCODE_API_KEY", "test-opencode-key");
+    let config = AiConfig {
+        provider: "opencode-go".to_string(),
+        ..AiConfig::default()
+    };
+
+    let ai = JarvisAI::new(&config).unwrap();
+    let crate::ai::provider::AiBackend::OpenAiCompat(backend) = &ai.backend else {
+        panic!("expected OpenAI-compatible backend");
+    };
+    assert_eq!(backend.base_url, "https://opencode.ai/zen/go/v1");
+}
+
+#[test]
+#[serial]
+fn new_selects_opencode_go_and_honors_overrides() {
+    let _guard = OpencodeApiKeyGuard(std::env::var("OPENCODE_API_KEY").ok());
+    let _custom_guard = CustomApiKeyGuard(std::env::var("CUSTOM_OPENCODE_KEY").ok());
+    std::env::set_var("CUSTOM_OPENCODE_KEY", "test-custom-opencode-key");
+    std::env::remove_var("OPENCODE_API_KEY");
+    let config = AiConfig {
+        provider: "opencode-go".to_string(),
+        base_url: Some("http://localhost:9999/v1".to_string()),
+        api_key_env: Some("CUSTOM_OPENCODE_KEY".to_string()),
+        ..AiConfig::default()
+    };
+
+    let ai = JarvisAI::new(&config).unwrap();
+    let crate::ai::provider::AiBackend::OpenAiCompat(backend) = &ai.backend else {
+        panic!("expected OpenAI-compatible backend");
+    };
+    assert_eq!(backend.base_url, "http://localhost:9999/v1");
+    assert_eq!(ai.max_tokens, 8192);
+}
+
+#[test]
+#[serial]
+fn opencode_placeholder_key_is_rejected() {
+    let _guard = OpencodeApiKeyGuard(std::env::var("OPENCODE_API_KEY").ok());
+    std::env::set_var("OPENCODE_API_KEY", "your_opencode_api_key");
+    let config = AiConfig {
+        provider: "opencode-zen".to_string(),
+        ..AiConfig::default()
+    };
+
+    let error = JarvisAI::new(&config).err().unwrap();
+    assert!(error
+        .to_string()
+        .contains("OPENCODE_API_KEY is not configured"));
+}
+
+struct CustomApiKeyGuard(Option<String>);
+
+impl Drop for CustomApiKeyGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(key) => std::env::set_var("CUSTOM_OPENCODE_KEY", key),
+            None => std::env::remove_var("CUSTOM_OPENCODE_KEY"),
+        }
+    }
 }

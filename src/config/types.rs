@@ -26,7 +26,7 @@ pub struct JarvishConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AiConfig {
-    /// 使用する AI プロバイダ（`openai` または `anthropic`）
+    /// 使用する AI プロバイダ（`openai` / `anthropic` / `opencode-zen` / `opencode-go`）
     pub provider: String,
     /// 使用する AI モデル名
     pub model: String,

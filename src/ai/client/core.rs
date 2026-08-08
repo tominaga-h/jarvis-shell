@@ -39,6 +39,7 @@ impl JarvisAI {
         let provider = ai_config.provider.as_str();
         let default_key_env = match provider {
             "anthropic" => "ANTHROPIC_API_KEY",
+            "opencode-zen" | "opencode-go" => "OPENCODE_API_KEY",
             _ => "OPENAI_API_KEY",
         };
         let key_env = ai_config.api_key_env.as_deref().unwrap_or(default_key_env);
@@ -47,6 +48,7 @@ impl JarvisAI {
 
         let placeholder = match provider {
             "anthropic" => "your_anthropic_api_key",
+            "opencode-zen" | "opencode-go" => "your_opencode_api_key",
             _ => "your_openai_api_key",
         };
         if api_key.is_empty() || api_key == placeholder {
@@ -61,9 +63,30 @@ impl JarvisAI {
                     .unwrap_or("https://api.anthropic.com");
                 AiBackend::Anthropic(AnthropicBackend::new(&api_key, base_url)?)
             }
-            "openai" => AiBackend::OpenAiCompat(OpenAiCompatBackend::new(&api_key)),
+            "openai" => AiBackend::OpenAiCompat(OpenAiCompatBackend::new(
+                &api_key,
+                ai_config.base_url.as_deref(),
+                None,
+            )?),
+            "opencode-zen" | "opencode-go" => {
+                let default_base_url = match provider {
+                    "opencode-zen" => "https://opencode.ai/zen/v1",
+                    "opencode-go" => "https://opencode.ai/zen/go/v1",
+                    _ => unreachable!(),
+                };
+                let base_url = ai_config
+                    .base_url
+                    .as_deref()
+                    .unwrap_or(default_base_url);
+                let user_agent = format!("jarvish/{}", env!("CARGO_PKG_VERSION"));
+                AiBackend::OpenAiCompat(OpenAiCompatBackend::new(
+                    &api_key,
+                    Some(base_url),
+                    Some(&user_agent),
+                )?)
+            }
             other => anyhow::bail!(
-                "Unsupported AI provider '{other}'. Supported providers: openai, anthropic"
+                "Unsupported AI provider '{other}'. Supported providers: openai, anthropic, opencode-zen, opencode-go"
             ),
         };
         Ok(Self {

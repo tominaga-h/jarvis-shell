@@ -58,6 +58,24 @@ api_key_env = "TEST_ANTHROPIC_KEY"
 }
 
 #[test]
+fn parse_opencode_provider_config() {
+    let config = load_from_str(
+        r#"
+[ai]
+provider = "opencode-zen"
+base_url = "http://localhost:8080/v1"
+api_key_env = "OPENCODE_TEST_KEY"
+"#,
+    );
+    assert_eq!(config.ai.provider, "opencode-zen");
+    assert_eq!(
+        config.ai.base_url.as_deref(),
+        Some("http://localhost:8080/v1")
+    );
+    assert_eq!(config.ai.api_key_env.as_deref(), Some("OPENCODE_TEST_KEY"));
+}
+
+#[test]
 fn parse_full_config() {
     let toml = r#"
 [ai]

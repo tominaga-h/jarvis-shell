@@ -147,6 +147,7 @@ update --check --local            # ローカルバイナリのバージョン�
 ```bash
 export OPENAI_API_KEY="sk-..."
 # Anthropic の場合: export ANTHROPIC_API_KEY="sk-ant-..."
+# OpenCode Zen/Go の場合: export OPENCODE_API_KEY="..."
 ```
 
 > ※ `~/.config/jarvish/config.toml` の `[export]` セクションに記述することで自動設定も可能です。
@@ -157,7 +158,7 @@ export OPENAI_API_KEY="sk-..."
 
 ```toml
 [ai]
-provider = "openai"           # "openai" または "anthropic"
+provider = "openai"           # "openai" / "anthropic" / "opencode-zen" / "opencode-go"
 model = "gpt-4o"              # 使用する AI モデル
 max_tokens = 8192              # Anthropic の省略時は 16384
 base_url = "https://..."      # API エンドポイントの任意上書き
@@ -346,7 +347,7 @@ graph TB
     A --> B["Execution Engine"]
     B --> B1["ビルトインコマンド (cd, exit, alias...)"]
     B --> B2["外部コマンド (PTY + I/O キャプチャ)"]
-    B --> D["AI Brain (OpenAI API / Tools)"]
+    B --> D["AI Brain (OpenAI / Anthropic / OpenCode / Tools)"]
     B2 --> C["Black Box"]
     D --> C
     C --> C1[("history.db (SQLite)")]

@@ -148,6 +148,7 @@ Set the API key for your selected provider as an environment variable:
 ```bash
 export OPENAI_API_KEY="sk-..."
 # For Anthropic: export ANTHROPIC_API_KEY="sk-ant-..."
+# For OpenCode Zen/Go: export OPENCODE_API_KEY="..."
 ```
 
 > You can also configure this in the `[export]` section of `~/.config/jarvish/config.toml` for automatic setup.
@@ -158,7 +159,7 @@ A default config file is automatically generated at `~/.config/jarvish/config.to
 
 ```toml
 [ai]
-provider = "openai"           # "openai" or "anthropic"
+provider = "openai"           # "openai", "anthropic", "opencode-zen", or "opencode-go"
 model = "gpt-4o"              # AI model to use
 max_tokens = 8192              # Anthropic uses 16384 when omitted
 base_url = "https://..."      # Optional provider endpoint override
@@ -347,7 +348,7 @@ graph TB
     A --> B["Execution Engine"]
     B --> B1["Builtin Commands (cd, exit, alias...)"]
     B --> B2["External Commands (PTY + I/O Capture)"]
-    B --> D["AI Brain (OpenAI API / Tools)"]
+    B --> D["AI Brain (OpenAI / Anthropic / OpenCode / Tools)"]
     B2 --> C["Black Box"]
     D --> C
     C --> C1[("history.db (SQLite)")]

@@ -20,14 +20,38 @@ use super::types::{ChatChunk, ChatMessage, ChatRequest, ToolCall, ToolCallDelta,
 /// A client for OpenAI and OpenAI-compatible Chat Completions APIs.
 pub struct OpenAiCompatBackend {
     pub(crate) client: Client<OpenAIConfig>,
+    #[cfg(test)]
+    pub(crate) base_url: String,
+    #[cfg(test)]
+    pub(crate) user_agent: Option<String>,
 }
 
 impl OpenAiCompatBackend {
-    pub fn new(api_key: &str) -> Self {
-        let config = OpenAIConfig::new().with_api_key(api_key);
-        Self {
-            client: Client::with_config(config),
-        }
+    /// Creates an OpenAI-compatible client with optional endpoint and headers.
+    pub fn new(api_key: &str, base_url: Option<&str>, user_agent: Option<&str>) -> Result<Self> {
+        let default_base_url = async_openai::config::OPENAI_API_BASE;
+        let base_url = base_url.unwrap_or(default_base_url).trim_end_matches('/');
+        let config = OpenAIConfig::new()
+            .with_api_key(api_key)
+            .with_api_base(base_url);
+        let client = Client::with_config(config);
+        let client = match user_agent {
+            Some(user_agent) => {
+                let http_client = reqwest::Client::builder()
+                    .user_agent(user_agent)
+                    .build()
+                    .context("Failed to build OpenAI-compatible HTTP client")?;
+                client.with_http_client(http_client)
+            }
+            None => client,
+        };
+        Ok(Self {
+            client,
+            #[cfg(test)]
+            base_url: base_url.to_string(),
+            #[cfg(test)]
+            user_agent: user_agent.map(str::to_string),
+        })
     }
 
     pub async fn create_stream(&self, request: ChatRequest) -> Result<ChatChunkStream> {
@@ -396,5 +420,17 @@ mod tests {
             convert_response(response).text_delta,
             Some("firstsecond".into())
         );
+    }
+
+    #[test]
+    fn constructor_preserves_endpoint_and_user_agent_configuration() {
+        let backend = OpenAiCompatBackend::new(
+            "test-key",
+            Some("http://localhost:9000/v1"),
+            Some("jarvish/test"),
+        )
+        .unwrap();
+        assert_eq!(backend.base_url, "http://localhost:9000/v1");
+        assert_eq!(backend.user_agent.as_deref(), Some("jarvish/test"));
     }
 }
