@@ -16,16 +16,14 @@ pub use dispatch::{execute, try_builtin, try_execute_ai_pipe};
 /// REPL ループの制御アクション
 #[derive(Debug, Clone, PartialEq)]
 pub enum LoopAction {
-    /// ループを続行する
     Continue,
-    /// ループを終了する（exit コマンド等）
     Exit,
     /// プロセスを再起動する（restart コマンド、SIGUSR1 受信時）
     Restart,
 }
 
 /// コマンド実行の結果を格納する構造体。
-/// Phase 2 以降で stdout/stderr を Black Box に永続化する際に使用する。
+/// stdout/stderr を Black Box に永続化する際に使用する。
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct CommandResult {

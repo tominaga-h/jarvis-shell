@@ -129,8 +129,6 @@ mod tests {
         assert!(dispatch_builtin("git", &["status"]).is_none());
     }
 
-    // ── cd + cwd 結合テスト ──
-
     #[test]
     #[serial]
     fn cwd_reflects_cd_change() {
@@ -198,8 +196,6 @@ mod tests {
         );
     }
 
-    // ── 新規ビルトイン登録テスト ──
-
     #[test]
     #[serial]
     fn pwd_is_alias_for_cwd() {
@@ -242,7 +238,7 @@ mod tests {
     fn complete_dispatch_stub_rejects_list_with_error() {
         // dispatch_builtin 経由（pipeline / command list / ai_pipe 等）では
         // 実レジストリへのアクセスがないため、引数なし（一覧表示相当）は
-        // 使い捨てレジストリを黙って操作せず、明確なエラーを返す（#89 A1）。
+        // 使い捨てレジストリを黙って操作せず、明確なエラーを返す。
         let result = dispatch_builtin("complete", &[]).unwrap();
         assert_ne!(result.exit_code, 0);
         assert!(result.stderr.contains("standalone command"));
@@ -270,8 +266,6 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("complete"));
     }
-
-    // ── cdhist / cdj 登録テスト ──
 
     #[test]
     fn cdhist_and_cdj_are_registered() {
@@ -302,8 +296,6 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("cdj"));
     }
-
-    // ── BUILTIN_COMMANDS 一元化テーブルの検証 ──
 
     #[test]
     fn is_builtin_accepts_exact_previous_name_list() {

@@ -6,7 +6,7 @@ use crate::engine::CommandResult;
 ///
 /// この struct はコマンドラインの引数パースのみを担当する。実際の
 /// ディスパッチ（`.toml` → config 再読み込み / それ以外 → rc スクリプト
-/// 実行）は `Shell::dispatch_source`（`src/shell/rc.rs`, Phase 4.3）が
+/// 実行）は `Shell::dispatch_source`（`src/shell/rc.rs`）が
 /// 行う — `try_shell_builtins` の `"source"` 分岐がこの `parse` で得た
 /// パス文字列を渡す。
 #[derive(Parser)]

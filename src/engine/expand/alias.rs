@@ -142,8 +142,6 @@ mod tests {
         assert!(expand_aliases_in_line("", &aliases).is_none());
     }
 
-    // ── セグメント境界を跨いだエイリアス展開 ──
-
     #[test]
     fn pipe_second_segment_expands() {
         let aliases = aliases_basic();

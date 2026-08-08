@@ -51,7 +51,7 @@ impl BlobStore {
     }
 
     /// ハッシュを指定して Blob を読み込み、展開したテキストを返す。
-    /// Phase 3 (AI Context Retrieval) で使用する。
+    /// AI Context Retrieval で使用する。
     #[allow(dead_code)]
     pub fn load(&self, hash: &str) -> Result<String> {
         let blob_path = self.blob_path(hash);

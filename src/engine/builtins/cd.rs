@@ -39,7 +39,7 @@ pub(crate) fn execute(args: &[&str], dir_stack: &mut Vec<PathBuf>) -> CommandRes
         }
     };
 
-    // 変更前の PWD を保存（OLDPWD 用）
+    // PWD を保存（OLDPWD 用）
     let old_pwd = env::var("PWD").ok().or_else(|| {
         env::current_dir()
             .ok()
