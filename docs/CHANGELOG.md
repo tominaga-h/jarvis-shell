@@ -3,6 +3,26 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v1.15.6](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.15.6) - 2026-08-08
+
+### Changed
+
+- README / docs/README_JA.md のデモ GIF を vhs で再生成し `images/demo.gif` へ差し替え（旧 `images/jarvish-demo.gif` は削除）。生成スクリプト `images/demo.tape` をリポジトリへ同梱し、以後再現可能にした
+- コード全体のコメントを整理し、「何をしているか」の重複説明を削って「なぜそうしているか」を残す方針へ統一
+
+### Internal
+
+振る舞いを一切変えない大規模リファクタリング。CLAUDE.md のコーディング規約「各ファイルは単一かつ明確な責務を持つ」「巨大ファイルは機能単位のサブモジュールへ再編する」に沿って、1,000 行超の巨大モジュールを責務単位のディレクトリ構成へ分割した。公開 API と実行時挙動は変更していない。
+
+- `src/cli/completer/` — `carapace.rs` (1,846 行) / `registry_provider.rs` (1,567 行) / `zsh_bridge.rs` (3,491 行) / `zsh_daemon.rs` (2,593 行) をそれぞれディレクトリ化し、`core` / `lifecycle` / `candidates` / `parsing` / `pty_io` / `request_framing` などの責務単位サブモジュールへ分割
+- `src/shell/` — `mod.rs` (1,679 行) から `construction.rs` / `run.rs` / `reload.rs` / `restart.rs` / `prewarm.rs` を切り出し、`rc.rs` (1,447 行) を `rc/{resolution,file_reading,parsing,execution,options,template}.rs` へ分割
+- `src/engine/` — `dispatch/mod.rs` を `{parse,builtin,external,expansion}.rs` へ、`parser/mod.rs` を `{command_list,pipeline,simple_command,redirects,ai_filter,types}.rs` へ、`builtins/update.rs` (837 行) を `update/{version,release,local_binary,homebrew,flag_file}.rs` へ分割
+- `src/ai/client/` — `mod.rs` から `core.rs` / `conversation.rs` / `input_processing.rs` / `investigation.rs` / `config_update.rs` を切り出し
+- `src/config/` — `mod.rs` (736 行) を `types.rs` / `loading.rs` へ分割
+- `src/storage/` — `mod.rs` を `types.rs` / `database.rs` / `session.rs` へ分割
+- `src/cli/highlighter/` — `mod.rs` (535 行) を `core.rs` / `token_styling.rs` / `operator_styling.rs` / `quote_styling.rs` / `env_styling.rs` へ分割
+- 各モジュールのテストは対応する `tests.rs` へ移動。`make check`（fmt / check / clippy / test）は全パス
+
 ## [v1.15.5](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.15.5) - 2026-08-01
 
 ### Fixed
