@@ -8,14 +8,14 @@ use futures_util::StreamExt;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{debug, info, warn};
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::time::Instant;
 
 use crate::ai::provider::types::{ChatChunk, ChatRequest};
 use crate::ai::provider::AiBackend;
 use crate::cli::color::red;
 use crate::cli::jarvis::{
-    jarvis_print_plain, jarvis_render_markdown, jarvis_spinner, render_markdown,
+    jarvis_print_plain, jarvis_render_markdown, jarvis_spinner, render_markdown, JarvisSpinner,
 };
 
 use super::markdown::is_markdown;
@@ -72,9 +72,16 @@ async fn process_stream_common(
     tools: Option<Vec<ToolCallAccumulator>>,
     pipe_mode: bool,
 ) -> Result<StreamResult> {
+    let stream_start_time = std::time::Instant::now();
     let mut sigint =
         signal(SignalKind::interrupt()).context("Failed to register SIGINT handler")?;
-    let spinner = jarvis_spinner();
+    let mut spinner = jarvis_spinner();
+    tracing::debug!(
+        target: "jarvish::ai::stream",
+        stdout_is_tty = std::io::stdout().is_terminal(),
+        stderr_is_tty = std::io::stderr().is_terminal(),
+        "stream processing environment check"
+    );
 
     let mut stream = tokio::select! {
         result = backend.create_stream(request) => {
@@ -110,6 +117,7 @@ async fn process_stream_common(
         markdown_rendering,
         pipe_mode,
         chunk_count: 0,
+        stream_start_time,
     };
     let mut interrupted = false;
 
@@ -137,7 +145,12 @@ async fn process_stream_common(
                 consume_chunk(&mut state, chunk);
             }
             _ = sigint.recv() => {
-                info!("Ctrl-C received during AI streaming, interrupting");
+                info!(
+                    interrupted_at_chunk = state.chunk_count,
+                    interrupted_at_text_len = state.full_text.len(),
+                    elapsed_ms = stream_start_time.elapsed().as_millis() as u64,
+                    "Ctrl-C received during AI streaming, interrupting"
+                );
                 interrupted = true;
                 break;
             }
@@ -146,7 +159,7 @@ async fn process_stream_common(
 
     if pipe_mode {
         finish_pipe_output(
-            &state.spinner,
+            &mut state.spinner,
             &state.full_text,
             state.started_text,
             interrupted,
@@ -158,7 +171,7 @@ async fn process_stream_common(
         }
         state.spinner.finish_and_clear();
         if state.started_text {
-            let render = if markdown_rendering && is_markdown(&state.full_text) {
+            let render: fn(&str) = if markdown_rendering && is_markdown(&state.full_text) {
                 jarvis_render_markdown
             } else {
                 jarvis_print_plain
@@ -169,12 +182,20 @@ async fn process_stream_common(
                 state.full_text.clone()
             };
             render(&display_text);
+            let mut stdout_handle = std::io::stdout();
+            let flush_result = stdout_handle.flush();
+            tracing::debug!(
+                target: "jarvish::ai::stream",
+                flush_ok = flush_result.is_ok(),
+                "post-render flush attempted"
+            );
         }
     }
 
     debug!(
         total_chunks = state.chunk_count,
         full_text_length = state.full_text.len(),
+        duration_ms = stream_start_time.elapsed().as_millis() as u64,
         tool_calls_count = state.tools.as_ref().map_or(0, Vec::len),
         started_text = state.started_text,
         is_first_round,
@@ -194,11 +215,12 @@ struct StreamState {
     full_text: String,
     started_text: bool,
     tools: Option<Vec<ToolCallAccumulator>>,
-    spinner: indicatif::ProgressBar,
+    spinner: JarvisSpinner,
     last_spinner_update: Instant,
     markdown_rendering: bool,
     pipe_mode: bool,
     chunk_count: u32,
+    stream_start_time: Instant,
 }
 
 fn consume_chunk(state: &mut StreamState, chunk: ChatChunk) {
@@ -206,22 +228,19 @@ fn consume_chunk(state: &mut StreamState, chunk: ChatChunk) {
         if state.pipe_mode && !state.started_text && !state.markdown_rendering {
             state.spinner.finish_and_clear();
         }
-        debug!(
-            chunk = state.chunk_count,
-            content_length = content.len(),
-            has_content = true,
-            content = %content,
-            "Received text chunk"
-        );
         state.full_text.push_str(&content);
         state.started_text = true;
         if (!state.pipe_mode || state.markdown_rendering)
             && state.last_spinner_update.elapsed().as_millis() > 100
         {
-            state.spinner.set_message(format!(
-                "Buffering stream... {} bytes",
-                state.full_text.len()
-            ));
+            let elapsed_secs = state.stream_start_time.elapsed().as_secs();
+            let message = format!(
+                "Buffering... {}s elapsed, {} bytes ({} chunks)",
+                elapsed_secs,
+                state.full_text.len(),
+                state.chunk_count
+            );
+            state.spinner.set_message(&message);
             state.last_spinner_update = Instant::now();
         } else if state.pipe_mode && !state.markdown_rendering {
             let mut out = std::io::stdout().lock();
@@ -238,7 +257,7 @@ fn consume_chunk(state: &mut StreamState, chunk: ChatChunk) {
 }
 
 fn finish_pipe_output(
-    spinner: &indicatif::ProgressBar,
+    spinner: &mut JarvisSpinner,
     full_text: &str,
     started: bool,
     interrupted: bool,
@@ -295,11 +314,12 @@ mod tests {
             full_text: String::new(),
             started_text: false,
             tools: Some(Vec::new()),
-            spinner: indicatif::ProgressBar::hidden(),
+            spinner: JarvisSpinner::new("test"),
             last_spinner_update: Instant::now(),
             markdown_rendering: false,
             pipe_mode: false,
             chunk_count: 1,
+            stream_start_time: Instant::now(),
         };
 
         consume_chunk(

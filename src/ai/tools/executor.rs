@@ -39,7 +39,7 @@ fn execute_read_file(arguments: &str) -> String {
         None => return "Error: 'path' parameter is required".to_string(),
     };
 
-    let spinner = jarvis_read_file(path);
+    let mut spinner = jarvis_read_file(path);
 
     let result = match std::fs::read_to_string(path) {
         Ok(content) => {
@@ -76,7 +76,7 @@ fn execute_write_file(arguments: &str) -> String {
         None => return "Error: 'content' parameter is required".to_string(),
     };
 
-    let spinner = jarvis_write_file(path);
+    let mut spinner = jarvis_write_file(path);
 
     // 親ディレクトリが存在しない場合は作成
     if let Some(parent) = std::path::Path::new(path).parent() {
@@ -164,7 +164,7 @@ fn execute_search_replace(arguments: &str) -> String {
         None => return "Error: 'new_string' parameter is required".to_string(),
     };
 
-    let spinner = jarvis_search_replace(path);
+    let mut spinner = jarvis_search_replace(path);
     let result = search_replace_inner(path, old_string, new_string);
     spinner.finish_and_clear();
     if result.starts_with("Successfully") {

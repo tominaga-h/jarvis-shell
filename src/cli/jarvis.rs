@@ -1,26 +1,62 @@
 use std::io::{self, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use termimad::crossterm::style::Attribute;
 use termimad::{rgb, CompoundStyle, MadSkin, StyledChar};
 
 use super::color::{red, white};
 
-/// スピナーを生成・開始する共通ヘルパー。
-///
-/// `template` に `{spinner}` と `{msg}` を含むテンプレート文字列を渡す。
-/// テンプレートが不正な場合はデフォルトスタイルにフォールバックする。
-fn create_spinner(template: &str, message: &str) -> ProgressBar {
-    let spinner = ProgressBar::new_spinner();
-    let style = ProgressStyle::default_spinner()
-        .template(template)
-        .unwrap_or_else(|_| ProgressStyle::default_spinner())
-        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏");
-    spinner.set_style(style);
-    spinner.set_message(message.to_string());
-    spinner.enable_steady_tick(Duration::from_millis(80));
-    spinner
+/// indicatif を使う Jarvis スピナー。
+pub struct JarvisSpinner {
+    progress: ProgressBar,
+    last_update: Instant,
+    finished: bool,
+}
+
+impl JarvisSpinner {
+    /// スピナーを生成し、初期メッセージを表示する。
+    pub fn new(initial_message: &str) -> Self {
+        let progress = ProgressBar::new_spinner();
+        progress.set_draw_target(ProgressDrawTarget::stdout());
+        let style = ProgressStyle::with_template("🤵 {spinner} {msg}")
+            .expect("valid spinner template")
+            .tick_chars("⠋⠙⠹⠸⠴⠦⠧⠇⠏ ");
+        progress.set_style(style);
+        progress.set_message(initial_message.to_string());
+        progress.enable_steady_tick(Duration::from_millis(100));
+        Self {
+            progress,
+            last_update: Instant::now(),
+            finished: false,
+        }
+    }
+
+    /// メッセージを 100ms 間隔で更新する。
+    pub fn set_message(&mut self, message: &str) {
+        if self.finished {
+            return;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.last_update).as_millis() < 100 {
+            return;
+        }
+        self.last_update = now;
+        self.progress.set_message(message.to_string());
+    }
+
+    /// スピナー行を終了し、後続の出力を次の行から開始する。
+    pub fn finish_and_clear(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        // Clear the spinner line so only the AI response remains visible.
+        // \r = carriage return; \x1b[K clears from the cursor to line end.
+        eprint!("\r\x1b[K");
+        let _ = io::stderr().flush();
+        self.progress.finish_and_clear();
+    }
 }
 
 /// Jarvis が発話するときに使う共通関数。
@@ -37,26 +73,26 @@ pub fn jarvis_notice(command: &str) {
 /// Jarvis がファイルを読み取るときに使う共通関数。
 /// メッセージを `println!` で永続出力し、スピナーを分離して返す。
 /// 呼び出し元で `finish_and_clear()` を呼んでスピナーを停止すること。
-pub fn jarvis_read_file(path: &str) -> ProgressBar {
-    create_spinner("📖 {spinner} Reading file: {msg}", path)
+pub fn jarvis_read_file(path: &str) -> JarvisSpinner {
+    JarvisSpinner::new(&format!("Reading file: {path}"))
 }
 
 /// Jarvis がファイルを書き込むときに使う共通関数。
 /// 呼び出し元で `finish_and_clear()` を呼んでスピナーを停止すること。
-pub fn jarvis_write_file(path: &str) -> ProgressBar {
-    create_spinner("📝 {spinner} Writing file: {msg}", path)
+pub fn jarvis_write_file(path: &str) -> JarvisSpinner {
+    JarvisSpinner::new(&format!("Writing file: {path}"))
 }
 
 /// Jarvis がファイルを部分置換するときに使う共通関数。
 /// 呼び出し元で `finish_and_clear()` を呼んでスピナーを停止すること。
-pub fn jarvis_search_replace(path: &str) -> ProgressBar {
-    create_spinner("🔧 {spinner} Patching file: {msg}", path)
+pub fn jarvis_search_replace(path: &str) -> JarvisSpinner {
+    JarvisSpinner::new(&format!("Patching file: {path}"))
 }
 
 /// AI 処理中に表示するスピナーを生成・開始する。
 /// `{msg}` を含むテンプレートにより、進捗メッセージを動的に更新できる。
-pub fn jarvis_spinner() -> ProgressBar {
-    create_spinner("🤵 {spinner} {msg}", "Thinking...")
+pub fn jarvis_spinner() -> JarvisSpinner {
+    JarvisSpinner::new("Thinking...")
 }
 
 /// Jarvish 専用の Markdown スキンを構築する。
@@ -119,8 +155,16 @@ pub fn jarvis_print_plain(text: &str) {
 /// Jarvis ペルソナなしで Markdown テキストをレンダリングする。
 /// AI パイプなど、🤵 プレフィックスが不要な場面で使用する。
 pub fn render_markdown(text: &str) {
+    tracing::debug!(
+        target: "jarvish::cli::render",
+        fn = "render_markdown",
+        text_len = text.len(),
+        text_preview = %text.chars().take(50).collect::<String>(),
+        "render called"
+    );
     let skin = jarvish_skin();
     skin.print_text(text);
+    tracing::debug!(target: "jarvish::cli::render", "render output written");
 }
 
 /// タイポ補正に対するユーザーの応答

@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 
 use crate::ai::provider::anthropic::AnthropicBackend;
 use crate::ai::provider::openai_compat::OpenAiCompatBackend;
+use crate::ai::provider::opencode::OpenCodeBackend;
 use crate::ai::provider::types::ChatMessage;
 use crate::ai::provider::AiBackend;
 use crate::config::{default_max_tokens_for, AiConfig};
@@ -78,12 +79,14 @@ impl JarvisAI {
                     .base_url
                     .as_deref()
                     .unwrap_or(default_base_url);
-                let user_agent = format!("jarvish/{}", env!("CARGO_PKG_VERSION"));
-                AiBackend::OpenAiCompat(OpenAiCompatBackend::new(
-                    &api_key,
-                    Some(base_url),
-                    Some(&user_agent),
-                )?)
+                let backend = if ai_config.base_url.is_some() {
+                    OpenCodeBackend::new(&api_key, base_url)?
+                } else if provider == "opencode-zen" {
+                    OpenCodeBackend::zen(&api_key)?
+                } else {
+                    OpenCodeBackend::go(&api_key)?
+                };
+                AiBackend::OpenCode(backend)
             }
             other => anyhow::bail!(
                 "Unsupported AI provider '{other}'. Supported providers: openai, anthropic, opencode-zen, opencode-go"

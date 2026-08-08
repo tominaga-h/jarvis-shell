@@ -4,13 +4,15 @@ use std::pin::Pin;
 
 use anyhow::{Context, Result};
 use async_openai::config::OpenAIConfig;
+use async_openai::error::OpenAIError;
 use async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessage,
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
     ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
     ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent, ChatCompletionTool,
-    ChatCompletionToolType, CreateChatCompletionRequest, FunctionCall, FunctionCallStream,
+    ChatCompletionToolType, CreateChatCompletionRequest, CreateChatCompletionStreamResponse,
+    FunctionCall, FunctionCallStream,
 };
 use async_openai::Client;
 use futures_util::{Stream, StreamExt};
@@ -54,7 +56,18 @@ impl OpenAiCompatBackend {
         })
     }
 
-    pub async fn create_stream(&self, request: ChatRequest) -> Result<ChatChunkStream> {
+    pub(crate) async fn create_openai_stream(
+        &self,
+        request: ChatRequest,
+    ) -> Result<
+        Pin<
+            Box<
+                dyn Stream<
+                        Item = std::result::Result<CreateChatCompletionStreamResponse, OpenAIError>,
+                    > + Send,
+            >,
+        >,
+    > {
         let request = to_openai_request(request);
         let stream = self
             .client
@@ -62,7 +75,11 @@ impl OpenAiCompatBackend {
             .create_stream(request)
             .await
             .context("Failed to create chat stream")?;
+        Ok(Box::pin(stream))
+    }
 
+    pub async fn create_stream(&self, request: ChatRequest) -> Result<ChatChunkStream> {
+        let stream = self.create_openai_stream(request).await?;
         Ok(Box::pin(stream.map(|result| {
             result
                 .map(convert_response)
@@ -231,7 +248,7 @@ fn from_openai_tool(tool: ChatCompletionTool) -> Result<ToolSpec> {
     })
 }
 
-fn convert_response(
+pub(crate) fn convert_response(
     response: async_openai::types::CreateChatCompletionStreamResponse,
 ) -> ChatChunk {
     let mut text = String::new();
@@ -423,14 +440,9 @@ mod tests {
     }
 
     #[test]
-    fn constructor_preserves_endpoint_and_user_agent_configuration() {
-        let backend = OpenAiCompatBackend::new(
-            "test-key",
-            Some("http://localhost:9000/v1"),
-            Some("jarvish/test"),
-        )
-        .unwrap();
+    fn constructor_preserves_base_url() {
+        let backend =
+            OpenAiCompatBackend::new("test-key", Some("http://localhost:9000/v1"), None).unwrap();
         assert_eq!(backend.base_url, "http://localhost:9000/v1");
-        assert_eq!(backend.user_agent.as_deref(), Some("jarvish/test"));
     }
 }

@@ -124,8 +124,8 @@ fn new_selects_opencode_zen_defaults() {
     };
 
     let ai = JarvisAI::new(&config).unwrap();
-    let crate::ai::provider::AiBackend::OpenAiCompat(backend) = &ai.backend else {
-        panic!("expected OpenAI-compatible backend");
+    let crate::ai::provider::AiBackend::OpenCode(backend) = &ai.backend else {
+        panic!("expected OpenCode backend");
     };
     assert_eq!(backend.base_url, "https://opencode.ai/zen/v1");
     assert_eq!(backend.user_agent.as_deref(), Some("jarvish/1.15.6"));
@@ -143,8 +143,8 @@ fn new_selects_opencode_go_default_url() {
     };
 
     let ai = JarvisAI::new(&config).unwrap();
-    let crate::ai::provider::AiBackend::OpenAiCompat(backend) = &ai.backend else {
-        panic!("expected OpenAI-compatible backend");
+    let crate::ai::provider::AiBackend::OpenCode(backend) = &ai.backend else {
+        panic!("expected OpenCode backend");
     };
     assert_eq!(backend.base_url, "https://opencode.ai/zen/go/v1");
 }
@@ -164,8 +164,8 @@ fn new_selects_opencode_go_and_honors_overrides() {
     };
 
     let ai = JarvisAI::new(&config).unwrap();
-    let crate::ai::provider::AiBackend::OpenAiCompat(backend) = &ai.backend else {
-        panic!("expected OpenAI-compatible backend");
+    let crate::ai::provider::AiBackend::OpenCode(backend) = &ai.backend else {
+        panic!("expected OpenCode backend");
     };
     assert_eq!(backend.base_url, "http://localhost:9999/v1");
     assert_eq!(ai.max_tokens, 8192);
