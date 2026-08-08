@@ -2,7 +2,6 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::Connection;
 use tracing::debug;
 
 use crate::engine::CommandResult;
@@ -75,34 +74,6 @@ impl super::BlackBox {
                     ],
                 )
                 .context("failed to insert command history")?;
-        }
-
-        Ok(())
-    }
-
-    /// DB スキーマのマイグレーションを実行する。
-    pub(super) fn migrate(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS command_history (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                command     TEXT    NOT NULL,
-                cwd         TEXT    NOT NULL,
-                exit_code   INTEGER NOT NULL,
-                stdout_hash TEXT,
-                stderr_hash TEXT,
-                created_at  TEXT    NOT NULL,
-                session_id  INTEGER
-            );",
-        )
-        .context("failed to create command_history table")?;
-
-        // 既存 DB に session_id カラムがない場合に追加する
-        let has_session_id = conn
-            .prepare("SELECT session_id FROM command_history LIMIT 0")
-            .is_ok();
-        if !has_session_id {
-            conn.execute_batch("ALTER TABLE command_history ADD COLUMN session_id INTEGER;")
-                .context("failed to add session_id column")?;
         }
 
         Ok(())

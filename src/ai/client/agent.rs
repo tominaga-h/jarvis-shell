@@ -60,7 +60,7 @@ impl super::JarvisAI {
                     "Stream interrupted by Ctrl-C, returning partial result"
                 );
                 if !stream_result.full_text.is_empty() {
-                    messages.push(super::build_text_assistant_message(
+                    messages.push(super::core::build_text_assistant_message(
                         stream_result.full_text.clone(),
                     ));
                 }
@@ -83,7 +83,7 @@ impl super::JarvisAI {
                 }
 
                 if !stream_result.full_text.is_empty() {
-                    messages.push(super::build_text_assistant_message(
+                    messages.push(super::core::build_text_assistant_message(
                         stream_result.full_text.clone(),
                     ));
                 }
