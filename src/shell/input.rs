@@ -389,7 +389,7 @@ impl Shell {
         let ai = match self.ai_client {
             Some(ref ai) => ai,
             None => {
-                let msg = "jarvish: AI pipe requires OPENAI_API_KEY to be set.\n";
+                let msg = "jarvish: AI pipe requires the configured provider API key to be set.\n";
                 eprint!("{msg}");
                 return CommandResult::error(msg.to_string(), 1);
             }

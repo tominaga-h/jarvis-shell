@@ -33,7 +33,7 @@ impl super::JarvisAI {
                 messages: messages.clone(),
                 tools: Some(tool_defs.clone()),
                 temperature: Some(self.temperature),
-                max_tokens: None,
+                max_tokens: Some(self.max_tokens),
             };
 
             debug!(

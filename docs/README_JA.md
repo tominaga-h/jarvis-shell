@@ -142,10 +142,11 @@ update --check --local            # ローカルバイナリのバージョン�
 
 ## ⚙️ セットアップと設定
 
-OpenAI API キーを環境変数に設定してください：
+選択したプロバイダの API キーを環境変数に設定してください：
 
 ```bash
 export OPENAI_API_KEY="sk-..."
+# Anthropic の場合: export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
 > ※ `~/.config/jarvish/config.toml` の `[export]` セクションに記述することで自動設定も可能です。
@@ -156,7 +157,11 @@ export OPENAI_API_KEY="sk-..."
 
 ```toml
 [ai]
+provider = "openai"           # "openai" または "anthropic"
 model = "gpt-4o"              # 使用する AI モデル
+max_tokens = 8192              # Anthropic の省略時は 16384
+base_url = "https://..."      # API エンドポイントの任意上書き
+api_key_env = "MY_API_KEY"    # API キー環境変数名の任意上書き
 max_rounds = 10               # エージェントの自律ループ最大回数
 markdown_rendering = true     # AIの回答をMarkdownで綺麗に表示
 ai_pipe_max_chars = 50000     # AIパイプへの入力文字数上限（超過時は安全にFail-fast）

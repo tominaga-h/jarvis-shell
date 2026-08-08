@@ -143,10 +143,11 @@ After a successful update, jarvish automatically restarts to apply the new versi
 
 ## ⚙️ Setup and Configuration
 
-Set your OpenAI API key as an environment variable:
+Set the API key for your selected provider as an environment variable:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
+# For Anthropic: export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
 > You can also configure this in the `[export]` section of `~/.config/jarvish/config.toml` for automatic setup.
@@ -157,7 +158,11 @@ A default config file is automatically generated at `~/.config/jarvish/config.to
 
 ```toml
 [ai]
+provider = "openai"           # "openai" or "anthropic"
 model = "gpt-4o"              # AI model to use
+max_tokens = 8192              # Anthropic uses 16384 when omitted
+base_url = "https://..."      # Optional provider endpoint override
+api_key_env = "MY_API_KEY"    # Optional API key environment variable override
 max_rounds = 10               # Max agent loop rounds
 markdown_rendering = true     # Render AI responses as Markdown
 ai_pipe_max_chars = 50000     # Max characters for AI Pipe input (fail-fast on overflow)

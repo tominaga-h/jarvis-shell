@@ -13,7 +13,11 @@ impl super::JarvishConfig {
 # You can write setting like this:
 
 [ai]
+# provider = "openai"       # "openai" or "anthropic"
 # model = "gpt-4o"
+# max_tokens = 8192          # Anthropic defaults to 16384 when omitted
+# base_url = "https://..."   # Optional provider endpoint override
+# api_key_env = "MY_API_KEY" # Optional API key environment variable override
 # max_rounds = 10
 # markdown_rendering = true  # false にすると Markdown レンダリングを無効化
 # ai_pipe_max_chars = 50000

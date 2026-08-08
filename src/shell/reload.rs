@@ -88,7 +88,9 @@ impl Shell {
         let summary = format!(
             "Loaded {}\n\
              \x20 [ai]\n\
+             \x20\x20 provider: {}\n\
              \x20\x20 model: {}\n\
+             \x20\x20 max_tokens: {}\n\
              \x20\x20 max_rounds: {}\n\
              \x20\x20 markdown_rendering: {}\n\
              \x20\x20 ai_pipe_max_chars: {}\n\
@@ -105,7 +107,12 @@ impl Shell {
              \x20\x20 external_zsh_daemon: {}\n\
              \x20 [startup]  {} {}\n",
             path.display(),
+            config.ai.provider.as_str(),
             config.ai.model,
+            config
+                .ai
+                .max_tokens
+                .unwrap_or_else(|| crate::config::default_max_tokens_for(&config.ai.provider)),
             config.ai.max_rounds,
             config.ai.markdown_rendering,
             config.ai.ai_pipe_max_chars,

@@ -19,6 +19,17 @@ impl Drop for ApiKeyGuard {
     }
 }
 
+struct AnthropicApiKeyGuard(Option<String>);
+
+impl Drop for AnthropicApiKeyGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(key) => std::env::set_var("ANTHROPIC_API_KEY", key),
+            None => std::env::remove_var("ANTHROPIC_API_KEY"),
+        }
+    }
+}
+
 #[test]
 #[serial]
 fn new_succeeds_with_openai_key() {
@@ -57,4 +68,36 @@ fn update_config_does_not_rebuild_client() {
     assert_eq!(backend_address, &ai.backend as *const _);
     assert_eq!(ai.model, "another-model");
     assert_eq!(ai.temperature, 0.2);
+}
+
+#[test]
+#[serial]
+fn new_selects_anthropic_backend_and_default_max_tokens() {
+    let _guard = AnthropicApiKeyGuard(std::env::var("ANTHROPIC_API_KEY").ok());
+    std::env::set_var("ANTHROPIC_API_KEY", "test-anthropic-key");
+    let config = AiConfig {
+        provider: "anthropic".to_string(),
+        base_url: Some("http://127.0.0.1:1".to_string()),
+        ..AiConfig::default()
+    };
+
+    let ai = JarvisAI::new(&config).unwrap();
+    assert!(matches!(
+        ai.backend,
+        crate::ai::provider::AiBackend::Anthropic(_)
+    ));
+    assert_eq!(ai.max_tokens, 16_384);
+}
+
+#[test]
+#[serial]
+fn new_fails_without_anthropic_key() {
+    let _guard = AnthropicApiKeyGuard(std::env::var("ANTHROPIC_API_KEY").ok());
+    std::env::remove_var("ANTHROPIC_API_KEY");
+    let config = AiConfig {
+        provider: "anthropic".to_string(),
+        ..AiConfig::default()
+    };
+
+    assert!(JarvisAI::new(&config).is_err());
 }

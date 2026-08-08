@@ -7,7 +7,11 @@
 //!
 //! ```toml
 //! [ai]
+//! provider = "openai"
 //! model = "gpt-4o"
+//! max_tokens = 8192
+//! base_url = "https://..."
+//! api_key_env = "MY_API_KEY"
 //! max_rounds = 10
 //! markdown_rendering = true
 //! ai_pipe_max_chars = 50000
@@ -44,5 +48,6 @@ mod types;
 mod tests;
 
 pub use types::{
-    AiConfig, CompletionConfig, ExternalSetting, JarvishConfig, PromptConfig, StartupConfig,
+    default_max_tokens_for, AiConfig, CompletionConfig, ExternalSetting, JarvishConfig,
+    PromptConfig, StartupConfig,
 };

@@ -45,7 +45,7 @@ impl super::JarvisAI {
             messages,
             temperature: Some(self.temperature),
             tools: None,
-            max_tokens: None,
+            max_tokens: Some(self.max_tokens),
         };
 
         let raw = process_ai_pipe_stream(&self.backend, request, self.markdown_rendering).await?;
@@ -86,7 +86,7 @@ impl super::JarvisAI {
             messages,
             temperature: Some(self.temperature),
             tools: None,
-            max_tokens: None,
+            max_tokens: Some(self.max_tokens),
         };
 
         let raw = process_ai_pipe_stream(&self.backend, request, self.markdown_rendering).await?;

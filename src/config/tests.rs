@@ -1,4 +1,4 @@
-use super::{CompletionConfig, ExternalSetting, JarvishConfig};
+use super::{default_max_tokens_for, CompletionConfig, ExternalSetting, JarvishConfig};
 
 fn load_from_str(content: &str) -> JarvishConfig {
     toml::from_str(content).unwrap()
@@ -8,6 +8,8 @@ fn load_from_str(content: &str) -> JarvishConfig {
 fn default_config_has_expected_values() {
     let config = JarvishConfig::default();
     assert_eq!(config.ai.model, "gpt-4o");
+    assert_eq!(config.ai.provider, "openai");
+    assert_eq!(config.ai.max_tokens, None);
     assert_eq!(config.ai.max_rounds, 10);
     assert!(config.ai.markdown_rendering);
     assert!(config.ai.ignore_auto_investigation_cmds.is_empty());
@@ -27,6 +29,32 @@ fn default_config_has_expected_values() {
     assert_eq!(config.completion.external, "auto");
     assert_eq!(config.completion.external_timeout_ms, 400);
     assert!(config.completion.external_zsh_daemon);
+}
+
+#[test]
+fn provider_max_tokens_defaults_are_backward_compatible() {
+    assert_eq!(default_max_tokens_for("openai"), 8192);
+    assert_eq!(default_max_tokens_for("anthropic"), 16384);
+    assert_eq!(default_max_tokens_for("opencode-zen"), 8192);
+    assert_eq!(default_max_tokens_for("opencode-go"), 8192);
+}
+
+#[test]
+fn parse_anthropic_ai_config() {
+    let config = load_from_str(
+        r#"
+[ai]
+provider = "anthropic"
+model = "claude-sonnet-5"
+max_tokens = 16384
+base_url = "http://localhost:1234"
+api_key_env = "TEST_ANTHROPIC_KEY"
+"#,
+    );
+    assert_eq!(config.ai.provider, "anthropic");
+    assert_eq!(config.ai.max_tokens, Some(16384));
+    assert_eq!(config.ai.base_url.as_deref(), Some("http://localhost:1234"));
+    assert_eq!(config.ai.api_key_env.as_deref(), Some("TEST_ANTHROPIC_KEY"));
 }
 
 #[test]

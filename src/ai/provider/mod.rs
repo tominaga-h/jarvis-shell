@@ -2,9 +2,11 @@
 
 use anyhow::Result;
 
+pub mod anthropic;
 pub mod openai_compat;
 pub mod types;
 
+use anthropic::AnthropicBackend;
 use openai_compat::{ChatChunkStream, OpenAiCompatBackend};
 use types::{ChatChunk, ChatRequest};
 
@@ -12,12 +14,15 @@ use types::{ChatChunk, ChatRequest};
 pub enum AiBackend {
     /// OpenAI and OpenAI-compatible Chat Completions APIs.
     OpenAiCompat(OpenAiCompatBackend),
+    /// Anthropic Messages API with native SSE support.
+    Anthropic(AnthropicBackend),
 }
 
 impl AiBackend {
     pub async fn create_stream(&self, request: ChatRequest) -> Result<ChatChunkStream> {
         match self {
             Self::OpenAiCompat(backend) => backend.create_stream(request).await,
+            Self::Anthropic(backend) => backend.create_stream(request).await,
         }
     }
 }
