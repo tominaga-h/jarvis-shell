@@ -80,7 +80,11 @@ impl Shell {
         if self.ai_client.is_none() {
             offline.push("AI module offline");
         }
-        crate::cli::banner::print_welcome(&offline);
+        let ai_info = self
+            .ai_client
+            .as_ref()
+            .map(|ai| (ai.provider.as_str(), ai.model.as_str()));
+        crate::cli::banner::print_welcome(&offline, ai_info);
 
         // バックグラウンドでバージョンチェックを実行（24時間キャッシュ付き）
         let update_check = tokio::spawn(crate::cli::update_check::check_for_update_notification());

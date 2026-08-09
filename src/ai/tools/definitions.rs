@@ -2,19 +2,15 @@
 //!
 //! OpenAI Function Calling で使用するツールの定義を管理する。
 
-use async_openai::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
+use crate::ai::provider::types::ToolSpec;
 
 /// execute_shell_command ツールの定義
-pub fn shell_command_tool() -> ChatCompletionTool {
-    ChatCompletionTool {
-        r#type: ChatCompletionToolType::Function,
-        function: FunctionObject {
-            name: "execute_shell_command".to_string(),
-            description: Some(
-                "Execute a shell command. Use this when the user's input is a shell command."
-                    .to_string(),
-            ),
-            parameters: Some(serde_json::json!({
+pub fn shell_command_tool() -> ToolSpec {
+    ToolSpec {
+        name: "execute_shell_command".to_string(),
+        description: "Execute a shell command. Use this when the user's input is a shell command."
+            .to_string(),
+        parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": {
@@ -23,23 +19,18 @@ pub fn shell_command_tool() -> ChatCompletionTool {
                     }
                 },
                 "required": ["command"]
-            })),
-            strict: None,
-        },
+        }),
     }
 }
 
 /// read_file ツールの定義
-pub fn read_file_tool() -> ChatCompletionTool {
-    ChatCompletionTool {
-        r#type: ChatCompletionToolType::Function,
-        function: FunctionObject {
-            name: "read_file".to_string(),
-            description: Some(
+pub fn read_file_tool() -> ToolSpec {
+    ToolSpec {
+        name: "read_file".to_string(),
+        description:
                 "Read the contents of a file. Use this to inspect a file before editing it. The path is relative to the user's current working directory."
                     .to_string(),
-            ),
-            parameters: Some(serde_json::json!({
+        parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
@@ -48,23 +39,18 @@ pub fn read_file_tool() -> ChatCompletionTool {
                     }
                 },
                 "required": ["path"]
-            })),
-            strict: None,
-        },
+        }),
     }
 }
 
 /// write_file ツールの定義
-pub fn write_file_tool() -> ChatCompletionTool {
-    ChatCompletionTool {
-        r#type: ChatCompletionToolType::Function,
-        function: FunctionObject {
-            name: "write_file".to_string(),
-            description: Some(
+pub fn write_file_tool() -> ToolSpec {
+    ToolSpec {
+        name: "write_file".to_string(),
+        description:
                 "Write content to a file, creating it if it doesn't exist or overwriting if it does. Always read_file first before writing to preserve existing content. The path is relative to the user's current working directory."
                     .to_string(),
-            ),
-            parameters: Some(serde_json::json!({
+        parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
@@ -77,26 +63,21 @@ pub fn write_file_tool() -> ChatCompletionTool {
                     }
                 },
                 "required": ["path", "content"]
-            })),
-            strict: None,
-        },
+        }),
     }
 }
 
 /// search_replace ツールの定義
-pub fn search_replace_tool() -> ChatCompletionTool {
-    ChatCompletionTool {
-        r#type: ChatCompletionToolType::Function,
-        function: FunctionObject {
-            name: "search_replace".to_string(),
-            description: Some(
+pub fn search_replace_tool() -> ToolSpec {
+    ToolSpec {
+        name: "search_replace".to_string(),
+        description:
                 "Make a targeted edit to a file by replacing an exact string match. \
                  Preferred over write_file for small, focused changes. \
                  The old_string must match exactly one location in the file (including whitespace/indentation). \
                  The path is relative to the user's current working directory."
                     .to_string(),
-            ),
-            parameters: Some(serde_json::json!({
+        parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
@@ -113,8 +94,6 @@ pub fn search_replace_tool() -> ChatCompletionTool {
                     }
                 },
                 "required": ["path", "old_string", "new_string"]
-            })),
-            strict: None,
-        },
+        }),
     }
 }

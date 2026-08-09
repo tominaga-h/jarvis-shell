@@ -1,10 +1,7 @@
 use anyhow::Result;
-use async_openai::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent,
-};
 use tracing::debug;
 
+use crate::ai::provider::types::ChatMessage;
 use crate::ai::types::{AiResponse, ConversationState};
 
 use super::JarvisAI;
@@ -22,12 +19,7 @@ impl JarvisAI {
             "continue_conversation() called"
         );
 
-        state.messages.push(ChatCompletionRequestMessage::User(
-            ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(input.to_string()),
-                name: None,
-            },
-        ));
+        state.messages.push(ChatMessage::User(input.to_string()));
 
         self.run_agent_loop(&mut state.messages).await
     }

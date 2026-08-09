@@ -1,0 +1,8 @@
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_refusal","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","stop_reason":null}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"refusal"}}
+
+event: message_stop
+data: {"type":"message_stop"}

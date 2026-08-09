@@ -7,11 +7,14 @@
 
 use std::sync::{Arc, RwLock};
 
+use crate::ai::JarvisAI;
 use crate::cli::completer::{
     format_external_binaries_display, format_external_summary, shutdown_shared_daemon,
     ExternalCompletionSettings, SharedDaemonSlot,
 };
-use crate::config::{CompletionConfig, JarvishConfig};
+use crate::config::{
+    default_api_key_env_for, default_base_url_for, CompletionConfig, JarvishConfig,
+};
 use crate::engine::CommandResult;
 
 use super::Shell;
@@ -41,10 +44,43 @@ impl Shell {
         Self::apply_exports(&config);
 
         // [ai] を反映
-        if let Some(ref mut ai) = self.ai_client {
-            ai.update_config(&config.ai);
-        }
         self.ignore_auto_investigation_cmds = config.ai.ignore_auto_investigation_cmds.clone();
+
+        // バックエンド構成が変わった場合はクライアントを再構築する。
+        // 起動時にキー未設定で None だった場合も、source 後に新規作成する。
+        let existing_needs_rebuild = self
+            .ai_client
+            .as_ref()
+            .map(|ai| ai.needs_rebuild(&config.ai));
+        let new_client = JarvisAI::new(&config.ai);
+        match (existing_needs_rebuild, new_client) {
+            (Some(true), Ok(new_ai)) => {
+                tracing::debug!(
+                    target: "jarvish::shell::reload",
+                    "AI backend config changed, rebuilding client"
+                );
+                self.ai_client = Some(new_ai);
+            }
+            (Some(false), Ok(_new_ai)) => {
+                if let Some(ai) = self.ai_client.as_mut() {
+                    ai.update_config(&config.ai);
+                }
+            }
+            (None, Ok(new_ai)) => {
+                tracing::debug!(
+                    target: "jarvish::shell::reload",
+                    "AI client was None, creating new one (None -> Some transition)"
+                );
+                self.ai_client = Some(new_ai);
+            }
+            (_, Err(error)) => {
+                tracing::warn!(
+                    target: "jarvish::shell::reload",
+                    error = %error,
+                    "AI client rebuild failed; keeping existing client if any"
+                );
+            }
+        }
 
         // [prompt] を反映（starship フラグ変更時はプロンプト自体を入れ替え）
         self.prompt = Self::build_prompt(
@@ -74,6 +110,16 @@ impl Shell {
         self.startup_commands = config.startup.commands.clone();
 
         // サマリー出力（config.toml のセクション順: ai, alias, export, prompt, completion, startup）
+        let ai_base_url = config
+            .ai
+            .base_url
+            .as_deref()
+            .unwrap_or(default_base_url_for(&config.ai.provider));
+        let ai_api_key_env = config
+            .ai
+            .api_key_env
+            .as_deref()
+            .unwrap_or(default_api_key_env_for(&config.ai.provider));
         let ignore_cmds_display = if config.ai.ignore_auto_investigation_cmds.is_empty() {
             "none".to_string()
         } else {
@@ -88,8 +134,12 @@ impl Shell {
         let summary = format!(
             "Loaded {}\n\
              \x20 [ai]\n\
+             \x20\x20 provider: {}\n\
              \x20\x20 model: {}\n\
+             \x20\x20 max_tokens: {}\n\
              \x20\x20 max_rounds: {}\n\
+             \x20\x20 base_url: {}\n\
+             \x20\x20 api_key_env: {}\n\
              \x20\x20 markdown_rendering: {}\n\
              \x20\x20 ai_pipe_max_chars: {}\n\
              \x20\x20 ai_redirect_max_chars: {}\n\
@@ -105,8 +155,15 @@ impl Shell {
              \x20\x20 external_zsh_daemon: {}\n\
              \x20 [startup]  {} {}\n",
             path.display(),
+            config.ai.provider.as_str(),
             config.ai.model,
+            config
+                .ai
+                .max_tokens
+                .unwrap_or_else(|| crate::config::default_max_tokens_for(&config.ai.provider)),
             config.ai.max_rounds,
+            ai_base_url,
+            ai_api_key_env,
             config.ai.markdown_rendering,
             config.ai.ai_pipe_max_chars,
             config.ai.ai_redirect_max_chars,

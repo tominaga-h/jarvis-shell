@@ -1,15 +1,17 @@
 use anyhow::{Context, Result};
-use async_openai::types::{
-    ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage,
-};
-use async_openai::{config::OpenAIConfig, Client};
 
-use crate::config::AiConfig;
+use crate::ai::provider::anthropic::AnthropicBackend;
+use crate::ai::provider::openai_compat::OpenAiCompatBackend;
+use crate::ai::provider::opencode::OpenCodeBackend;
+use crate::ai::provider::types::ChatMessage;
+use crate::ai::provider::AiBackend;
+use crate::config::{
+    default_api_key_env_for, default_base_url_for, default_max_tokens_for, AiConfig,
+};
 
 /// J.A.R.V.I.S. AI クライアント
 pub struct JarvisAI {
-    pub(crate) client: Client<OpenAIConfig>,
+    pub(crate) backend: AiBackend,
     /// 使用する AI モデル名
     pub(crate) model: String,
     /// エージェントループの最大ラウンド数
@@ -22,41 +24,109 @@ pub struct JarvisAI {
     pub(crate) ai_redirect_max_chars: usize,
     /// 回答のランダム性（0.0 = 決定的、2.0 = 最大ランダム）
     pub(crate) temperature: f32,
+    /// プロバイダへ送信する最大トークン数
+    pub(crate) max_tokens: u32,
+    /// 現在のバックエンド構成に対応するプロバイダ
+    pub(crate) provider: String,
+    /// 現在のバックエンドの effective base URL
+    pub(crate) base_url: String,
+    /// 現在のバックエンドが使用する API キー環境変数
+    pub(crate) api_key_env: String,
 }
 
 /// テキストのみのアシスタントメッセージを構築する。
-pub(crate) fn build_text_assistant_message(text: String) -> ChatCompletionRequestMessage {
-    ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-        content: Some(ChatCompletionRequestAssistantMessageContent::Text(text)),
-        refusal: None,
-        name: None,
-        audio: None,
-        tool_calls: None,
-        #[allow(deprecated)]
-        function_call: None,
-    })
+pub(crate) fn build_text_assistant_message(text: String) -> ChatMessage {
+    ChatMessage::Assistant {
+        text: Some(text),
+        tool_calls: Vec::new(),
+    }
 }
 
 impl JarvisAI {
-    /// OPENAI_API_KEY 環境変数から AI クライアントを初期化する。
+    /// 設定されたプロバイダの API クライアントを初期化する。
     pub fn new(ai_config: &AiConfig) -> Result<Self> {
-        let api_key = std::env::var("OPENAI_API_KEY")
-            .context("OPENAI_API_KEY is not set. AI features are disabled.")?;
+        let provider = ai_config.provider.as_str();
+        let default_key_env = default_api_key_env_for(provider);
+        let key_env = ai_config.api_key_env.as_deref().unwrap_or(default_key_env);
+        let api_key = std::env::var(key_env)
+            .with_context(|| format!("{key_env} is not set. AI features are disabled."))?;
 
-        if api_key.is_empty() || api_key == "your_openai_api_key" {
-            anyhow::bail!("OPENAI_API_KEY is not configured. Please set a valid API key in .env");
+        let placeholder = match provider {
+            "anthropic" => "your_anthropic_api_key",
+            "opencode-zen" | "opencode-go" => "your_opencode_api_key",
+            _ => "your_openai_api_key",
+        };
+        if api_key.is_empty() || api_key == placeholder {
+            anyhow::bail!("{key_env} is not configured. Please set a valid API key in .env");
         }
 
-        let config = OpenAIConfig::new().with_api_key(&api_key);
-        let client = Client::with_config(config);
+        let backend = match provider {
+            "anthropic" => {
+                let base_url = ai_config
+                    .base_url
+                    .as_deref()
+                    .unwrap_or(default_base_url_for(provider));
+                AiBackend::Anthropic(AnthropicBackend::new(&api_key, base_url)?)
+            }
+            "openai" => AiBackend::OpenAiCompat(OpenAiCompatBackend::new(
+                &api_key,
+                ai_config.base_url.as_deref(),
+                None,
+            )?),
+            "opencode-zen" | "opencode-go" => {
+                let default_base_url = default_base_url_for(provider);
+                let base_url = ai_config
+                    .base_url
+                    .as_deref()
+                    .unwrap_or(default_base_url);
+                let backend = if ai_config.base_url.is_some() {
+                    OpenCodeBackend::new(&api_key, base_url)?
+                } else if provider == "opencode-zen" {
+                    OpenCodeBackend::zen(&api_key)?
+                } else {
+                    OpenCodeBackend::go(&api_key)?
+                };
+                AiBackend::OpenCode(backend)
+            }
+            other => anyhow::bail!(
+                "Unsupported AI provider '{other}'. Supported providers: openai, anthropic, opencode-zen, opencode-go"
+            ),
+        };
         Ok(Self {
-            client,
+            backend,
             model: ai_config.model.clone(),
             max_rounds: ai_config.max_rounds,
             markdown_rendering: ai_config.markdown_rendering,
             ai_pipe_max_chars: ai_config.ai_pipe_max_chars,
             ai_redirect_max_chars: ai_config.ai_redirect_max_chars,
             temperature: ai_config.temperature,
+            max_tokens: ai_config
+                .max_tokens
+                .unwrap_or_else(|| default_max_tokens_for(provider)),
+            provider: provider.to_string(),
+            base_url: ai_config
+                .base_url
+                .as_deref()
+                .unwrap_or(default_base_url_for(provider))
+                .to_string(),
+            api_key_env: key_env.to_string(),
         })
+    }
+
+    /// 現在のクライアントが新しい設定と互換かを判定する。
+    /// 互換な軽微な設定変更は `update_config()` で反映できる。
+    pub fn needs_rebuild(&self, new_config: &AiConfig) -> bool {
+        self.model != new_config.model
+            || self.provider != new_config.provider
+            || self.base_url
+                != new_config
+                    .base_url
+                    .as_deref()
+                    .unwrap_or(default_base_url_for(&new_config.provider))
+            || self.api_key_env
+                != new_config
+                    .api_key_env
+                    .as_deref()
+                    .unwrap_or(default_api_key_env_for(&new_config.provider))
     }
 }
