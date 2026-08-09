@@ -26,8 +26,16 @@ pub struct JarvishConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AiConfig {
+    /// 使用する AI プロバイダ。`openai`（既定）、`anthropic`、`opencode-zen`、`opencode-go`。
+    pub provider: String,
     /// 使用する AI モデル名
     pub model: String,
+    /// 生成する最大トークン数。`None` の場合は OpenAI/OpenCode が 8192、Anthropic が 16384。
+    pub max_tokens: Option<u32>,
+    /// API エンドポイントの上書き。`None` の場合はプロバイダ固有の URL（例: OpenCode Zen）。
+    pub base_url: Option<String>,
+    /// API キーを読む環境変数名の上書き。`None` の場合はプロバイダ固有の変数を使用する。
+    pub api_key_env: Option<String>,
     /// エージェントループの最大ラウンド数
     pub max_rounds: usize,
     /// AI レスポンスを Markdown としてレンダリングするか
@@ -45,7 +53,11 @@ pub struct AiConfig {
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
+            provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
+            max_tokens: None,
+            base_url: None,
+            api_key_env: None,
             max_rounds: 10,
             markdown_rendering: true,
             ai_pipe_max_chars: 50_000,
@@ -53,6 +65,36 @@ impl Default for AiConfig {
             temperature: 0.5,
             ignore_auto_investigation_cmds: Vec::new(),
         }
+    }
+}
+
+/// プロバイダごとの `max_tokens` 既定値を返す。
+pub fn default_max_tokens_for(provider: &str) -> u32 {
+    match provider {
+        "anthropic" => 16_384,
+        "openai" | "opencode-zen" | "opencode-go" => 8_192,
+        _ => 8_192,
+    }
+}
+
+/// プロバイダごとのデフォルト API キー環境変数名を返す。
+pub fn default_api_key_env_for(provider: &str) -> &'static str {
+    match provider {
+        "openai" => "OPENAI_API_KEY",
+        "anthropic" => "ANTHROPIC_API_KEY",
+        "opencode-zen" | "opencode-go" => "OPENCODE_API_KEY",
+        _ => "OPENAI_API_KEY",
+    }
+}
+
+/// プロバイダごとのデフォルト base URL を返す。
+pub fn default_base_url_for(provider: &str) -> &'static str {
+    match provider {
+        "openai" => "",
+        "anthropic" => "https://api.anthropic.com",
+        "opencode-zen" => "https://opencode.ai/zen/v1",
+        "opencode-go" => "https://opencode.ai/zen/go/v1",
+        _ => "",
     }
 }
 

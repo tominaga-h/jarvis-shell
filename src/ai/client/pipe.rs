@@ -4,14 +4,10 @@
 //! - `cmd > ai "prompt"` — リダイレクトモード（Jarvis が対話的に応答）
 
 use anyhow::Result;
-use async_openai::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
-    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
-};
 use tracing::debug;
 
 use crate::ai::prompts::{AI_PIPE_PROMPT, AI_REDIRECT_PROMPT};
+use crate::ai::provider::types::{ChatMessage, ChatRequest};
 use crate::ai::stream::process_ai_pipe_stream;
 
 impl super::JarvisAI {
@@ -39,28 +35,20 @@ impl super::JarvisAI {
 
         let user_message = format!("[User Instruction]\n{prompt}\n\n[Input Text]\n{stdin_text}");
 
-        let messages: Vec<ChatCompletionRequestMessage> = vec![
-            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                content: ChatCompletionRequestSystemMessageContent::Text(
-                    AI_PIPE_PROMPT.to_string(),
-                ),
-                name: None,
-            }),
-            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(user_message),
-                name: None,
-            }),
+        let messages = vec![
+            ChatMessage::System(AI_PIPE_PROMPT.to_string()),
+            ChatMessage::User(user_message),
         ];
 
-        let request = CreateChatCompletionRequest {
+        let request = ChatRequest {
             model: self.model.clone(),
             messages,
-            stream: Some(true),
             temperature: Some(self.temperature),
-            ..Default::default()
+            tools: None,
+            max_tokens: Some(self.max_tokens),
         };
 
-        let raw = process_ai_pipe_stream(&self.client, request, self.markdown_rendering).await?;
+        let raw = process_ai_pipe_stream(&self.backend, request, self.markdown_rendering).await?;
         Ok(sanitize_ai_pipe_output(&raw))
     }
 
@@ -88,28 +76,20 @@ impl super::JarvisAI {
 
         let user_message = format!("[User Instruction]\n{prompt}\n\n[Input Text]\n{stdin_text}");
 
-        let messages: Vec<ChatCompletionRequestMessage> = vec![
-            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                content: ChatCompletionRequestSystemMessageContent::Text(
-                    AI_REDIRECT_PROMPT.to_string(),
-                ),
-                name: None,
-            }),
-            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(user_message),
-                name: None,
-            }),
+        let messages = vec![
+            ChatMessage::System(AI_REDIRECT_PROMPT.to_string()),
+            ChatMessage::User(user_message),
         ];
 
-        let request = CreateChatCompletionRequest {
+        let request = ChatRequest {
             model: self.model.clone(),
             messages,
-            stream: Some(true),
             temperature: Some(self.temperature),
-            ..Default::default()
+            tools: None,
+            max_tokens: Some(self.max_tokens),
         };
 
-        let raw = process_ai_pipe_stream(&self.client, request, self.markdown_rendering).await?;
+        let raw = process_ai_pipe_stream(&self.backend, request, self.markdown_rendering).await?;
         Ok(raw)
     }
 }

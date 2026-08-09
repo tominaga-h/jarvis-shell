@@ -1,0 +1,2 @@
+event: error
+data: {"type":"error","error":{"type":"invalid_request_error","message":"mock Anthropic error"},"request_id":"req_mock_1"}

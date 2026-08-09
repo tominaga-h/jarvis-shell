@@ -55,7 +55,7 @@
 - **Database**: rusqlite (SQLite)
 - **Hashing & Compression**: sha2 (SHA-256), zstd (ログ圧縮)
 - **Directories**: directories (クロスプラットフォームなパス解決)
-- **AI Client**: async-openai
+- **AI Client**: provider-pluggable (OpenAI / Anthropic / OpenCode Zen/Go)
 - **Config**: config, serde
 
 ## 実装ロードマップ

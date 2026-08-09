@@ -1,25 +1,25 @@
 //! AI ストリーミングレスポンス処理
 //!
-//! OpenAI API からのストリーミングレスポンスを処理し、
-//! テキスト応答と Tool Call を分離して返す。
+//! プロバイダ中立のストリームを消費し、テキスト応答と Tool Call を分離して返す。
 //! Ctrl-C (SIGINT) による中断にも対応する。
 
 use anyhow::{Context, Result};
-use async_openai::{config::OpenAIConfig, types::CreateChatCompletionRequest, Client};
 use futures_util::StreamExt;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{debug, info, warn};
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::time::Instant;
 
+use crate::ai::provider::types::{ChatChunk, ChatRequest};
+use crate::ai::provider::AiBackend;
 use crate::cli::color::red;
 use crate::cli::jarvis::{
-    jarvis_print_plain, jarvis_render_markdown, jarvis_spinner, render_markdown,
+    jarvis_print_plain, jarvis_render_markdown, jarvis_spinner, render_markdown, JarvisSpinner,
 };
 
 use super::markdown::is_markdown;
-use super::tools::call::{accumulate_tool_call, ToolCallAccumulator};
+use super::tools::call::{accumulate_tool_call_delta, ToolCallAccumulator};
 
 /// ストリーム処理の結果
 pub struct StreamResult {
@@ -31,34 +31,65 @@ pub struct StreamResult {
     pub interrupted: bool,
 }
 
-/// ストリーミングレスポンスを処理し、テキストと Tool Call を分離して返す。
-///
-/// `is_first_round`: true の場合、初回ラウンドでスピナーを表示する。
-/// 後続ラウンドではツール実行中のメッセージを表示する。
+/// エージェント用ストリームを処理する。
 pub async fn process_stream(
-    client: &Client<OpenAIConfig>,
-    request: CreateChatCompletionRequest,
+    backend: &AiBackend,
+    request: ChatRequest,
     is_first_round: bool,
     markdown_rendering: bool,
 ) -> Result<StreamResult> {
-    // SIGINT (Ctrl-C) リスナーを作成。
-    // tokio::signal::unix::signal() は作成時点以降のシグナルのみ受け取るため、
-    // コマンド実行中などに発生した過去の SIGINT の影響を受けない。
+    process_stream_common(
+        backend,
+        request,
+        is_first_round,
+        markdown_rendering,
+        Some(Vec::new()),
+        false,
+    )
+    .await
+}
+
+/// AI パイプ用ストリームを処理する。
+pub async fn process_ai_pipe_stream(
+    backend: &AiBackend,
+    request: ChatRequest,
+    markdown_rendering: bool,
+) -> Result<String> {
+    let result =
+        process_stream_common(backend, request, false, markdown_rendering, None, true).await?;
+    Ok(result.full_text)
+}
+
+/// エージェントとパイプで共有する SSE 消費処理。
+///
+/// `tools` が `Some` の場合は Tool Call を蓄積し、`None` の場合は従来の
+/// パイプ動作どおり Tool Call を無視する。
+async fn process_stream_common(
+    backend: &AiBackend,
+    request: ChatRequest,
+    is_first_round: bool,
+    markdown_rendering: bool,
+    tools: Option<Vec<ToolCallAccumulator>>,
+    pipe_mode: bool,
+) -> Result<StreamResult> {
+    let stream_start_time = std::time::Instant::now();
     let mut sigint =
         signal(SignalKind::interrupt()).context("Failed to register SIGINT handler")?;
+    let mut spinner = jarvis_spinner();
+    tracing::debug!(
+        target: "jarvish::ai::stream",
+        stdout_is_tty = std::io::stdout().is_terminal(),
+        stderr_is_tty = std::io::stderr().is_terminal(),
+        "stream processing environment check"
+    );
 
-    // ローディングスピナーを開始
-    let spinner = jarvis_spinner();
-
-    // API 接続待ちも Ctrl-C で中断できるようにする
-    let chat = client.chat();
     let mut stream = tokio::select! {
-        result = chat.create_stream(request) => {
+        result = backend.create_stream(request) => {
             match result {
-                Ok(s) => s,
-                Err(e) => {
+                Ok(stream) => stream,
+                Err(error) => {
                     spinner.finish_and_clear();
-                    return Err(anyhow::anyhow!(e).context("Failed to create chat stream"));
+                    return Err(error);
                 }
             }
         }
@@ -67,94 +98,57 @@ pub async fn process_stream(
             spinner.finish_and_clear();
             return Ok(StreamResult {
                 full_text: String::new(),
-                tool_calls: vec![],
+                tool_calls: tools.unwrap_or_default(),
                 interrupted: true,
             });
         }
     };
 
-    debug!("Stream created successfully, starting to process chunks");
+    if pipe_mode {
+        spinner.set_message("Thinking...");
+    }
 
-    // ストリーミング処理: テキスト応答と Tool Call を分離して処理
-    let mut full_text = String::new();
-    let mut tool_calls: Vec<ToolCallAccumulator> = Vec::new();
-    let mut started_text = false;
-    let mut chunk_count: u32 = 0;
+    let mut state = StreamState {
+        full_text: String::new(),
+        started_text: false,
+        tools,
+        spinner,
+        last_spinner_update: Instant::now(),
+        markdown_rendering,
+        pipe_mode,
+        chunk_count: 0,
+        stream_start_time,
+    };
     let mut interrupted = false;
-    let mut last_spinner_update = Instant::now();
 
     loop {
         tokio::select! {
             chunk = stream.next() => {
                 let result = match chunk {
-                    Some(r) => r,
-                    None => break, // ストリーム終了
+                    Some(result) => result,
+                    None => break,
                 };
-
-                chunk_count += 1;
-                let response = match result {
-                    Ok(r) => r,
-                    Err(e) => {
-                        // ストリームエラーは警告を出して中断
+                state.chunk_count += 1;
+                let chunk = match result {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
                         warn!(
-                            error = %e,
-                            chunks_received = chunk_count,
-                            text_so_far_len = full_text.len(),
+                            error = %error,
+                            chunks_received = state.chunk_count,
+                            text_so_far_len = state.full_text.len(),
                             "Stream error occurred"
                         );
-                        spinner.finish_and_clear();
-                        anyhow::bail!("Stream error: {e}");
+                        state.spinner.finish_and_clear();
+                        anyhow::bail!("Stream error: {error}");
                     }
                 };
-
-                for choice in &response.choices {
-                    let delta = &choice.delta;
-
-                    // テキスト応答の処理（バッファリング）
-                    if let Some(ref content) = delta.content {
-                        debug!(
-                            chunk = chunk_count,
-                            content_length = content.len(),
-                            has_content = true,
-                            content = %content,
-                            "Received text chunk"
-                        );
-                        full_text.push_str(content);
-                        started_text = true;
-                        if last_spinner_update.elapsed().as_millis() > 100 {
-                            spinner.set_message(
-                                format!("Buffering stream... {} bytes", full_text.len()),
-                            );
-                            last_spinner_update = Instant::now();
-                        }
-                    }
-
-                    // Tool Call の処理
-                    if let Some(ref tc_chunks) = delta.tool_calls {
-                        debug!(
-                            chunk = chunk_count,
-                            tool_call_chunks = tc_chunks.len(),
-                            "Received tool call chunk"
-                        );
-                        for chunk in tc_chunks {
-                            accumulate_tool_call(&mut tool_calls, chunk);
-                        }
-                    }
-
-                    // content も tool_calls もない場合のログ
-                    if delta.content.is_none() && delta.tool_calls.is_none() {
-                        debug!(
-                            chunk = chunk_count,
-                            role = ?delta.role,
-                            "Received chunk with no content and no tool_calls"
-                        );
-                    }
-                }
+                consume_chunk(&mut state, chunk);
             }
             _ = sigint.recv() => {
                 info!(
-                    chunks_received = chunk_count,
-                    text_so_far_len = full_text.len(),
+                    interrupted_at_chunk = state.chunk_count,
+                    interrupted_at_text_len = state.full_text.len(),
+                    elapsed_ms = stream_start_time.elapsed().as_millis() as u64,
                     "Ctrl-C received during AI streaming, interrupting"
                 );
                 interrupted = true;
@@ -163,156 +157,125 @@ pub async fn process_stream(
         }
     }
 
-    // ストリーム完了 or 中断: Markdown レンダリングして表示
-    if started_text {
-        spinner.set_message("Rendering...");
-    }
-    spinner.finish_and_clear();
-
-    if started_text {
-        let render = if markdown_rendering && is_markdown(&full_text) {
-            jarvis_render_markdown
-        } else {
-            jarvis_print_plain
-        };
-        if interrupted {
-            let display_text = format!("{}\n\n{}", full_text, red("[interrupted]"));
+    if pipe_mode {
+        finish_pipe_output(
+            &mut state.spinner,
+            &state.full_text,
+            state.started_text,
+            interrupted,
+            markdown_rendering,
+        );
+    } else {
+        if state.started_text {
+            state.spinner.set_message("Rendering...");
+        }
+        state.spinner.finish_and_clear();
+        if state.started_text {
+            let render: fn(&str) = if markdown_rendering && is_markdown(&state.full_text) {
+                jarvis_render_markdown
+            } else {
+                jarvis_print_plain
+            };
+            let display_text = if interrupted {
+                format!("{}\n\n{}", state.full_text, red("[interrupted]"))
+            } else {
+                state.full_text.clone()
+            };
             render(&display_text);
-        } else {
-            render(&full_text);
+            let mut stdout_handle = std::io::stdout();
+            let flush_result = stdout_handle.flush();
+            tracing::debug!(
+                target: "jarvish::ai::stream",
+                flush_ok = flush_result.is_ok(),
+                "post-render flush attempted"
+            );
         }
     }
 
     debug!(
-        total_chunks = chunk_count,
-        full_text_length = full_text.len(),
-        tool_calls_count = tool_calls.len(),
-        started_text = started_text,
-        is_first_round = is_first_round,
-        interrupted = interrupted,
+        total_chunks = state.chunk_count,
+        full_text_length = state.full_text.len(),
+        duration_ms = stream_start_time.elapsed().as_millis() as u64,
+        tool_calls_count = state.tools.as_ref().map_or(0, Vec::len),
+        started_text = state.started_text,
+        is_first_round,
+        interrupted,
+        pipe_mode = state.pipe_mode,
         "Stream processing completed"
     );
 
     Ok(StreamResult {
-        full_text,
-        tool_calls,
+        full_text: state.full_text,
+        tool_calls: state.tools.unwrap_or_default(),
         interrupted,
     })
 }
 
-/// AI パイプ用ストリーミングレスポンスを処理する。
-///
-/// 通常の `process_stream()` とは異なり:
-/// - Jarvis ペルソナの装飾なし（🤵 プレフィックスなし）
-/// - Tool Call は無視（テキスト応答のみ）
-///
-/// `markdown_rendering` が `true` の場合:
-///   バッファリングモードで動作し、完了後に `is_markdown()` で判定。
-///   Markdown であれば `render_markdown()` でレンダリングする。
-///
-/// `markdown_rendering` が `false` の場合:
-///   従来通りチャンクを即時 stdout に流す（tee パターン）。
-///
-/// 返却値: AI が出力したテキスト全文（`CommandResult.stdout` に格納用）
-pub async fn process_ai_pipe_stream(
-    client: &Client<OpenAIConfig>,
-    request: CreateChatCompletionRequest,
+struct StreamState {
+    full_text: String,
+    started_text: bool,
+    tools: Option<Vec<ToolCallAccumulator>>,
+    spinner: JarvisSpinner,
+    last_spinner_update: Instant,
     markdown_rendering: bool,
-) -> Result<String> {
-    let mut sigint =
-        signal(SignalKind::interrupt()).context("Failed to register SIGINT handler")?;
+    pipe_mode: bool,
+    chunk_count: u32,
+    stream_start_time: Instant,
+}
 
-    let spinner = jarvis_spinner();
-
-    let chat = client.chat();
-    let mut stream = tokio::select! {
-        result = chat.create_stream(request) => {
-            match result {
-                Ok(s) => s,
-                Err(e) => {
-                    spinner.finish_and_clear();
-                    return Err(anyhow::anyhow!(e).context("Failed to create chat stream"));
-                }
-            }
+fn consume_chunk(state: &mut StreamState, chunk: ChatChunk) {
+    if let Some(content) = chunk.text_delta {
+        if state.pipe_mode && !state.started_text && !state.markdown_rendering {
+            state.spinner.finish_and_clear();
         }
-        _ = sigint.recv() => {
-            info!("Ctrl-C received while waiting for AI pipe API connection");
-            spinner.finish_and_clear();
-            return Ok(String::new());
-        }
-    };
-
-    spinner.set_message("Thinking...");
-
-    let mut full_text = String::new();
-    let mut started = false;
-    let mut interrupted = false;
-    let mut last_spinner_update = Instant::now();
-
-    loop {
-        tokio::select! {
-            chunk = stream.next() => {
-                let result = match chunk {
-                    Some(r) => r,
-                    None => break,
-                };
-
-                let response = match result {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!(error = %e, "AI pipe stream error");
-                        spinner.finish_and_clear();
-                        anyhow::bail!("Stream error: {e}");
-                    }
-                };
-
-                for choice in &response.choices {
-                    if let Some(ref content) = choice.delta.content {
-                        if !started {
-                            if !markdown_rendering {
-                                spinner.finish_and_clear();
-                            }
-                            started = true;
-                        }
-                        full_text.push_str(content);
-
-                        if markdown_rendering {
-                            if last_spinner_update.elapsed().as_millis() > 100 {
-                                spinner.set_message(
-                                    format!("Buffering stream... {} bytes", full_text.len()),
-                                );
-                                last_spinner_update = Instant::now();
-                            }
-                        } else {
-                            let mut out = std::io::stdout().lock();
-                            let _ = out.write_all(content.as_bytes());
-                            let _ = out.flush();
-                        }
-                    }
-                }
-            }
-            _ = sigint.recv() => {
-                info!("Ctrl-C received during AI pipe streaming");
-                interrupted = true;
-                break;
-            }
+        state.full_text.push_str(&content);
+        state.started_text = true;
+        if (!state.pipe_mode || state.markdown_rendering)
+            && state.last_spinner_update.elapsed().as_millis() > 100
+        {
+            let elapsed_secs = state.stream_start_time.elapsed().as_secs();
+            let message = format!(
+                "Buffering... {}s elapsed, {} bytes ({} chunks)",
+                elapsed_secs,
+                state.full_text.len(),
+                state.chunk_count
+            );
+            state.spinner.set_message(&message);
+            state.last_spinner_update = Instant::now();
+        } else if state.pipe_mode && !state.markdown_rendering {
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(content.as_bytes());
+            let _ = out.flush();
         }
     }
 
+    if let Some(tool_calls) = &mut state.tools {
+        for delta in chunk.tool_call_deltas {
+            accumulate_tool_call_delta(tool_calls, &delta);
+        }
+    }
+}
+
+fn finish_pipe_output(
+    spinner: &mut JarvisSpinner,
+    full_text: &str,
+    started: bool,
+    interrupted: bool,
+    markdown_rendering: bool,
+) {
     if markdown_rendering {
         if started {
             spinner.set_message("Rendering...");
         }
         spinner.finish_and_clear();
-
         if started {
-            if is_markdown(&full_text) {
-                if interrupted {
-                    let display_text = format!("{}\n\n{}", full_text, red("[interrupted]"));
-                    render_markdown(&display_text);
+            if is_markdown(full_text) {
+                let display_text = if interrupted {
+                    format!("{}\n\n{}", full_text, red("[interrupted]"))
                 } else {
-                    render_markdown(&full_text);
-                }
+                    full_text.to_string()
+                };
+                render_markdown(&display_text);
             } else {
                 print!("{full_text}");
                 if !full_text.ends_with('\n') {
@@ -327,7 +290,6 @@ pub async fn process_ai_pipe_stream(
         if !started {
             spinner.finish_and_clear();
         }
-
         if started {
             let mut out = std::io::stdout().lock();
             if !full_text.ends_with('\n') {
@@ -335,18 +297,53 @@ pub async fn process_ai_pipe_stream(
             }
             let _ = out.flush();
         }
-
         if interrupted {
             eprintln!("{}", red("[interrupted]"));
         }
     }
+}
 
-    debug!(
-        full_text_length = full_text.len(),
-        interrupted = interrupted,
-        markdown_rendering = markdown_rendering,
-        "AI pipe stream processing completed"
-    );
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::provider::types::ToolCallDelta;
 
-    Ok(full_text)
+    #[test]
+    fn shared_consumer_produces_agent_stream_result_shape() {
+        let mut state = StreamState {
+            full_text: String::new(),
+            started_text: false,
+            tools: Some(Vec::new()),
+            spinner: JarvisSpinner::new("test"),
+            last_spinner_update: Instant::now(),
+            markdown_rendering: false,
+            pipe_mode: false,
+            chunk_count: 1,
+            stream_start_time: Instant::now(),
+        };
+
+        consume_chunk(
+            &mut state,
+            ChatChunk {
+                text_delta: Some("answer".into()),
+                tool_call_deltas: vec![ToolCallDelta {
+                    index: 0,
+                    id: Some("call_1".into()),
+                    name: Some("read_file".into()),
+                    arguments: Some(r#"{"path":"a.txt"}"#.into()),
+                }],
+            },
+        );
+
+        let result = StreamResult {
+            full_text: state.full_text,
+            tool_calls: state.tools.unwrap(),
+            interrupted: false,
+        };
+        assert_eq!(result.full_text, "answer");
+        assert!(!result.interrupted);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].function_name, "read_file");
+        assert_eq!(result.tool_calls[0].arguments, r#"{"path":"a.txt"}"#);
+    }
 }

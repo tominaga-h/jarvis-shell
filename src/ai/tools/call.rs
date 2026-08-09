@@ -3,11 +3,9 @@
 //! ストリーミングで受信した Tool Call チャンクを蓄積し、
 //! 完成した Tool Call を検査・変換するユーティリティ。
 
-use async_openai::types::{
-    ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk, ChatCompletionToolType,
-    FunctionCall,
-};
 use tracing::{debug, warn};
+
+use crate::ai::provider::types::{ToolCall, ToolCallDelta};
 
 /// Tool Call のストリーミングチャンクを蓄積するための構造体
 #[derive(Debug, Default, Clone)]
@@ -17,30 +15,24 @@ pub struct ToolCallAccumulator {
     pub arguments: String,
 }
 
-/// ストリーミングで受信した Tool Call チャンクを蓄積する
-pub fn accumulate_tool_call(
+/// 中立型ストリームチャンクを蓄積する。
+pub fn accumulate_tool_call_delta(
     accumulators: &mut Vec<ToolCallAccumulator>,
-    chunk: &ChatCompletionMessageToolCallChunk,
+    chunk: &ToolCallDelta,
 ) {
     let idx = chunk.index as usize;
-
-    // 必要に応じてアキュムレータを拡張
     while accumulators.len() <= idx {
         accumulators.push(ToolCallAccumulator::default());
     }
-
     let acc = &mut accumulators[idx];
-
-    if let Some(ref id) = chunk.id {
+    if let Some(id) = &chunk.id {
         acc.id = id.clone();
     }
-    if let Some(ref func) = chunk.function {
-        if let Some(ref name) = func.name {
-            acc.function_name = name.clone();
-        }
-        if let Some(ref args) = func.arguments {
-            acc.arguments.push_str(args);
-        }
+    if let Some(name) = &chunk.name {
+        acc.function_name = name.clone();
+    }
+    if let Some(arguments) = &chunk.arguments {
+        acc.arguments.push_str(arguments);
     }
 }
 
@@ -89,18 +81,13 @@ pub fn extract_non_shell_tools(tool_calls: &[ToolCallAccumulator]) -> Vec<&ToolC
 }
 
 /// ToolCallAccumulator から ChatCompletionMessageToolCall を構築する（会話履歴に追加用）
-pub fn build_assistant_tool_calls(
-    accumulators: &[ToolCallAccumulator],
-) -> Vec<ChatCompletionMessageToolCall> {
+pub fn build_assistant_tool_calls(accumulators: &[ToolCallAccumulator]) -> Vec<ToolCall> {
     accumulators
         .iter()
-        .map(|tc| ChatCompletionMessageToolCall {
+        .map(|tc| ToolCall {
             id: tc.id.clone(),
-            r#type: ChatCompletionToolType::Function,
-            function: FunctionCall {
-                name: tc.function_name.clone(),
-                arguments: tc.arguments.clone(),
-            },
+            name: tc.function_name.clone(),
+            arguments: tc.arguments.clone(),
         })
         .collect()
 }
@@ -170,8 +157,8 @@ mod tests {
         let result = build_assistant_tool_calls(&accumulators);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "call_123");
-        assert_eq!(result[0].function.name, "read_file");
-        assert_eq!(result[0].function.arguments, r#"{"path": "test.txt"}"#);
+        assert_eq!(result[0].name, "read_file");
+        assert_eq!(result[0].arguments, r#"{"path": "test.txt"}"#);
     }
 
     #[test]

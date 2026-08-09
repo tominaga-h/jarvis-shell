@@ -1,7 +1,7 @@
 use chrono::Local;
 use rand::Rng;
 
-use super::color::{red, yellow};
+use super::color::{cyan, red, yellow};
 use super::jarvis::jarvis_talk;
 
 /// 時間帯に応じた挨拶を返す。
@@ -21,7 +21,9 @@ fn time_greeting() -> &'static str {
 ///
 /// `offline_systems` にオフラインのサブシステム名を渡すと、
 /// "All systems are operational." の代わりに状態を報告する。
-pub fn print_welcome(offline_systems: &[&str]) {
+/// `ai_info` に `(provider, model)` を渡すと、バージョン行の下に
+/// 使用中の AI プロバイダ/モデルを表示する。
+pub fn print_welcome(offline_systems: &[&str], ai_info: Option<(&str, &str)>) {
     let version = env!("CARGO_PKG_VERSION");
     let greeting = time_greeting();
 
@@ -44,6 +46,12 @@ pub fn print_welcome(offline_systems: &[&str]) {
     }
     println!("{separator}");
     println!();
+
+    if let Some((provider, model)) = ai_info {
+        println!("provider: {}", cyan(provider));
+        println!("model: {}", cyan(model));
+        println!();
+    }
 
     if offline_systems.is_empty() {
         jarvis_talk(&format!("{greeting}, sir. All systems are operational."));
@@ -89,5 +97,16 @@ mod tests {
             g == "Good morning" || g == "Good afternoon" || g == "Good evening",
             "unexpected greeting: {g}"
         );
+    }
+
+    #[test]
+    fn print_welcome_without_ai_info_does_not_panic() {
+        print_welcome(&[], None);
+        print_welcome(&["AI module offline"], None);
+    }
+
+    #[test]
+    fn print_welcome_with_ai_info_does_not_panic() {
+        print_welcome(&[], Some(("anthropic", "claude-sonnet-5")));
     }
 }

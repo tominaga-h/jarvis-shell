@@ -1,6 +1,6 @@
 //! AI モジュールの公開型定義
 
-use async_openai::types::ChatCompletionRequestMessage;
+use super::provider::types::ChatMessage;
 
 /// AI の判定結果
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ pub enum ConversationOrigin {
 
 /// 会話の状態を保持する構造体。会話コンテキストの継続に使用。
 pub struct ConversationState {
-    pub(crate) messages: Vec<ChatCompletionRequestMessage>,
+    pub(crate) messages: Vec<ChatMessage>,
     /// この会話がどこで開始されたか
     pub origin: ConversationOrigin,
 }

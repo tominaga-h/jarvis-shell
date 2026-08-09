@@ -93,7 +93,7 @@ AIを統合しながらも、Rustの特性を活かし、インフラツール�
 
 ### 前提条件
 
-- **OpenAI API キー**
+- **選択したプロバイダの API キー**: `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、または `OPENCODE_API_KEY`
 - **NerdFont** (プロンプトのアイコン表示に推奨)
 
 ### Homebrew でインストール (macOS)
@@ -142,10 +142,12 @@ update --check --local            # ローカルバイナリのバージョン�
 
 ## ⚙️ セットアップと設定
 
-OpenAI API キーを環境変数に設定してください：
+選択したプロバイダの API キーを環境変数に設定してください：
 
 ```bash
 export OPENAI_API_KEY="sk-..."
+# Anthropic の場合: export ANTHROPIC_API_KEY="sk-ant-..."
+# OpenCode Zen/Go の場合: export OPENCODE_API_KEY="..."
 ```
 
 > ※ `~/.config/jarvish/config.toml` の `[export]` セクションに記述することで自動設定も可能です。
@@ -156,7 +158,11 @@ export OPENAI_API_KEY="sk-..."
 
 ```toml
 [ai]
+provider = "openai"           # "openai" / "anthropic" / "opencode-zen" / "opencode-go"
 model = "gpt-4o"              # 使用する AI モデル
+max_tokens = 8192              # Anthropic の省略時は 16384
+base_url = "https://..."      # API エンドポイントの任意上書き
+api_key_env = "MY_API_KEY"    # API キー環境変数名の任意上書き
 max_rounds = 10               # エージェントの自律ループ最大回数
 markdown_rendering = true     # AIの回答をMarkdownで綺麗に表示
 ai_pipe_max_chars = 50000     # AIパイプへの入力文字数上限（超過時は安全にFail-fast）
@@ -191,6 +197,18 @@ commands = [                      # シェル起動時に順次実行するコ�
     "export JAVA_HOME=/usr/lib/jvm/default",
 ]
 ```
+
+#### AI プロバイダ設定
+
+| 項目 | 説明 | デフォルト |
+| :--- | :--- | :--- |
+| `provider` | `openai`、`anthropic`、`opencode-zen`、`opencode-go` | `"openai"` |
+| `model` | プロバイダ固有のモデル識別子 | `"gpt-4o"` |
+| `max_tokens` | 最大出力トークン数。省略時はプロバイダごとの既定値 | OpenAI/OpenCode: `8192`、Anthropic: `16384` |
+| `base_url` | API エンドポイントの任意上書き（プロキシ・テスト用） | プロバイダごとの URL |
+| `api_key_env` | API キーを格納する環境変数名の任意上書き | プロバイダごとの環境変数 |
+
+デフォルトでは OpenAI は `OPENAI_API_KEY`、Anthropic は `ANTHROPIC_API_KEY`、OpenCode Zen/Go は `OPENCODE_API_KEY` を使用します。`api_key_env` で変更可能です。`source ~/.config/jarvish/config.toml` は、プロバイダ、モデル、エンドポイント、API キー環境変数の設定が変わった場合に AI クライアントを再構築します。
 
 > **ヒント**: 設定を変更した後は、`source` コマンドで再起動せずに適用できます。
 >
@@ -341,7 +359,7 @@ graph TB
     A --> B["Execution Engine"]
     B --> B1["ビルトインコマンド (cd, exit, alias...)"]
     B --> B2["外部コマンド (PTY + I/O キャプチャ)"]
-    B --> D["AI Brain (OpenAI API / Tools)"]
+    B --> D["AI Brain (OpenAI / Anthropic / OpenCode / Tools)"]
     B2 --> C["Black Box"]
     D --> C
     C --> C1[("history.db (SQLite)")]
