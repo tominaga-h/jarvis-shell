@@ -26,15 +26,15 @@ pub struct JarvishConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AiConfig {
-    /// 使用する AI プロバイダ（`openai` / `anthropic` / `opencode-zen` / `opencode-go`）
+    /// 使用する AI プロバイダ。`openai`（既定）、`anthropic`、`opencode-zen`、`opencode-go`。
     pub provider: String,
     /// 使用する AI モデル名
     pub model: String,
-    /// 生成する最大トークン数。未指定時はプロバイダごとの既定値を使用する。
+    /// 生成する最大トークン数。`None` の場合は OpenAI/OpenCode が 8192、Anthropic が 16384。
     pub max_tokens: Option<u32>,
-    /// API エンドポイントの上書き（主にテスト・互換 API 用）
+    /// API エンドポイントの上書き。`None` の場合はプロバイダ固有の URL（例: OpenCode Zen）。
     pub base_url: Option<String>,
-    /// API キーを読む環境変数名の上書き
+    /// API キーを読む環境変数名の上書き。`None` の場合はプロバイダ固有の変数を使用する。
     pub api_key_env: Option<String>,
     /// エージェントループの最大ラウンド数
     pub max_rounds: usize,

@@ -93,7 +93,7 @@ AIを統合しながらも、Rustの特性を活かし、インフラツール�
 
 ### 前提条件
 
-- **OpenAI API キー**
+- **選択したプロバイダの API キー**: `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、または `OPENCODE_API_KEY`
 - **NerdFont** (プロンプトのアイコン表示に推奨)
 
 ### Homebrew でインストール (macOS)
@@ -197,6 +197,18 @@ commands = [                      # シェル起動時に順次実行するコ�
     "export JAVA_HOME=/usr/lib/jvm/default",
 ]
 ```
+
+#### AI プロバイダ設定
+
+| 項目 | 説明 | デフォルト |
+| :--- | :--- | :--- |
+| `provider` | `openai`、`anthropic`、`opencode-zen`、`opencode-go` | `"openai"` |
+| `model` | プロバイダ固有のモデル識別子 | `"gpt-4o"` |
+| `max_tokens` | 最大出力トークン数。省略時はプロバイダごとの既定値 | OpenAI/OpenCode: `8192`、Anthropic: `16384` |
+| `base_url` | API エンドポイントの任意上書き（プロキシ・テスト用） | プロバイダごとの URL |
+| `api_key_env` | API キーを格納する環境変数名の任意上書き | プロバイダごとの環境変数 |
+
+デフォルトでは OpenAI は `OPENAI_API_KEY`、Anthropic は `ANTHROPIC_API_KEY`、OpenCode Zen/Go は `OPENCODE_API_KEY` を使用します。`api_key_env` で変更可能です。`source ~/.config/jarvish/config.toml` は、プロバイダ、モデル、エンドポイント、API キー環境変数の設定が変わった場合に AI クライアントを再構築します。
 
 > **ヒント**: 設定を変更した後は、`source` コマンドで再起動せずに適用できます。
 >

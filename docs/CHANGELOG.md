@@ -3,6 +3,16 @@
 このプロジェクトに対するすべての注目すべき変更を記録します。
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に基づいています。
 
+## [v2.0.0] - 2026-08-09
+
+### Added
+
+- OpenAI、Anthropic、OpenCode Zen/Go のマルチプロバイダ AI 対応
+- `[ai]` の `provider`、`max_tokens`、`base_url`、`api_key_env` 設定
+- `ANTHROPIC_API_KEY` / `OPENCODE_API_KEY` 環境変数
+- AI ストリーミング中の経過秒数・バイト数・チャンク数表示
+- `source` によるプロバイダ設定変更時の AI クライアント再構築
+
 ## [v1.15.6](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.15.6) - 2026-08-08
 
 ### Changed

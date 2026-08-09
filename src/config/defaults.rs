@@ -14,10 +14,10 @@ impl super::JarvishConfig {
 
 [ai]
 # provider = "openai"       # "openai", "anthropic", "opencode-zen", or "opencode-go"
-# model = "gpt-4o"
-# max_tokens = 8192          # Anthropic defaults to 16384 when omitted
-# base_url = "https://..."   # Optional provider endpoint override
-# api_key_env = "MY_API_KEY" # Optional API key environment variable override
+# model = "gpt-4o"          # Provider-specific model identifier
+# max_tokens = 8192          # Provider-aware default: 16384 for Anthropic
+# base_url = "https://..."   # Provider-aware default; optional endpoint override
+# api_key_env = "MY_API_KEY" # Provider-aware default; optional key env override
 # max_rounds = 10
 # markdown_rendering = true  # false にすると Markdown レンダリングを無効化
 # ai_pipe_max_chars = 50000

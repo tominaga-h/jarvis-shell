@@ -94,7 +94,7 @@ Despite deep AI integration, Jarvish leverages Rust's strengths to deliver outst
 
 ### Prerequisites
 
-- **OpenAI API Key**
+- **API key for the selected provider**: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENCODE_API_KEY`
 - **NerdFont** (recommended for prompt icons)
 
 ### Install via Homebrew (macOS)
@@ -198,6 +198,18 @@ commands = [                      # Commands to run on shell startup (skipped wi
     "export JAVA_HOME=/usr/lib/jvm/default",
 ]
 ```
+
+#### AI provider settings
+
+| Field | Description | Default |
+| :--- | :--- | :--- |
+| `provider` | `openai`, `anthropic`, `opencode-zen`, or `opencode-go` | `"openai"` |
+| `model` | Provider-specific model identifier | `"gpt-4o"` |
+| `max_tokens` | Maximum response tokens; omitted values use provider-aware defaults | OpenAI/OpenCode: `8192`, Anthropic: `16384` |
+| `base_url` | Optional API endpoint override, useful for proxies and tests | Provider-specific endpoint |
+| `api_key_env` | Optional environment variable containing the provider API key | Provider-specific API key variable |
+
+OpenAI uses `OPENAI_API_KEY`, Anthropic uses `ANTHROPIC_API_KEY`, and OpenCode Zen/Go use `OPENCODE_API_KEY` unless `api_key_env` overrides the default. `source ~/.config/jarvish/config.toml` rebuilds the AI client when provider, model, endpoint, or key-environment configuration changes.
 
 > **Tip**: After changing settings, you can apply them without restarting using the `source` command:
 >
