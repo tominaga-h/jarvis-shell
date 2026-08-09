@@ -131,14 +131,20 @@ mod tests {
     fn zen_resolves_expected_base_url_and_user_agent() {
         let backend = OpenCodeBackend::zen("test-key").unwrap();
         assert_eq!(backend.base_url, ZEN_BASE_URL);
-        assert_eq!(backend.user_agent.as_deref(), Some("jarvish/1.15.6"));
+        assert_eq!(
+            backend.user_agent.as_deref(),
+            Some(format!("jarvish/{}", env!("CARGO_PKG_VERSION")).as_str())
+        );
     }
 
     #[test]
     fn go_resolves_expected_base_url_and_user_agent() {
         let backend = OpenCodeBackend::go("test-key").unwrap();
         assert_eq!(backend.base_url, GO_BASE_URL);
-        assert_eq!(backend.user_agent.as_deref(), Some("jarvish/1.15.6"));
+        assert_eq!(
+            backend.user_agent.as_deref(),
+            Some(format!("jarvish/{}", env!("CARGO_PKG_VERSION")).as_str())
+        );
     }
 
     #[test]
@@ -198,6 +204,9 @@ mod tests {
     fn composition_keeps_generic_backend_inside_opencode_backend() {
         let backend = OpenCodeBackend::zen("test-key").unwrap();
         assert_eq!(backend.inner.base_url, ZEN_BASE_URL);
-        assert_eq!(backend.inner.user_agent.as_deref(), Some("jarvish/1.15.6"));
+        assert_eq!(
+            backend.inner.user_agent.as_deref(),
+            Some(format!("jarvish/{}", env!("CARGO_PKG_VERSION")).as_str())
+        );
     }
 }

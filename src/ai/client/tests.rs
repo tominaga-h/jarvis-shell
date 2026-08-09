@@ -182,7 +182,10 @@ fn new_selects_opencode_zen_defaults() {
         panic!("expected OpenCode backend");
     };
     assert_eq!(backend.base_url, "https://opencode.ai/zen/v1");
-    assert_eq!(backend.user_agent.as_deref(), Some("jarvish/1.15.6"));
+    assert_eq!(
+        backend.user_agent.as_deref(),
+        Some(format!("jarvish/{}", env!("CARGO_PKG_VERSION")).as_str())
+    );
     assert_eq!(ai.max_tokens, 8192);
 }
 
