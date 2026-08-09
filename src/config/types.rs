@@ -77,6 +77,27 @@ pub fn default_max_tokens_for(provider: &str) -> u32 {
     }
 }
 
+/// プロバイダごとのデフォルト API キー環境変数名を返す。
+pub fn default_api_key_env_for(provider: &str) -> &'static str {
+    match provider {
+        "openai" => "OPENAI_API_KEY",
+        "anthropic" => "ANTHROPIC_API_KEY",
+        "opencode-zen" | "opencode-go" => "OPENCODE_API_KEY",
+        _ => "OPENAI_API_KEY",
+    }
+}
+
+/// プロバイダごとのデフォルト base URL を返す。
+pub fn default_base_url_for(provider: &str) -> &'static str {
+    match provider {
+        "openai" => "",
+        "anthropic" => "https://api.anthropic.com",
+        "opencode-zen" => "https://opencode.ai/zen/v1",
+        "opencode-go" => "https://opencode.ai/zen/go/v1",
+        _ => "",
+    }
+}
+
 /// プロンプト表示の設定
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]

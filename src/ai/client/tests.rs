@@ -83,6 +83,60 @@ fn update_config_does_not_rebuild_client() {
 
 #[test]
 #[serial]
+fn needs_rebuild_returns_true_when_model_changes() {
+    let _guard = ApiKeyGuard(std::env::var("OPENAI_API_KEY").ok());
+    std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+    let ai = JarvisAI::new(&AiConfig::default()).unwrap();
+    let config = AiConfig {
+        model: "gpt-5".to_string(),
+        ..AiConfig::default()
+    };
+
+    assert!(ai.needs_rebuild(&config));
+}
+
+#[test]
+#[serial]
+fn needs_rebuild_returns_true_when_provider_changes() {
+    let _guard = ApiKeyGuard(std::env::var("OPENAI_API_KEY").ok());
+    std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+    let ai = JarvisAI::new(&AiConfig::default()).unwrap();
+    let config = AiConfig {
+        provider: "anthropic".to_string(),
+        ..AiConfig::default()
+    };
+
+    assert!(ai.needs_rebuild(&config));
+}
+
+#[test]
+#[serial]
+fn needs_rebuild_returns_false_when_only_max_rounds_changes() {
+    let _guard = ApiKeyGuard(std::env::var("OPENAI_API_KEY").ok());
+    std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+    let ai = JarvisAI::new(&AiConfig::default()).unwrap();
+    let config = AiConfig {
+        max_rounds: 20,
+        ..AiConfig::default()
+    };
+
+    assert!(!ai.needs_rebuild(&config));
+}
+
+#[test]
+#[serial]
+fn new_succeeds_after_api_key_is_added() {
+    let _guard = ApiKeyGuard(std::env::var("OPENAI_API_KEY").ok());
+    std::env::remove_var("OPENAI_API_KEY");
+    let config = AiConfig::default();
+    assert!(JarvisAI::new(&config).is_err());
+
+    std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+    assert!(JarvisAI::new(&config).is_ok());
+}
+
+#[test]
+#[serial]
 fn new_selects_anthropic_backend_and_default_max_tokens() {
     let _guard = AnthropicApiKeyGuard(std::env::var("ANTHROPIC_API_KEY").ok());
     std::env::set_var("ANTHROPIC_API_KEY", "test-anthropic-key");

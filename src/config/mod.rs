@@ -48,6 +48,6 @@ mod types;
 mod tests;
 
 pub use types::{
-    default_max_tokens_for, AiConfig, CompletionConfig, ExternalSetting, JarvishConfig,
-    PromptConfig, StartupConfig,
+    default_api_key_env_for, default_base_url_for, default_max_tokens_for, AiConfig,
+    CompletionConfig, ExternalSetting, JarvishConfig, PromptConfig, StartupConfig,
 };

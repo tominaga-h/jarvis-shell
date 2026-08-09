@@ -5,7 +5,9 @@ use crate::ai::provider::openai_compat::OpenAiCompatBackend;
 use crate::ai::provider::opencode::OpenCodeBackend;
 use crate::ai::provider::types::ChatMessage;
 use crate::ai::provider::AiBackend;
-use crate::config::{default_max_tokens_for, AiConfig};
+use crate::config::{
+    default_api_key_env_for, default_base_url_for, default_max_tokens_for, AiConfig,
+};
 
 /// J.A.R.V.I.S. AI クライアント
 pub struct JarvisAI {
@@ -24,6 +26,12 @@ pub struct JarvisAI {
     pub(crate) temperature: f32,
     /// プロバイダへ送信する最大トークン数
     pub(crate) max_tokens: u32,
+    /// 現在のバックエンド構成に対応するプロバイダ
+    pub(crate) provider: String,
+    /// 現在のバックエンドの effective base URL
+    pub(crate) base_url: String,
+    /// 現在のバックエンドが使用する API キー環境変数
+    pub(crate) api_key_env: String,
 }
 
 /// テキストのみのアシスタントメッセージを構築する。
@@ -38,11 +46,7 @@ impl JarvisAI {
     /// 設定されたプロバイダの API クライアントを初期化する。
     pub fn new(ai_config: &AiConfig) -> Result<Self> {
         let provider = ai_config.provider.as_str();
-        let default_key_env = match provider {
-            "anthropic" => "ANTHROPIC_API_KEY",
-            "opencode-zen" | "opencode-go" => "OPENCODE_API_KEY",
-            _ => "OPENAI_API_KEY",
-        };
+        let default_key_env = default_api_key_env_for(provider);
         let key_env = ai_config.api_key_env.as_deref().unwrap_or(default_key_env);
         let api_key = std::env::var(key_env)
             .with_context(|| format!("{key_env} is not set. AI features are disabled."))?;
@@ -61,7 +65,7 @@ impl JarvisAI {
                 let base_url = ai_config
                     .base_url
                     .as_deref()
-                    .unwrap_or("https://api.anthropic.com");
+                    .unwrap_or(default_base_url_for(provider));
                 AiBackend::Anthropic(AnthropicBackend::new(&api_key, base_url)?)
             }
             "openai" => AiBackend::OpenAiCompat(OpenAiCompatBackend::new(
@@ -70,11 +74,7 @@ impl JarvisAI {
                 None,
             )?),
             "opencode-zen" | "opencode-go" => {
-                let default_base_url = match provider {
-                    "opencode-zen" => "https://opencode.ai/zen/v1",
-                    "opencode-go" => "https://opencode.ai/zen/go/v1",
-                    _ => unreachable!(),
-                };
+                let default_base_url = default_base_url_for(provider);
                 let base_url = ai_config
                     .base_url
                     .as_deref()
@@ -103,6 +103,30 @@ impl JarvisAI {
             max_tokens: ai_config
                 .max_tokens
                 .unwrap_or_else(|| default_max_tokens_for(provider)),
+            provider: provider.to_string(),
+            base_url: ai_config
+                .base_url
+                .as_deref()
+                .unwrap_or(default_base_url_for(provider))
+                .to_string(),
+            api_key_env: key_env.to_string(),
         })
+    }
+
+    /// 現在のクライアントが新しい設定と互換かを判定する。
+    /// 互換な軽微な設定変更は `update_config()` で反映できる。
+    pub fn needs_rebuild(&self, new_config: &AiConfig) -> bool {
+        self.model != new_config.model
+            || self.provider != new_config.provider
+            || self.base_url
+                != new_config
+                    .base_url
+                    .as_deref()
+                    .unwrap_or(default_base_url_for(&new_config.provider))
+            || self.api_key_env
+                != new_config
+                    .api_key_env
+                    .as_deref()
+                    .unwrap_or(default_api_key_env_for(&new_config.provider))
     }
 }
