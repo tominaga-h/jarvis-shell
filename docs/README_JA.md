@@ -1,7 +1,7 @@
 # 🤵 Jarvish — The AI-Native Shell
 
 [![status](https://img.shields.io/github/actions/workflow/status/tominaga-h/jarvis-shell/ci.yml)](https://github.com/tominaga-h/jarvis-shell/actions)
-[![version](https://img.shields.io/badge/version-1.15.6-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v1.15.6)
+[![version](https://img.shields.io/badge/version-2.0.0-blue)](https://github.com/tominaga-h/jarvis-shell/releases/tag/v2.0.0)
 ![jarvish-demo](../images/demo.gif)
 
 > 🌐 [English README](../README.md)
